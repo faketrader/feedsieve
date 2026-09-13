@@ -51,6 +51,9 @@ jobs:
       - name: Keyword pack artifacts (strip-signature compare + built-in key verify)
         run: pnpm keyword-packs:check
 
+      - name: Build community API and generate route types
+        run: pnpm --filter @feedsieve/community-api build
+
       - name: Typecheck
         run: pnpm typecheck
 

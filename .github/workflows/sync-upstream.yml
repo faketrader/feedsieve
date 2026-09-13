@@ -56,6 +56,10 @@ jobs:
 
           # main 只沿正式 Release 快进，避免覆盖 fork 自身或未经发布的上游提交。
           git merge-base --is-ancestor origin/main "$release_commit"
+          if ! git diff --quiet origin/main "$release_commit" -- .github/workflows && [ "$SYNC_TOKEN" = "$GH_TOKEN" ]; then
+            echo "::error::This upstream release changes .github/workflows. Configure the UPSTREAM_SYNC_TOKEN secret with Contents, Workflows, and Actions write access."
+            exit 1
+          fi
           git push origin "$release_commit":refs/heads/main
 
           git checkout --detach origin/firefox

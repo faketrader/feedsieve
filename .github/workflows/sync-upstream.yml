@@ -2,7 +2,8 @@ name: sync-upstream
 
 on:
   schedule:
-    - cron: '23 2 * * *'
+    # 每周一 02:23 UTC（新加坡/北京时间 10:23）检查上游。
+    - cron: '23 2 * * 1'
   workflow_dispatch:
 
 permissions:

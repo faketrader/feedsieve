@@ -2,7 +2,7 @@
 
 - `main`：上游 `realchendahuang/feedsieve:main` 的快进镜像。
 - `firefox`：默认分支，承载 Firefox 适配、维护文档和工作流。
-- 每天 02:23 UTC（北京时间 10:23）运行 `sync-upstream`，也可在 Actions 手动运行。
+- 每周一 02:23 UTC（新加坡/北京时间 10:23）运行 `sync-upstream`，也可在 Actions 手动运行。
 - 有更新时快进 `main`，创建或复用 `main → firefox` PR，显式调用 `verify` 检查合并结果。主分支发生分叉或合并冲突时工作流失败，保留现有分支供维护者处理。
 - 定时验证在独立工作流中执行；在对应运行摘要核对两端 commit，与 PR 最新状态一致且检查通过后，使用 **Create a merge commit** 合并。保留 `main` 分支。
 - 日常功能 PR 以 `firefox` 为目标。Firefox 发布从 `firefox` 构建，发布记录注明上游 commit。

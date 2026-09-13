@@ -80,8 +80,8 @@ jobs:
 
           if git show-ref --verify --quiet "refs/tags/${firefox_tag}"; then
             tagged_commit=$(git rev-parse "refs/tags/${firefox_tag}^{commit}")
-            if [ "$tagged_commit" != "$(git rev-parse HEAD)" ]; then
-              echo "::error::${firefox_tag} already points to ${tagged_commit}; refusing to rewrite a release tag."
+            if ! git merge-base --is-ancestor "$release_commit" "$tagged_commit"; then
+              echo "::error::${firefox_tag} does not contain upstream ${release_tag}; refusing to rewrite a release tag."
               exit 1
             fi
             echo "release_needed=false" >> "$GITHUB_OUTPUT"

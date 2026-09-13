@@ -160,9 +160,11 @@ jobs:
             git push --no-verify origin "refs/tags/${FIREFOX_TAG}"
           fi
 
-          # GITHUB_TOKEN 推送的标签不会触发 push 工作流，因此显式派发。
-          gh workflow run release-firefox.yml --repo "$GITHUB_REPOSITORY" --ref "$FIREFOX_TAG"
-          echo "Synchronized upstream ${RELEASE_TAG}, tagged ${FIREFOX_TAG}, and dispatched the Firefox release." >> "$GITHUB_STEP_SUMMARY"
+          # GITHUB_TOKEN 推送的标签不会触发 push 工作流；细粒度令牌推送则会自动触发。
+          if [ "$SYNC_TOKEN" = "$GH_TOKEN" ]; then
+            gh workflow run release-firefox.yml --repo "$GITHUB_REPOSITORY" --ref "$FIREFOX_TAG"
+          fi
+          echo "Synchronized upstream ${RELEASE_TAG}, tagged ${FIREFOX_TAG}, and started the Firefox release." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Retry missing GitHub Release
         if: steps.prepare.outputs.release_needed == 'false' && steps.prepare.outputs.dispatch_needed == 'true'

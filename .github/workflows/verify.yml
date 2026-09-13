@@ -22,7 +22,7 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Merge upstream for scheduled integration verification
@@ -34,10 +34,10 @@ jobs:
           echo "Firefox: $(git rev-parse HEAD); upstream: $(git rev-parse origin/main)" >> "$GITHUB_STEP_SUMMARY"
           git merge --no-edit origin/main
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         # 省略 version：action 默认读 package.json 的 packageManager 字段，避免两处漂移。
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm

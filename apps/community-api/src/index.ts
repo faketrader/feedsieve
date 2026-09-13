@@ -14,6 +14,7 @@ import {
 import { verifyAccess } from './lib/access';
 import { isAdminHost } from './lib/hosts';
 import { hashInstallationId } from './lib/hash';
+import { publicErrorCode } from './lib/public-error';
 import {
   decideApplication,
   listApplications,
@@ -55,7 +56,7 @@ import {
   readAgentKeywordDetectorConfig,
   writeAgentKeywordDetectorConfig,
 } from './agent-admin';
-import { LEADERBOARD, getLeaderboard, markLeaderboardDirty } from './leaderboard';
+import { LEADERBOARD, DIRTY_KEY as LEADERBOARD_DIRTY_KEY, getLeaderboard, toPublicHunterRow } from './leaderboard';
 import { runScheduledCron } from './scheduled';
 import { bindEmail, getProfile, updateProfile, verifyEmail } from './player';
 import { MAINTAINER_CATEGORIES } from './maintainer-blocklist';
@@ -73,8 +74,9 @@ import {
   getLatestSnapshotFile,
   getLatestSnapshotVersion,
   getSnapshotFile,
-  markSnapshotDirty,
   PUBLIC_BLOCKLIST_PACK,
+  SNAPSHOT_DIRTY_KEY,
+  SNAPSHOT_LATEST_KEY,
   SNAPSHOT_PACK,
 } from './snapshot';
 
@@ -82,6 +84,31 @@ function staticAssetRequest(request: Request): Request {
   // assets.not_found_handling = single-page-application resolves TanStack routes
   // to the shell while keeping the incoming URL intact.
   return request;
+}
+
+/**
+ * 上报三端点（reports / rescues / labels/retract）的统一收尾：
+ * 置快照脏 + 置榜单脏 + 读当前有效版本，三次串行 meta 往返并成一次 batch。
+ * 版本指针缺失（首次发布前）回退 getLatestSnapshotVersion 的全量兜底。
+ */
+async function markDirtyAndReadSnapshotVersion(env: Cloudflare.Env): Promise<string | null> {
+  const [snapshotDirty, leaderboardDirty, pointer] = await env.DB.batch<{ value: string }>([
+    env.DB.prepare(
+      `INSERT INTO meta (key, value) VALUES (?1, ?2)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).bind(SNAPSHOT_DIRTY_KEY, String(Date.now())),
+    env.DB.prepare(
+      `INSERT INTO meta (key, value) VALUES (?1, ?2)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    ).bind(LEADERBOARD_DIRTY_KEY, String(Math.floor(Date.now() / 1000))),
+    env.DB.prepare('SELECT value FROM meta WHERE key = ?1').bind(SNAPSHOT_LATEST_KEY),
+  ]);
+  if (!snapshotDirty || !leaderboardDirty || !pointer) {
+    // batch 结果缺项等于写未生效：走 getLatestSnapshotVersion 的兜底读路径
+    return getLatestSnapshotVersion(env);
+  }
+  const version = pointer.results?.[0]?.value ?? null;
+  return version ?? getLatestSnapshotVersion(env);
 }
 
 type AdminContext = Context<{
@@ -98,7 +125,7 @@ async function republishKeywords(
     const published = await publishAdminKeywords(c.env, c.get('maintainerEmail'));
     return c.json({ ...extra, version: published.version });
   } catch (error) {
-    const code = error instanceof Error ? error.message : 'publish_failed';
+    const code = publicErrorCode(error, 'publish_failed');
     // 移除全部分类时无法产出空词库：变更已生效，线上保持上一个版本。
     if (code === 'no_active_packs') return c.json({ ...extra, version: null });
     return c.json({ error: code }, 500);
@@ -111,8 +138,9 @@ export function createApp() {
     Variables: { maintainerEmail: string; agentIdentity: string };
   }>();
 
-  // 扩展 content script 会跨域 POST，必须放行预检
-  app.use('*', cors());
+  // 扩展 content script 会跨域 POST /v1/*，必须放行预检；管理（/api/admin，
+  // 同源 ASSETS 服务）与 Agent（脚本直连）家族不开跨域。
+  app.use('/v1/*', cors());
 
   // 管理 / Agent 接口的身份头（Cf-Access-Jwt-Assertion / X-Agent-Key）不属于标准
   // Authorization，Workers Cache 不会自动绕过——显式 no-store，防止管理/审计响应
@@ -134,13 +162,13 @@ export function createApp() {
   app.post('/v1/reports', async (c) => {
     const body = await c.req.json().catch(() => undefined);
     const result = await processReportBatch(c.env, body, c.req.header('cf-connecting-ip'));
+    c.header('Cache-Control', 'no-store');
     if (!result.ok) {
       return c.json({ error: result.error }, result.httpStatus);
     }
-    // 快照异步化：只落库并置脏，由 cron 每小时合并生成（当日一版守卫，见 snapshot.ts day-once）；
-    // 响应返回当前有效版本。
-    await markSnapshotDirty(c.env);
-    await markLeaderboardDirty(c.env);
+    // 快照异步化：只落库并置脏，由 cron 每小时合并生成（当日一版守卫，见 snapshot.ts
+    // day-once）；响应返回当前有效版本。置脏+读版本并成一次 batch（见 markDirtyAndReadSnapshotVersion）。
+    const snapshotVersion = await markDirtyAndReadSnapshotVersion(c.env);
     return c.json({
       policy: {
         formula: 'block_votes - false_positive_votes',
@@ -148,7 +176,7 @@ export function createApp() {
         daily_report_limit: POLICY.dailyReportLimit,
       },
       results: result.results,
-      snapshot_version: await getLatestSnapshotVersion(c.env),
+      snapshot_version: snapshotVersion,
     });
   });
 
@@ -164,10 +192,19 @@ export function createApp() {
     // 副作用照发（浏览器只是不给读响应），不能只挡 POST。
     const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
     if (WRITE_METHODS.has(c.req.method)) {
-      const configured = c.env.ADMIN_HOST?.trim().toLowerCase();
+      // ADMIN_HOST 支持 CSV 多域名（迁移期旧新域并列，见 lib/hosts.ts），逐个比对。
+      const configuredHosts = (c.env.ADMIN_HOST ?? '')
+        .trim()
+        .toLowerCase()
+        .split(',')
+        .map((host) => host.trim())
+        .filter(Boolean);
       const origin = c.req.header('origin');
       if (origin) {
-        if (!configured || origin.toLowerCase() !== `https://${configured}`) {
+        if (
+          configuredHosts.length === 0 ||
+          !configuredHosts.some((host) => origin.toLowerCase() === `https://${host}`)
+        ) {
           return c.json({ error: 'cross_origin_admin_post' }, 403);
         }
       } else {
@@ -276,7 +313,7 @@ export function createApp() {
         201,
       );
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : 'publish_failed' }, 500);
+      return c.json({ error: publicErrorCode(error, 'publish_failed') }, 500);
     }
   });
   app.delete('/api/admin/accounts/:handle', async (c) => {
@@ -294,14 +331,14 @@ export function createApp() {
       const published = await publishAdminAccountDrafts(c.env, c.get('maintainerEmail'));
       return c.json({ changed: true, snapshot_version: published.snapshot_version });
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : 'publish_failed' }, 500);
+      return c.json({ error: publicErrorCode(error, 'publish_failed') }, 500);
     }
   });
   app.post('/api/admin/accounts/publish', async (c) => {
     try {
       return c.json(await publishAdminAccountDrafts(c.env, c.get('maintainerEmail')));
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : 'publish_failed' }, 400);
+      return c.json({ error: publicErrorCode(error, 'publish_failed') }, 400);
     }
   });
 
@@ -370,7 +407,7 @@ export function createApp() {
       }
       return c.json(result);
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : 'import_failed' }, 400);
+      return c.json({ error: publicErrorCode(error, 'import_failed') }, 400);
     }
   });
   app.post('/api/admin/keywords/packs', async (c) => {
@@ -415,7 +452,7 @@ export function createApp() {
     try {
       return c.json(await publishAdminKeywords(c.env, c.get('maintainerEmail')));
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : 'publish_failed' }, 400);
+      return c.json({ error: publicErrorCode(error, 'publish_failed') }, 400);
     }
   });
 
@@ -486,7 +523,7 @@ export function createApp() {
           : await rollbackAdminKeywordRelease(c.env, release.version, c.get('maintainerEmail')),
       );
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : 'rollback_failed' }, 400);
+      return c.json({ error: publicErrorCode(error, 'rollback_failed') }, 400);
     }
   });
 
@@ -560,7 +597,7 @@ export function createApp() {
     try {
       return c.json(await publishAdminAccountDrafts(c.env, `agent:${guard}`));
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : 'publish_failed' }, 400);
+      return c.json({ error: publicErrorCode(error, 'publish_failed') }, 400);
     }
   });
 
@@ -604,7 +641,7 @@ export function createApp() {
     try {
       return c.json(await publishAgentKeywords(c.env, `agent:${guard}`));
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : 'publish_failed' }, 400);
+      return c.json({ error: publicErrorCode(error, 'publish_failed') }, 400);
     }
   });
 
@@ -711,14 +748,13 @@ export function createApp() {
   app.post('/v1/rescues', async (c) => {
     const body = await c.req.json().catch(() => undefined);
     const result = await processRescueBatch(c.env, body);
+    c.header('Cache-Control', 'no-store');
     if (!result.ok) {
       return c.json({ error: result.error }, result.httpStatus);
     }
-    await markSnapshotDirty(c.env);
-    await markLeaderboardDirty(c.env);
     return c.json({
       results: result.results,
-      snapshot_version: await getLatestSnapshotVersion(c.env),
+      snapshot_version: await markDirtyAndReadSnapshotVersion(c.env),
     });
   });
 
@@ -740,14 +776,13 @@ export function createApp() {
   app.post('/v1/labels/retract', async (c) => {
     const body = await c.req.json().catch(() => undefined);
     const result = await processRetractionBatch(c.env, body);
+    c.header('Cache-Control', 'no-store');
     if (!result.ok) {
       return c.json({ error: result.error }, result.httpStatus);
     }
-    await markSnapshotDirty(c.env);
-    await markLeaderboardDirty(c.env);
     return c.json({
       results: result.results,
-      snapshot_version: await getLatestSnapshotVersion(c.env),
+      snapshot_version: await markDirtyAndReadSnapshotVersion(c.env),
     });
   });
 
@@ -765,7 +800,6 @@ export function createApp() {
     const scope = c.req.query('scope') === 'all' ? 'all' : 'week';
     const data = await getLeaderboard(c.env, scope);
     c.header('Cache-Control', 'public, max-age=0, s-maxage=60');
-    const trim = (row: Record<string, unknown>) => ({ ...row, id: String(row.id).slice(0, 12) });
     return c.json({
       season: data.season,
       updated_at: data.computed_at,
@@ -773,7 +807,7 @@ export function createApp() {
       total: data.rows.length,
       rows: data.rows
         .slice(0, LEADERBOARD.topSize)
-        .map((row, index) => trim({ ...row, rank: index + 1 })),
+        .map((row, index) => toPublicHunterRow({ ...row, rank: index + 1 })),
       me: null,
       last_season: data.last_season ?? null,
     });
@@ -810,7 +844,6 @@ export function createApp() {
     }
     c.header('Cache-Control', 'no-store');
     // 公开面只暴露加盐哈希前 12 位（me 匹配粒度），完整哈希不出网
-    const trim = (row: Record<string, unknown>) => ({ ...row, id: String(row.id).slice(0, 12) });
     return c.json({
       season: data.season,
       updated_at: data.computed_at,
@@ -819,8 +852,8 @@ export function createApp() {
       total: data.rows.length,
       rows: data.rows
         .slice(0, LEADERBOARD.topSize)
-        .map((row, index) => trim({ ...row, rank: index + 1 })),
-      me: me ? trim(me) : null,
+        .map((row, index) => toPublicHunterRow({ ...row, rank: index + 1 })),
+      me: me ? toPublicHunterRow(me) : null,
       last_season: data.last_season ?? null,
     });
   });
@@ -874,6 +907,7 @@ export function createApp() {
   // 加盐哈希；返回纯数字，无账号信息。
   app.post('/v1/contributions/stats', async (c) => {
     const body: unknown = await c.req.json().catch(() => undefined);
+    c.header('Cache-Control', 'no-store');
     const installationId =
       typeof body === 'object' && body !== null
         ? (body as Record<string, unknown>)['installation_id']
@@ -942,14 +976,17 @@ export function createApp() {
 }
 
 // 定时任务编排已抽到 src/scheduled.ts（供 server.ts 复用，见该文件头注释）。
-// 路由表与中间件链只构建一次；每请求重建纯属浪费 CPU（env 每次调用传入）。
-const app = createApp();
+// 生产入口是 server.ts（经 api.ts 引 createApp）；这里的默认导出仅供测试入口
+// api-entry.ts 与本地直跑使用——懒构建，避免 api.ts import 本模块时把整条
+// 路由树在同 isolate 内白建一遍。
+let app: ReturnType<typeof createApp> | null = null;
 
 // fetch 的 request 参数显式 any：ExportedHandler 的窄化泛型与 vitest 插件
 // （miniflare）的全局 Request 泛型互不相容，测试直接 import 本入口调 fetch 会
 // 在边界报结构性不匹配；a11y 上运行时行为不变（cloudflare-test 的 Request 兼容）。
 export default {
   fetch(request: unknown, env) {
+    app ??= createApp();
     return app.fetch(request as Request, env);
   },
   async scheduled(_controller, env) {

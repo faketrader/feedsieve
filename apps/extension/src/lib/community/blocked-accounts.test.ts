@@ -96,4 +96,19 @@ describe('blockedAccounts 记账', () => {
     await markBlocked('bob', '102', undefined, { tweetSnippet: '   ' });
     expect((await getBlockedAccounts())[1]).not.toHaveProperty('tweetSnippet');
   });
+
+  it('保留正向报告的规则、结构化信号与帖子 ID', async () => {
+    await markBlocked('alice', '101', {
+      category: 'adult_gray_traffic',
+      detectionSource: 'heuristic',
+      ruleId: 'contact-number-bait',
+      signalIds: ['contact-number-bait'],
+      evidencePostId: '1999999999999999999',
+    });
+    expect((await getBlockedAccounts())[0]).toMatchObject({
+      ruleId: 'contact-number-bait',
+      signalIds: ['contact-number-bait'],
+      evidencePostId: '1999999999999999999',
+    });
+  });
 });

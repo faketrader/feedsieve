@@ -10,6 +10,7 @@
  */
 
 import { listMaintainerEntries } from './maintainer-blocklist';
+import { publicErrorCode } from './lib/public-error';
 import {
   deactivateAdminAccountDraft,
   getAdminRelease,
@@ -283,7 +284,7 @@ export async function rollbackAgentRelease(
     const detail = await rollbackAdminKeywordRelease(env, release.version, actor);
     return { ok: true, kind: 'keywords', detail };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : 'rollback_failed' };
+    return { ok: false, error: publicErrorCode(error, 'rollback_failed') };
   }
 }
 

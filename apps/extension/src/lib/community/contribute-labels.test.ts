@@ -42,6 +42,12 @@ describe('本地黑白名单同步', () => {
         contentFingerprint: '0123456789abcdef',
         linkDomains: ['spam.example'],
         detectionSource: 'manual',
+        ruleId: 'weak-signal-combo',
+        signalIds: ['weak-signal-combo'],
+        evidencePostId: '1999999999999999999',
+        tweetSnippet: '看简介 13800138000',
+        displayName: '测试昵称',
+        bio: '加我',
       },
     ];
     storage.allowlist = [
@@ -84,6 +90,12 @@ describe('本地黑白名单同步', () => {
           content_fingerprint: '0123456789abcdef',
           link_domains: ['spam.example'],
           detection_source: 'manual',
+          rule_id: 'weak-signal-combo',
+          signal_ids: ['weak-signal-combo'],
+          evidence_post_id: '1999999999999999999',
+          tweet_text: '看简介 13800138000',
+          display_name: '测试昵称',
+          bio: '加我',
         },
       ],
     });
@@ -199,9 +211,9 @@ describe('本地黑白名单同步', () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0]![0])).toContain('/v1/reports');
-    const reportBody = JSON.parse(
-      (fetchMock.mock.calls[0]![1] as RequestInit).body as string,
-    ) as { reports: { handle: string; detection_source: string }[] };
+    const reportBody = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string) as {
+      reports: { handle: string; detection_source: string }[];
+    };
     expect(reportBody.reports[0]).toMatchObject({
       handle: 'manual_confirm',
       detection_source: 'manual',

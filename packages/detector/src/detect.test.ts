@@ -386,7 +386,6 @@ describe('heuristic: templated-text', () => {
       expect(detect({ handle: 'student', text: '老师批评了一下我的方案，改' })).toBeNull();
     });
   });
-
 });
 
 describe('heuristics are individually explainable', () => {
@@ -406,7 +405,7 @@ describe('heuristic: weak-signal-combo', () => {
     expect(combo({ handle: GARBLED, text: '今晚的茶有点涩' })).toBe('weak-signal-combo');
     expect(combo({ handle: GARBLED, text: '🍑🍑🍑🍑🍑' })).toBe('weak-signal-combo');
     expect(combo({ handle: GARBLED, text: '哈哈哈哈哈哈哈哈' })).toBe('weak-signal-combo');
-    expect(combo({ handle: GARBLED, displayName: 'Rose🌸🌸', text: 'hi' })).toBe('weak-signal-combo');
+    expect(combo({ handle: GARBLED, displayName: 'Rose🌸🌸', text: 'hi' })).toBeUndefined();
   });
 
   it('never fires on weak content signals alone', () => {
@@ -424,8 +423,11 @@ describe('heuristic: weak-signal-combo', () => {
     expect(detect({ handle: GARBLED, text: '玩得开 好涩 🍑' })?.ruleId).toBe('porn-bait-zh');
     // 单词沙拉形状优先
     expect(
-      detect({ handle: GARBLED, displayName: '点主页🥳专业牵线💖全国1-5线覆盖', text: 'sea\nhave\n🌞\nhad\nplan' })
-        ?.ruleId,
+      detect({
+        handle: GARBLED,
+        displayName: '点主页🥳专业牵线💖全国1-5线覆盖',
+        text: 'sea\nhave\n🌞\nhad\nplan',
+      })?.ruleId,
     ).toBe('word-salad');
   });
 
@@ -456,7 +458,11 @@ describe('heuristic: weak-signal-combo 数字形态锚点与沙拉佐证', () =>
 
   it('traffic-hint list no longer matches benign single characters (约稿/私房菜)', () => {
     expect(
-      detect({ handle: 'editor_wang', displayName: '自由约稿接单', text: 'some days feel hollow 🖤' }),
+      detect({
+        handle: 'editor_wang',
+        displayName: '自由约稿接单',
+        text: 'some days feel hollow 🖤',
+      }),
     ).toBeNull();
     expect(
       detect({ handle: 'chef_liu', displayName: '私房菜主理人', text: 'some days feel 🖤 hollow' }),
@@ -478,16 +484,13 @@ describe('2026-09-11 失守修复：尾缀数字锚点 + 词库佐证 + 弱形�
   it('garbled letter run with trailing digits anchors (ohbfwzyzopkkt2 batch)', () => {
     // 字母段双征成立 + ≤2 位尾缀数字 → 乱码锚点，转发词沙拉样本经 word-salad 发
     expect(
-      detect({ handle: 'ohbfwzyzopkkt1', text: 'likely mango banana 🍋 butter open wide' })
-        ?.ruleId,
+      detect({ handle: 'ohbfwzyzopkkt1', text: 'likely mango banana 🍋 butter open wide' })?.ruleId,
     ).toBe('word-salad');
-    expect(
-      detect({ handle: 'ohbfwzyzopkkt2', text: 'shielding 🍋 🤤 compensation' })?.ruleId,
-    ).toBe('weak-signal-combo');
+    expect(detect({ handle: 'ohbfwzyzopkkt2', text: 'shielding 🍋 🤤 compensation' })?.ruleId).toBe(
+      'weak-signal-combo',
+    );
     // 尾缀 3 位以上不再给锚点：数字变异面不能无限放宽
-    expect(
-      detect({ handle: 'ohbfwzyzopkkt123', text: 'shielding 🍋 🤤 compensation' }),
-    ).toBeNull();
+    expect(detect({ handle: 'ohbfwzyzopkkt123', text: 'shielding 🍋 🤤 compensation' })).toBeNull();
   });
 
   it('real-name handles with digit suffixes still stay clean', () => {
@@ -496,9 +499,7 @@ describe('2026-09-11 失守修复：尾缀数字锚点 + 词库佐证 + 弱形�
       detect({ handle: 'elizabethkader2', displayName: 'Elizabeth', text: 'quiet 🌙 ☕ monday' }),
     ).toBeNull();
     // john2024 型守卫在尾缀容忍加宽后仍未变（字母段 <12 够不上乱码阈值面）
-    expect(
-      detect({ handle: 'john2024', displayName: 'John', text: '🍑🍑🍑🍑🍑' }),
-    ).toBeNull();
+    expect(detect({ handle: 'john2024', displayName: 'John', text: '🍑🍑🍑🍑🍑' })).toBeNull();
   });
 
   it('official keyword hit earlier in the round corroborates salad-shaped text', () => {
@@ -513,7 +514,11 @@ describe('2026-09-11 失守修复：尾缀数字锚点 + 词库佐证 + 弱形�
     ).toBe('word-salad');
     // 无佐证时同样的干净 handle 不标
     expect(
-      detect({ handle: 'mimo_garden', displayName: '茉见月花园', text: 'likely mango banana 🍋 butter open wide' }),
+      detect({
+        handle: 'mimo_garden',
+        displayName: '茉见月花园',
+        text: 'likely mango banana 🍋 butter open wide',
+      }),
     ).toBeNull();
   });
 
@@ -521,5 +526,84 @@ describe('2026-09-11 失守修复：尾缀数字锚点 + 词库佐证 + 弱形�
     const weakShape = 'quiet 🌙 ☕ monday';
     expect(detect({ handle: 'mhmsezruwzxjwl', text: weakShape })?.ruleId).toBe('weak-signal-combo');
     expect(detect({ handle: 'monday_coffee', text: weakShape })).toBeNull();
+  });
+
+  it('evaluates tweet and bio shapes independently', () => {
+    expect(
+      detect({
+        handle: 'mhmsezruwzxjwl',
+        text: 'quiet 🌙 ☕ monday',
+        bio: 'Independent photographer based in Shanghai.',
+      })?.ruleId,
+    ).toBe('weak-signal-combo');
+  });
+
+  it('normalizes obfuscated contact numbers and ignores generic support contacts', () => {
+    expect(
+      detect({ handle: 'bait_account', text: '看简介 １３８·００１３·８０００' })?.ruleId,
+    ).toBe('contact-number-bait');
+    expect(
+      detect({ handle: 'support_team', text: '客服电话 12345678901，有售后问题请联系我。' }),
+    ).toBeNull();
+  });
+});
+
+describe('启发式输入复用', () => {
+  it('同一轮规则收到同一个标准化输入对象', () => {
+    const seen: object[] = [];
+    const result = detect(
+      { handle: '@Bait', text: 'sample' },
+      {
+        heuristics: [
+          {
+            id: 'first',
+            check(input) {
+              seen.push(input);
+              return null;
+            },
+          },
+          {
+            id: 'second',
+            check(input) {
+              seen.push(input);
+              return '命中';
+            },
+          },
+        ],
+      },
+    );
+    expect(result?.ruleId).toBe('second');
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toBe(seen[1]);
+    expect((seen[0] as { handle: string }).handle).toBe('bait');
+  });
+});
+
+describe('启发式输入复用', () => {
+  it('同一轮规则共享标准化后的同一个输入对象，供批量匹配缓存复用', () => {
+    let firstInput: object | undefined;
+    const result = detect(
+      { handle: ' @Bait_Account ', text: 'test' },
+      {
+        heuristics: [
+          {
+            id: 'first',
+            check(input) {
+              firstInput = input;
+              return null;
+            },
+          },
+          {
+            id: 'second',
+            check(input) {
+              expect(input).toBe(firstInput);
+              expect(input.handle).toBe('bait_account');
+              return '命中';
+            },
+          },
+        ],
+      },
+    );
+    expect(result?.ruleId).toBe('second');
   });
 });

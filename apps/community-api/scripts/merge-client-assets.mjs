@@ -1,4 +1,3 @@
-/* global process, console */
 /**
  * 构建产物合并：TanStack Start 客户端资产在 dist/client（vite 输出），
  * admin SPA 资产在 ../admin/dist；部署前把 admin 资产拷进 dist/client，

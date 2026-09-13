@@ -14,6 +14,7 @@
  */
 import { normalizeHandle, isApplicationKind } from '@feedsieve/shared';
 import { hashIp, sha256Hex } from './lib/hash';
+import { emailCodeHash, generateEmailCode } from './lib/email-code';
 import { hashEmail, isValidEmail, normalizeEmail, sendMail } from './player';
 
 export const APPLICATION = {
@@ -31,16 +32,6 @@ export const APPLICATION = {
 /** 申请通道在 email_codes.installer_hash 里的占位标识（固定哈希，无安装语义） */
 function applicationChannelHash(salt: string): Promise<string> {
   return sha256Hex(`application-channel:${salt}`);
-}
-
-function generateCode(): string {
-  const buffer = new Uint32Array(1);
-  crypto.getRandomValues(buffer);
-  return String((buffer[0] ?? 0) % 1_000_000).padStart(6, '0');
-}
-
-async function codeHash(salt: string, emailHash: string, code: string): Promise<string> {
-  return sha256Hex(`email-code:${salt}:${emailHash}:${code}`);
 }
 
 export interface ApplicationResult {
@@ -155,7 +146,7 @@ export async function submitApplication(
     return { ok: false, httpStatus: 429, error: 'too_many_code_requests' };
   }
 
-  const code = generateCode();
+  const code = generateEmailCode();
   await env.DB.prepare(
     `INSERT INTO email_codes (email_hash, installer_hash, code_hash, attempts, send_count, created_at, expires_at)
      VALUES (?1, ?2, ?3, 0, 1, ?4, ?5)
@@ -170,7 +161,7 @@ export async function submitApplication(
     .bind(
       emailHash,
       await applicationChannelHash(env.INSTALLATION_SALT),
-      await codeHash(env.INSTALLATION_SALT, emailHash, code),
+      await emailCodeHash(env.INSTALLATION_SALT, emailHash, code),
       now,
       now + APPLICATION.codeTtlSeconds,
       now - 3600,
@@ -230,7 +221,7 @@ export async function verifyApplication(
     await env.DB.prepare('DELETE FROM email_codes WHERE email_hash = ?1').bind(emailHash).run();
     return { ok: false, httpStatus: 429, error: 'too_many_attempts' };
   }
-  if ((await codeHash(env.INSTALLATION_SALT, emailHash, code)) !== row.code_hash) {
+  if ((await emailCodeHash(env.INSTALLATION_SALT, emailHash, code)) !== row.code_hash) {
     // 错码计数原子递增（并发错猜不能共享读数翻倍上限），同 player.verifyEmail
     const bumped = await env.DB.prepare(
       'UPDATE email_codes SET attempts = attempts + 1 WHERE email_hash = ?1 AND attempts < ?2',

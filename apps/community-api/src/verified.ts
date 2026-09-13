@@ -6,6 +6,7 @@
  * 读写边界同候选池：只读浏览，不提供改写入口。
  */
 import { POLICY } from './reports';
+import { escapeLike } from './lib/d1';
 
 export interface VerifiedAccount {
   handle: string;
@@ -15,10 +16,6 @@ export interface VerifiedAccount {
   net_votes: number;
   first_report_at: number;
   updated_at: number;
-}
-
-function escapeLike(value: string): string {
-  return value.replace(/[\\%_]/g, '\\$&');
 }
 
 export async function listVerifiedAccounts(

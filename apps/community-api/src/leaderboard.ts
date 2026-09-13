@@ -17,6 +17,7 @@
  */
 
 import { POLICY } from './reports';
+import { D1_CHUNK } from './lib/d1';
 
 export const LEADERBOARD = {
   killScore: 1,
@@ -108,15 +109,14 @@ export function hunterDisplayName(installHash: string, displayName: string | nul
   return `猎手#${installHash.slice(0, 6).toUpperCase()}`;
 }
 
-/** me 高亮标识：加盐哈希前 12 位 hex，不可逆、可进 URL */
-export function mePrefix(installHash: string): string {
-  return installHash.slice(0, 12);
-}
-
 // D1 batch 与单条查询的绑定参数上限一致，按 100 分片。
-const D1_CHUNK = 100;
+export const DIRTY_KEY = 'leaderboard_dirty';
 
-const DIRTY_KEY = 'leaderboard_dirty';
+/** 公开榜单行统一裁剪：id 只暴露加盐哈希前 12 位（me 匹配粒度），完整哈希不出网。
+ *  调用方的行类型宽窄不一（D1 结果经中间层流转），运行时不变量由 getLeaderboard 保证必有 id。 */
+export function toPublicHunterRow<T extends object>(row: T): T & { id: string } {
+  return { ...row, id: String((row as { id?: unknown }).id).slice(0, 12) };
+}
 const CACHE_KEY = 'leaderboard_cache';
 /** 总榜独立缓存键（同口径无时间窗） */
 const CACHE_KEY_ALL = 'leaderboard_cache_all';

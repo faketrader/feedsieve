@@ -5,6 +5,8 @@
  * 由维护者在「账号」页走维护者草稿流程（独立来源，不伪造社区票数）。
  */
 
+import { escapeLike } from './lib/d1';
+
 export interface CommunityCandidate {
   handle: string;
   x_user_id: string | null;
@@ -54,10 +56,6 @@ const NET_RANGES: Record<string, [number, number]> = {
   '2': [2, 2],
   '3+': [3, 1_000_000],
 };
-
-function escapeLike(value: string): string {
-  return value.replace(/[\\%_]/g, '\\$&');
-}
 
 function asCandidate(
   row: Omit<CommunityCandidate, 'net_votes' | 'sources'> & { sources: string | null },

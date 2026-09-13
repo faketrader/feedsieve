@@ -1,19 +1,22 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { getRosterData } from '@/site/data.functions';
+import { getWhitelistData } from '@/site/data.functions';
 import { pageHead } from '@/site/seo';
 import { ListsTabs, ListPageHeader, HelpIcon } from '@/site/pages/lists/lists-common';
 import { WhitelistPanel } from '@/site/pages/lists/WhitelistPanel';
 import { WHITELIST_ISSUE_URL } from '@/site/site';
 
 export const Route = createFileRoute('/_shell/lists/whitelist')({
-  head: () =>
-    pageHead({
+  head: (ctx) => {
+    const roster = ctx.loaderData as Awaited<ReturnType<typeof getWhitelistData>> | undefined;
+    return pageHead({
       title: '推荐白名单公示',
       description: 'FeedSieve 推荐白名单公开镜像：博主宣言入册，与扩展执行的豁免口径同源。',
       path: '/lists/whitelist',
-      ogImage: 'https://feedsieve.win/og/lists/whitelist.png?v=1',
-    }),
-  loader: () => getRosterData(),
+      ogImage: '/og/lists/whitelist.png',
+      noindex: !roster,
+    });
+  },
+  loader: () => getWhitelistData(),
   component: WhitelistRoute,
 });
 

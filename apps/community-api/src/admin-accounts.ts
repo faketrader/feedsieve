@@ -5,6 +5,7 @@ import {
   validateMaintainerEntry,
 } from './maintainer-blocklist';
 import { generateSnapshot } from './snapshot';
+import { D1_CHUNK, escapeLike } from './lib/d1';
 
 export interface AccountDraft {
   handle: string;
@@ -20,8 +21,6 @@ export interface AccountDraft {
 const now = () => Math.floor(Date.now() / 1000);
 
 // D1 单条查询最多 100 个绑定参数，IN 分句与 batch 分片都按 100 切。
-const D1_CHUNK = 100;
-
 const DRAFT_COLUMNS = 'handle, x_user_id, category, note, evidence_post_id, active, created_at, updated_at';
 
 function normalizeHandle(raw: string): string | null {
@@ -31,10 +30,6 @@ function normalizeHandle(raw: string): string | null {
 
 function asDraft(row: Omit<AccountDraft, 'active'> & { active: number }): AccountDraft {
   return { ...row, active: row.active === 1 };
-}
-
-function escapeLike(value: string): string {
-  return value.replace(/[\\%_]/g, '\\$&');
 }
 
 export interface ListDraftsOptions {

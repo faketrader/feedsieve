@@ -12,27 +12,25 @@
 # API 地址: FEEDSIEVE_API 环境变量，或本地 ~/.config/feedsieve/api-base（0600）
 set -e
 cd "$(dirname "$0")/.."
-
-API="${FEEDSIEVE_API:-}"
-if [ -z "$API" ] && [ -f "$HOME/.config/feedsieve/api-base" ]; then
-  API="$(cat "$HOME/.config/feedsieve/api-base" 2>/dev/null || true)"
-fi
-if [ -z "$API" ]; then
-  echo "error: 未设置 FEEDSIEVE_API（或写 ~/.config/feedsieve/api-base）" >&2
-  exit 1
-fi
+# shellcheck source=lib/api-base.sh
+. "$(dirname "$0")/lib/api-base.sh"
+FEEDSIEVE_API_BASE_REQUIRED=1
+resolve_feedsieve_api_base
+API="$FEEDSIEVE_API_BASE"
 DIR="community/lists"
 
-curl -fsSL "$API/v1/snapshots/latest" -o "$DIR/manifest.json"
+# 网络：跑在每日 CI 上，curl 带超时+重试，防端点挂起拖满 job 时限
+CURL="curl -fsSL --max-time 60 --retry 3 --retry-delay 5"
 
-version=$(python3 -c "import json; print(json.load(open('$DIR/manifest.json'))['snapshot_version'])")
+$CURL "$API/v1/snapshots/latest" -o "$DIR/manifest.json"
 
-python3 -c "
-import json
-for item in json.load(open('$DIR/manifest.json'))['files']:
-    print(item['path'] + '\t' + item['sha256'])
+version=$(node -p "JSON.parse(require('node:fs').readFileSync('$DIR/manifest.json', 'utf8')).snapshot_version")
+
+node -e "
+const m = JSON.parse(require('node:fs').readFileSync('$DIR/manifest.json', 'utf8'));
+for (const f of m.files) console.log(f.path + '\t' + f.sha256);
 " | while IFS="$(printf '\t')" read -r path sha; do
-  curl -fsSL "$API/v1/snapshots/$version/$path" -o "$DIR/$path"
+  $CURL "$API/v1/snapshots/$version/$path" -o "$DIR/$path"
   actual=$(shasum -a 256 "$DIR/$path" | cut -d' ' -f1)
   if [ "$actual" != "$sha" ]; then
     echo "error: checksum mismatch for $path (manifest=$sha actual=$actual)" >&2

@@ -5,6 +5,25 @@
 - 每个版本的详细工程记录见 [`docs/RELEASES.md`](docs/RELEASES.md)。
 - 二进制产物见 [GitHub Releases](https://github.com/realchendahuang/feedsieve/releases)；正式用户请从 [Chrome 应用商店](https://chromewebstore.google.com/detail/feedsieve/amhdjglnonjaoenddnifpnljgmocfdph)接收更新。
 
+## [0.9.0] — 2026-09-13
+
+### 检测质量
+
+- 收紧弱信号组合：正文与简介分别判断，昵称 emoji 只增强已有内容证据；普通联系方式不再因为“联系”二字误标，号码引流支持全角、零宽字符和分隔符规避。
+- 有序词组会继续寻找后续合法起点；远程 detector 配置每次从默认值重建；作者昵称提取不再混入 X 时间文本。
+- 手动标记和检测命中都保留同次 `post_id`、正文、昵称、简介、首要规则和结构化信号 ID，用于规则精度与漏检家族复盘；证据不直接改变社区共识状态。
+
+### 性能与研究
+
+- 普通字面关键词编译为 Aho-Corasick 多模式索引，同一输入一次扫描得到全部候选；ASCII 整词、有序词组、规则优先级、规则 ID 和命中字段语义保持不变。
+- detector 同轮启发式共享标准化输入对象；纯标点或纯符号自定义词不再产生空模式误标。
+- 固定提交审阅 `ZPVIP/x-spam-filter` 与 `amahteru/x-comment-blocker`，吸收增量扫描、批量匹配和证据复盘经验；拒绝宽词整包导入、emoji/特殊字符单信号及关键词自动拉黑。
+
+### 后端
+
+- D1 迁移 `0025_report_detection_evidence.sql` 保存 `rule_id` 与 `signal_ids`；Worker 与签名词包 `2026.09.13.2` 已先行部署。
+- 全量门禁通过：根测试 604/604、Community API 191/191，lint、类型检查、词包一致性、扩展与 Worker 生产构建通过。
+
 ## [0.8.4] — 2026-09-12
 
 ### 性能
@@ -222,7 +241,8 @@
 - 首个可用版本：黄框标注（内置名单 + 启发式，带理由）、顺手拉黑、待拉黑列表、一键批量拉黑（持久队列）、一键撤销、本地统计。
 - WXT + React 19 + MV3 最小权限架构；X DOM fixtures 锁定 reader→detector 契约；95 个单元测试；pre-push 本地质量门禁。
 
-[Unreleased]: https://github.com/realchendahuang/feedsieve/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/realchendahuang/feedsieve/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/realchendahuang/feedsieve/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/realchendahuang/feedsieve/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/realchendahuang/feedsieve/compare/v0.8.2...v0.8.3
 [0.8.0]: https://github.com/realchendahuang/feedsieve/compare/v0.7.5...v0.8.0

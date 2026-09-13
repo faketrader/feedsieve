@@ -2,10 +2,6 @@ import type { FeedContext, FeedItem } from './types';
 import { extractHandleFromPath } from './handle';
 import { tweetSelectors } from './selectors/selectors';
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 const POST_ID_RE = /\/status\/(\d+)/;
 
 function extractPostId(article: Element): string | undefined {
@@ -18,27 +14,6 @@ function extractPostId(article: Element): string | undefined {
     }
   }
   return undefined;
-}
-
-/**
- * User-Name 区的文本形态是「DisplayName @handle」（中间可能有 · 认证标等）。
- * 剥掉 @handle 与残留分隔符，剩余部分即 displayName。
- * 正则按 handle 缓存：同一 handle 在转发/回复串里会反复出现。
- */
-const displayNameStripPatterns = new Map<string, RegExp>();
-const DISPLAY_NAME_PATTERN_CACHE_MAX = 200;
-
-function displayNameStripPattern(handle: string): RegExp {
-  const cached = displayNameStripPatterns.get(handle);
-  if (cached) {
-    return cached;
-  }
-  const pattern = new RegExp(`@${escapeRegExp(handle)}\\b`, 'gi');
-  if (displayNameStripPatterns.size >= DISPLAY_NAME_PATTERN_CACHE_MAX) {
-    displayNameStripPatterns.clear();
-  }
-  displayNameStripPatterns.set(handle, pattern);
-  return pattern;
 }
 
 /**
@@ -71,13 +46,20 @@ function extractDisplayName(area: Element | null, handle: string): string | unde
   if (!area) {
     return undefined;
   }
-  const full = visibleText(area);
-  // X 的展示名不允许含 @，所以所有 @handle 出现都可以安全剥掉
-  const withoutHandle = full.replace(displayNameStripPattern(handle), '');
-  const cleaned = withoutHandle
-    .replace(/[\u00b7\u2022|]/g, ' ')
-    .replace(/^[\s\-–—:·@]+|[\s\-–—:·@]+$/g, '');
-  return cleaned || undefined;
+  const expectedPath = `/${handle.toLowerCase()}`;
+  for (const anchor of area.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+    let pathname: string;
+    try {
+      pathname = new URL(anchor.getAttribute('href') ?? '', location.origin).pathname;
+    } catch {
+      continue;
+    }
+    if (pathname.replace(/\/+$/, '').toLowerCase() !== expectedPath) continue;
+    const candidate = visibleText(anchor).trim();
+    if (!candidate || candidate.toLowerCase().includes(`@${handle.toLowerCase()}`)) continue;
+    return candidate;
+  }
+  return undefined;
 }
 
 /**

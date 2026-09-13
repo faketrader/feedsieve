@@ -26,6 +26,9 @@ export interface ContributionItem {
   linkDomains?: string[];
   /** 判断来源（v0.7.6）：手动标记 = manual，检测器命中 = 对应来源 */
   detectionSource?: string;
+  ruleId?: string;
+  signalIds?: string[];
+  evidencePostId?: string;
   /** 击杀时刻探活结果（#2）：现场 UserByScreenName 解析得来的存活观测；缓存命中时缺省 */
   liveness?: 'alive' | 'dead';
   /** 判定材料（2026-09-12 用户拍板随票上报）：推文原文 / 拉黑时刻作者昵称 / 简介原文。 */
@@ -49,6 +52,9 @@ type LocalLabel =
       contentFingerprint?: string;
       linkDomains?: string[];
       detectionSource?: string;
+      ruleId?: string;
+      signalIds?: string[];
+      evidencePostId?: string;
       liveness?: 'alive' | 'dead';
       tweetText?: string;
       displayName?: string;
@@ -357,6 +363,9 @@ async function runLocalLabelSync(): Promise<LabelSyncSummary> {
             contentFingerprint: label.contentFingerprint,
             linkDomains: label.linkDomains,
             detectionSource: label.detectionSource,
+            ruleId: label.ruleId,
+            signalIds: label.signalIds,
+            evidencePostId: label.evidencePostId,
             liveness: label.liveness,
             tweetText: label.tweetText,
             displayName: label.displayName,
@@ -453,6 +462,9 @@ async function collectLocalLabels(): Promise<Map<string, LocalLabel>> {
       ...(item.contentFingerprint ? { contentFingerprint: item.contentFingerprint } : {}),
       ...(item.linkDomains?.length ? { linkDomains: item.linkDomains } : {}),
       ...(item.detectionSource ? { detectionSource: item.detectionSource } : {}),
+      ...(item.ruleId ? { ruleId: item.ruleId } : {}),
+      ...(item.signalIds?.length ? { signalIds: item.signalIds } : {}),
+      ...(item.evidencePostId ? { evidencePostId: item.evidencePostId } : {}),
       ...(item.liveness ? { liveness: item.liveness } : {}),
       ...(item.tweetSnippet ? { tweetText: item.tweetSnippet } : {}),
       ...(item.displayName ? { displayName: item.displayName } : {}),
@@ -487,6 +499,9 @@ function labelSignature(label: LocalLabel): string {
           label.contentFingerprint ?? '',
           [...(label.linkDomains ?? [])].sort(),
           label.detectionSource ?? '',
+          label.ruleId ?? '',
+          [...(label.signalIds ?? [])].sort(),
+          label.evidencePostId ?? '',
           label.liveness ?? '',
           // 判定材料变了要重同步：服务端随票更新原文/昵称/简介
           label.tweetText ?? '',
@@ -541,6 +556,9 @@ function reportPayload(item: ContributionItem): Record<string, unknown> {
     ...(item.contentFingerprint ? { content_fingerprint: item.contentFingerprint } : {}),
     ...(item.linkDomains?.length ? { link_domains: item.linkDomains } : {}),
     ...(item.detectionSource ? { detection_source: item.detectionSource } : {}),
+    ...(item.ruleId ? { rule_id: item.ruleId } : {}),
+    ...(item.signalIds?.length ? { signal_ids: item.signalIds } : {}),
+    ...(item.evidencePostId ? { evidence_post_id: item.evidencePostId } : {}),
     ...(item.liveness ? { liveness: item.liveness } : {}),
     // 判定材料（2026-09-12 拍板）：随票上报，后台据此做针对性误报/聚类分析
     ...(item.tweetText ? { tweet_text: item.tweetText } : {}),

@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-/* global process, console, URL, fetch */
 // 生成规避变体归一化映射表（apps/extension/src/lib/detection/variant-tables.json）。
 // 三个来源全部是权威数据，禁止手搓条目：
 //   1. trad_simp   —— opencc-js 全字简繁映射（跑全 BMP CJK 统一区，差异字进表）。
@@ -10,7 +9,7 @@
 //      只收 target 为 ASCII 字母数字的条目（中文无 confusable 表可依，避免误伤面）。
 // 输出 submit 进仓库；映射只在 normalizeKeywordPhrase 两侧统一应用，幂等由收敛循环保证。
 
-import { writeFile, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import OpenCC from 'opencc-js';
 
 const OUTPUT = new URL('../apps/extension/src/lib/detection/variant-tables.json', import.meta.url);
@@ -27,10 +26,11 @@ async function fetchText(url) {
       /* fallthrough to network */
     }
   }
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(60_000) });
   if (!response.ok) throw new Error(`download failed: ${url} (${response.status})`);
   const text = await response.text();
   if (cache) {
+    await mkdir(cache, { recursive: true });
     await writeFile(`${cache}/${url.split('/').pop()}`, text);
   }
   return text;

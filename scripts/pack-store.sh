@@ -6,14 +6,10 @@ cd "$(dirname "$0")/.."
 
 VERSION=$(node -p "require('./apps/extension/package.json').version")
 # API 地址: FEEDSIEVE_API 环境变量，或本地 ~/.config/feedsieve/api-base（0600，不入库）
-API_BASE="${FEEDSIEVE_API:-}"
-if [ -z "$API_BASE" ] && [ -f "$HOME/.config/feedsieve/api-base" ]; then
-  API_BASE="$(cat "$HOME/.config/feedsieve/api-base" 2>/dev/null || true)"
-fi
-if [ -z "$API_BASE" ]; then
-  echo "error: 未设置 FEEDSIEVE_API（或写 ~/.config/feedsieve/api-base）" >&2
-  exit 1
-fi
+. "$(dirname "$0")/lib/api-base.sh"
+FEEDSIEVE_API_BASE_REQUIRED=1
+resolve_feedsieve_api_base
+API_BASE="$FEEDSIEVE_API_BASE"
 OUT="apps/extension/.output"
 ZIP="$OUT/feedsieve-${VERSION}-chrome.zip"
 

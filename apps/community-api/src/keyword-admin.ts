@@ -6,6 +6,7 @@ import {
 } from '@feedsieve/community-lists';
 import { validateDetectorConfigOverride } from '@feedsieve/detector';
 import { sha256Hex } from './lib/hash';
+import { D1_CHUNK, escapeLike } from './lib/d1';
 
 const PACK_ID = /^[a-z][a-z0-9_]{1,63}$/;
 const RULE_ID = /^[a-z][a-z0-9-]{2,95}$/;
@@ -13,8 +14,6 @@ const VERSION = /^\d{4}\.\d{2}\.\d{2}\.\d{1,4}$/;
 const now = () => Math.floor(Date.now() / 1000);
 
 // D1 单条查询最多 100 个绑定参数，batch 分片按 100 切。
-const D1_CHUNK = 100;
-
 type Row = Record<string, unknown>;
 
 interface KeywordRuleDocument {
@@ -232,7 +231,7 @@ export async function listAdminKeywords(
   }
   if (q) {
     conditions.push(`phrase LIKE ?${bindings.length + 1} ESCAPE '\\'`);
-    bindings.push(`%${q.replace(/[\\%_]/g, '\\$&')}%`);
+    bindings.push(`%${escapeLike(q)}%`);
   }
   const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 

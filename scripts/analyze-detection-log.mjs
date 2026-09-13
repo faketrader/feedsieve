@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-/* global process, console */
 /**
  * 本地检测日志分析（规则质量复盘闭环的最后一步；日志本身永不上报）。
  *

@@ -16,9 +16,8 @@ import {
   type CommunityAggregates,
 } from './lib/consensus-v2';
 
-// D1 batch 与单条查询的绑定参数上限一致，按 100 分片。
-const D1_CHUNK = 100;
-
+// D1 batch 与单条查询的绑定参数上限一致，按 100 分片（D1_CHUNK 从 lib/d1 引入）。
+import { D1_CHUNK } from './lib/d1';
 /** 账号评级所需的行（accounts 表 + 票数聚合后的形状） */
 export interface RateableAccount {
   handle: string;

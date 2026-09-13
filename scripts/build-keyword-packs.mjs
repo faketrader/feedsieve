@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-/* global URL, process, console, structuredClone, Buffer */
 import {
   createHash,
   createPrivateKey,
@@ -8,6 +7,7 @@ import {
   verify as nodeVerify,
 } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import { buildKeywordPackManifestMessage } from './signing-message.mjs';
 
 // 与 packages/community-lists/src/trusted-keys.ts 的 release-1 对应；
@@ -70,7 +70,7 @@ function localized(value, path) {
   return { zh: value.zh.trim(), en: value.en.trim() };
 }
 
-async function hydrateRuleSources(source) {
+export async function hydrateRuleSources(source) {
   const hydrated = structuredClone(source);
   for (const [index, pack] of (hydrated.packs ?? []).entries()) {
     if (typeof pack.rules_source !== 'string') continue;
@@ -102,7 +102,46 @@ async function hydrateRuleSources(source) {
   return hydrated;
 }
 
-function build(source) {
+/**
+ * 拼音代字家族展开：对抗「骚→sao / sa0 / sǎo」这类汉字换拼音的基线逃逸
+ * （2026-09-13 实测样本全层漏检的根因）。只对包含高风险字的元组短语生成
+ * **整短语**变体规则，绝不动全局归一化——全局 sao→骚 会把「Sao Paulo」
+ * 这类正常文本拖进归一化宇宙，误伤面不可控。
+ *
+ * - 变体形态：裸拼音 / 带调拼音 / o→0 leet（拼音含 o 才有）。
+ * - 仅元组规则参与：terms 有序锚点规则（同城+上门）的变体语义复杂，
+ *   观察到实际逃逸样本再手工入库。
+ * - 变体与原规则走同一套校验（id / phrase），超长或非法直接落不进。
+ * - id 派生 `${origId}-pyN`，同一短语内跨字连续编号保唯一。
+ */
+const PINYIN_SUBSTITUTIONS = new Map([
+  ['骚', ['sao', 'sǎo', 'sa0']],
+  ['操', ['cao', 'cǎo', 'ca0']],
+  ['炮', ['pao', 'pào', 'pa0']],
+  ['嫖', ['piao', 'piáo', 'pia0']],
+  ['约', ['yue', 'yuē']],
+]);
+
+export function pinyinVariants(rules) {
+  const out = [];
+  for (const rule of rules) {
+    if (!Array.isArray(rule) || rule.length !== 2) continue;
+    const [id, phrase] = rule;
+    let variantIndex = 0;
+    for (const [char, forms] of PINYIN_SUBSTITUTIONS) {
+      if (!phrase.includes(char)) continue;
+      for (const form of forms) {
+        variantIndex += 1;
+        const variant = phrase.split(char).join(form);
+        if (variant.length > 80) continue;
+        out.push([`${id}-py${variantIndex}`, variant]);
+      }
+    }
+  }
+  return out;
+}
+
+export function build(source) {
   if (!source || typeof source !== 'object' || source.schema_version !== 1)
     fail('schema_version must be 1');
   if (typeof source.pack_version !== 'string' || !versionPattern.test(source.pack_version))
@@ -126,7 +165,8 @@ function build(source) {
     )
       fail(`packs[${index}].source_refs`);
     if (!Array.isArray(pack.rules) || pack.rules.length === 0) fail(`packs[${index}].rules`);
-    const rules = pack.rules.map((rule, ruleIndex) => {
+    // 拼音代字变体与原规则同池校验/去重（ruleIds Set 全局唯一性自动把关）
+    const rules = [...pack.rules, ...pinyinVariants(pack.rules)].map((rule, ruleIndex) => {
       const tupleRule =
         Array.isArray(rule) &&
         rule.length === 2 &&
@@ -193,7 +233,7 @@ function build(source) {
 }
 
 /** 天级判定参数（乱码 handle / 词沙拉区间 / 组合门槛）随词库一起签名分发；可缺省。 */
-function buildDetectorConfig(source) {
+export function buildDetectorConfig(source) {
   if (source.detector_config === undefined) return null;
   if (!source.detector_config || typeof source.detector_config !== 'object')
     fail('detector_config');
@@ -208,74 +248,81 @@ function buildDetectorConfig(source) {
   return source.detector_config;
 }
 
-const source = await hydrateRuleSources(JSON.parse(await readFile(sourcePath, 'utf8')));
-const output = `${JSON.stringify(build(source))}\n`;
-const sha256 = createHash('sha256').update(output).digest('hex');
-const parsed = JSON.parse(output);
-// 版本守卫：内容变了但 pack_version 没变时，客户端会判 up_to_date，改动静默收不到。
-// 与已提交产物比较（首次构建无产物时跳过）。
-const committedOutput = await (async () => {
-  try {
-    return await readFile(outputPath, 'utf8');
-  } catch {
-    return null;
+// CLI 直跑才执行构建流水线；单元测试 import 本模块只取纯函数（build 等）。
+export async function main() {
+  const source = await hydrateRuleSources(JSON.parse(await readFile(sourcePath, 'utf8')));
+  const output = `${JSON.stringify(build(source))}\n`;
+  const sha256 = createHash('sha256').update(output).digest('hex');
+  const parsed = JSON.parse(output);
+  // 版本守卫：内容变了但 pack_version 没变时，客户端会判 up_to_date，改动静默收不到。
+  // 与已提交产物比较（首次构建无产物时跳过）。
+  const committedOutput = await (async () => {
+    try {
+      return await readFile(outputPath, 'utf8');
+    } catch {
+      return null;
+    }
+  })();
+  if (committedOutput !== null && committedOutput !== output) {
+    const committedParsed = JSON.parse(committedOutput);
+    if (committedParsed?.pack_version === parsed.pack_version) {
+      fail(
+        `keyword-pack content changed but pack_version (${parsed.pack_version}) did not; bump pack_version in community/keyword-packs/source.json first`,
+      );
+    }
   }
-})();
-if (committedOutput !== null && committedOutput !== output) {
-  const committedParsed = JSON.parse(committedOutput);
-  if (committedParsed?.pack_version === parsed.pack_version) {
-    fail(
-      `keyword-pack content changed but pack_version (${parsed.pack_version}) did not; bump pack_version in community/keyword-packs/source.json first`,
+  const rules = countRules(parsed);
+  const manifest = `${JSON.stringify({ schema_version: 1, pack_version: parsed.pack_version, generated_at: parsed.generated_at, files: [{ path: 'official.json', sha256, packs: parsed.packs.length, rules }] })}\n`;
+  const signedManifest = await buildSignedManifest(parsed, sha256);
+  if (signedManifest && !check) {
+    // 有密钥文件才在构建时嵌入签名；发布脚本对未签名 manifest 拒绝上传。
+    const signed = `${JSON.stringify(signedManifest)}\n`;
+    console.log(`signed manifest with key ${signedManifest.signature.key_id} (${signedManifest.signature.sig.slice(0, 12)}…)`);
+    await Promise.all([writeFile(outputPath, output), writeFile(manifestPath, signed)]);
+    console.log(`built ${parsed.packs.length} packs / ${rules} rules (${sha256.slice(0, 12)})`);
+  } else if (check) {
+    const [existingOutput, existingManifest] = await Promise.all([
+      readFile(outputPath, 'utf8'),
+      readFile(manifestPath, 'utf8'),
+    ]);
+    if (existingOutput !== output) fail('generated artifacts are stale; run pnpm keyword-packs:build');
+    // manifest 比对剥离签名：无密钥环境下（CI）也能核对内容；签名另行用内置公钥验证
+    const committed = JSON.parse(existingManifest);
+    const committedSig = committed?.signature;
+    delete committed.signature;
+    if (`${JSON.stringify(committed)}\n` !== manifest)
+      fail('generated manifest is stale; run pnpm keyword-packs:build');
+    if (committedSig) {
+      const message = buildKeywordPackManifestMessage(
+        committed.pack_version,
+        committed.generated_at,
+        committed.files[0]?.sha256,
+        committed.files[0]?.rules,
+      );
+      // trusted-keys 存的是 RAW 32 字节公钥；node 需要 SPKI 包装（Ed25519 固定头）
+      const raw = Buffer.from(SIGNING_PUBLIC_KEY_B64, 'base64');
+      const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw]);
+      const publicKey = createPublicKey({ key: spki, format: 'der', type: 'spki' });
+      const valid = nodeVerify(
+        null,
+        Buffer.from(message),
+        publicKey,
+        Buffer.from(committedSig.sig, 'base64'),
+      );
+      if (!valid) fail('committed manifest signature does not verify against the built-in key');
+      if (committedSig.key_id !== SIGNING_KEY_ID) fail('committed manifest uses an unknown key_id');
+    } else {
+      console.warn('warning: committed manifest is NOT signed; publish-keyword-packs.sh will refuse');
+    }
+  } else {
+    await Promise.all([writeFile(outputPath, output), writeFile(manifestPath, manifest)]);
+    console.warn(
+      `no signing key found; built UNSIGNED manifest (publish will refuse). Set FEEDSIEVE_SIGNING_KEY_FILE or run scripts/keygen.mjs once`,
     );
+    console.log(`built ${parsed.packs.length} packs / ${rules} rules (${sha256.slice(0, 12)})`);
   }
 }
-const rules = countRules(parsed);
-const manifest = `${JSON.stringify({ schema_version: 1, pack_version: parsed.pack_version, generated_at: parsed.generated_at, files: [{ path: 'official.json', sha256, packs: parsed.packs.length, rules }] })}\n`;
-const signedManifest = await buildSignedManifest(parsed, sha256);
-if (signedManifest && !check) {
-  // 有密钥文件才在构建时嵌入签名；发布脚本对未签名 manifest 拒绝上传。
-  const signed = `${JSON.stringify(signedManifest)}\n`;
-  console.log(`signed manifest with key ${signedManifest.signature.key_id} (${signedManifest.signature.sig.slice(0, 12)}…)`);
-  await Promise.all([writeFile(outputPath, output), writeFile(manifestPath, signed)]);
-  console.log(`built ${parsed.packs.length} packs / ${rules} rules (${sha256.slice(0, 12)})`);
-} else if (check) {
-  const [existingOutput, existingManifest] = await Promise.all([
-    readFile(outputPath, 'utf8'),
-    readFile(manifestPath, 'utf8'),
-  ]);
-  if (existingOutput !== output) fail('generated artifacts are stale; run pnpm keyword-packs:build');
-  // manifest 比对剥离签名：无密钥环境下（CI）也能核对内容；签名另行用内置公钥验证
-  const committed = JSON.parse(existingManifest);
-  const committedSig = committed?.signature;
-  delete committed.signature;
-  if (`${JSON.stringify(committed)}\n` !== manifest)
-    fail('generated manifest is stale; run pnpm keyword-packs:build');
-  if (committedSig) {
-    const message = buildKeywordPackManifestMessage(
-      committed.pack_version,
-      committed.generated_at,
-      committed.files[0]?.sha256,
-      committed.files[0]?.rules,
-    );
-    // trusted-keys 存的是 RAW 32 字节公钥；node 需要 SPKI 包装（Ed25519 固定头）
-    const raw = Buffer.from(SIGNING_PUBLIC_KEY_B64, 'base64');
-    const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), raw]);
-    const publicKey = createPublicKey({ key: spki, format: 'der', type: 'spki' });
-    const valid = nodeVerify(
-      null,
-      Buffer.from(message),
-      publicKey,
-      Buffer.from(committedSig.sig, 'base64'),
-    );
-    if (!valid) fail('committed manifest signature does not verify against the built-in key');
-    if (committedSig.key_id !== SIGNING_KEY_ID) fail('committed manifest uses an unknown key_id');
-  } else {
-    console.warn('warning: committed manifest is NOT signed; publish-keyword-packs.sh will refuse');
-  }
-} else {
-  await Promise.all([writeFile(outputPath, output), writeFile(manifestPath, manifest)]);
-  console.warn(
-    `no signing key found; built UNSIGNED manifest (publish will refuse). Set FEEDSIEVE_SIGNING_KEY_FILE or run scripts/keygen.mjs once`,
-  );
-  console.log(`built ${parsed.packs.length} packs / ${rules} rules (${sha256.slice(0, 12)})`);
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  await main();
 }

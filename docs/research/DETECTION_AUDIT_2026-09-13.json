@@ -1,0 +1,872 @@
+{
+  "provenance": {
+    "audit_date": "2026-09-13",
+    "git_head": "eb469b9",
+    "main_observed_at_utc": "2026-09-13T01:34:47Z",
+    "main_observed_at_asia_shanghai": "2026-09-13T09:34:47+08:00",
+    "scope": "Research only. Production SELECT queries, public artifacts, current code and offline replay. No detector changes, publication or X actions.",
+    "limitations": [
+      "Reported materials are selected feedback, not independently verified ground truth.",
+      "Input-level exact deduplication is not post-level or campaign-level independence.",
+      "Both replay columns use the current engine; only keyword catalog differs.",
+      "Replay excludes community list, builtin list, fingerprints and user-specific protections.",
+      "Node timing is not authenticated browser performance.",
+      "Follow-up feedback counts were queried after the main observation."
+    ],
+    "live_keyword_sha256": "81c6930ebf8791b83a23f7f64fc4be6817ac145e20226d7729d4e975fbd2e05b",
+    "raw_sample_export_sha256": "ce55c6a81bed1fc0df6501b5da57861c69ae15df264bde3861f37af29c682b22"
+  },
+  "aggregate_queries": [
+    {
+      "query": 1,
+      "results": [
+        {
+          "observed_at_utc": "2026-09-13 01:34:47",
+          "accounts": 15150,
+          "reports": 39842,
+          "rescues": 2630,
+          "installations": 2576,
+          "active_blocked": 39691,
+          "active_allowed": 2575,
+          "reports_with_facts": 1578
+        }
+      ],
+      "rows_written": 0
+    },
+    {
+      "query": 2,
+      "results": [
+        {
+          "status": "new",
+          "status_v2": "new",
+          "n": 11584
+        },
+        {
+          "status": "strong",
+          "status_v2": "new",
+          "n": 2064
+        },
+        {
+          "status": "strong",
+          "status_v2": "strong",
+          "n": 1502
+        }
+      ],
+      "rows_written": 0
+    },
+    {
+      "query": 3,
+      "results": [
+        {
+          "category": "other",
+          "n": 7681,
+          "strong": 924
+        },
+        {
+          "category": "copy_paste",
+          "n": 7262,
+          "strong": 2632
+        },
+        {
+          "category": "adult_gray_traffic",
+          "n": 171,
+          "strong": 8
+        },
+        {
+          "category": "scam_phishing",
+          "n": 34,
+          "strong": 2
+        },
+        {
+          "category": "bot_spam",
+          "n": 2,
+          "strong": 0
+        }
+      ],
+      "rows_written": 0
+    },
+    {
+      "query": 4,
+      "results": [
+        {
+          "source": "missing",
+          "n": 21781,
+          "handles": 8306,
+          "with_text": 989,
+          "with_bio": 224,
+          "with_name": 992,
+          "with_fp": 19333,
+          "with_domains": 162
+        },
+        {
+          "source": "manual",
+          "n": 18061,
+          "handles": 8611,
+          "with_text": 9,
+          "with_bio": 579,
+          "with_name": 9,
+          "with_fp": 14291,
+          "with_domains": 69
+        }
+      ],
+      "rows_written": 0
+    },
+    {
+      "query": 5,
+      "results": [
+        {
+          "day": "2026-09-06",
+          "n": 395,
+          "handles": 367,
+          "installs": 35,
+          "with_facts": 0
+        },
+        {
+          "day": "2026-09-07",
+          "n": 1167,
+          "handles": 699,
+          "installs": 124,
+          "with_facts": 0
+        },
+        {
+          "day": "2026-09-08",
+          "n": 3505,
+          "handles": 1946,
+          "installs": 222,
+          "with_facts": 0
+        },
+        {
+          "day": "2026-09-09",
+          "n": 2140,
+          "handles": 1624,
+          "installs": 141,
+          "with_facts": 0
+        },
+        {
+          "day": "2026-09-10",
+          "n": 6348,
+          "handles": 3555,
+          "installs": 408,
+          "with_facts": 0
+        },
+        {
+          "day": "2026-09-11",
+          "n": 2511,
+          "handles": 1906,
+          "installs": 241,
+          "with_facts": 0
+        },
+        {
+          "day": "2026-09-12",
+          "n": 22451,
+          "handles": 10498,
+          "installs": 1159,
+          "with_facts": 1246
+        },
+        {
+          "day": "2026-09-13",
+          "n": 1266,
+          "handles": 1157,
+          "installs": 84,
+          "with_facts": 332
+        }
+      ],
+      "rows_written": 0
+    },
+    {
+      "query": 6,
+      "results": [
+        {
+          "client_version": "0.8.3",
+          "n": 21904,
+          "with_facts": 1570
+        },
+        {
+          "client_version": "0.8.0",
+          "n": 16070,
+          "with_facts": 0
+        },
+        {
+          "client_version": "0.7.5",
+          "n": 1574,
+          "with_facts": 0
+        },
+        {
+          "client_version": "1.0.0",
+          "n": 148,
+          "with_facts": 0
+        },
+        {
+          "client_version": "0.8.2",
+          "n": 79,
+          "with_facts": 1
+        },
+        {
+          "client_version": "0.7.0",
+          "n": 30,
+          "with_facts": 0
+        },
+        {
+          "client_version": "0.2.0",
+          "n": 12,
+          "with_facts": 0
+        },
+        {
+          "client_version": "0.7.4",
+          "n": 9,
+          "with_facts": 0
+        },
+        {
+          "client_version": "0.8.4",
+          "n": 8,
+          "with_facts": 7
+        },
+        {
+          "client_version": "0.7.1",
+          "n": 8,
+          "with_facts": 0
+        }
+      ],
+      "rows_written": 0
+    },
+    {
+      "query": 7,
+      "results": [
+        {
+          "source": "community-list",
+          "rule_id": "list",
+          "n": 1783
+        },
+        {
+          "source": "fingerprint",
+          "rule_id": "community-fingerprint-sim",
+          "n": 495
+        },
+        {
+          "source": "heuristic",
+          "rule_id": "weak-signal-combo",
+          "n": 214
+        },
+        {
+          "source": "builtin-list",
+          "rule_id": "list",
+          "n": 86
+        },
+        {
+          "source": "missing",
+          "rule_id": "missing",
+          "n": 35
+        },
+        {
+          "source": "fingerprint",
+          "rule_id": "community-fingerprint",
+          "n": 12
+        },
+        {
+          "source": "heuristic",
+          "rule_id": "contact-number-bait",
+          "n": 4
+        },
+        {
+          "source": "domain",
+          "rule_id": "community-domain",
+          "n": 1
+        }
+      ],
+      "rows_written": 0
+    },
+    {
+      "query": 8,
+      "results": [
+        {
+          "n": 1578,
+          "handles": 1166,
+          "strong": 607,
+          "still_blocked": 1577,
+          "now_allowed": 0,
+          "withdrawn": 1,
+          "earliest": "2026-09-12 07:21:31",
+          "latest": "2026-09-13 01:33:40"
+        }
+      ],
+      "rows_written": 0
+    },
+    {
+      "query": 9,
+      "results": [
+        {
+          "fingerprint_pairs_2installs": 4420,
+          "handles": 3141
+        }
+      ],
+      "rows_written": 0
+    },
+    {
+      "query": 10,
+      "results": [
+        {
+          "net_votes": -193,
+          "accounts": 1
+        },
+        {
+          "net_votes": -138,
+          "accounts": 1
+        },
+        {
+          "net_votes": -108,
+          "accounts": 1
+        },
+        {
+          "net_votes": -78,
+          "accounts": 1
+        },
+        {
+          "net_votes": -75,
+          "accounts": 1
+        },
+        {
+          "net_votes": -69,
+          "accounts": 1
+        },
+        {
+          "net_votes": -61,
+          "accounts": 1
+        },
+        {
+          "net_votes": -59,
+          "accounts": 1
+        },
+        {
+          "net_votes": -55,
+          "accounts": 1
+        },
+        {
+          "net_votes": -54,
+          "accounts": 1
+        },
+        {
+          "net_votes": -48,
+          "accounts": 1
+        },
+        {
+          "net_votes": -46,
+          "accounts": 1
+        },
+        {
+          "net_votes": -44,
+          "accounts": 1
+        },
+        {
+          "net_votes": -43,
+          "accounts": 1
+        },
+        {
+          "net_votes": -40,
+          "accounts": 1
+        },
+        {
+          "net_votes": -26,
+          "accounts": 1
+        }
+      ],
+      "rows_written": 0
+    },
+    {
+      "query": 11,
+      "results": [
+        {
+          "min_reports": 1,
+          "max_reports": 333,
+          "reports": 39842,
+          "reporters": 1988
+        }
+      ],
+      "rows_written": 0
+    }
+  ],
+  "public_snapshot": {
+    "version": "2026.09.13.1",
+    "generated_at": "2026-09-13T00:00:51.207Z",
+    "entries": 3496,
+    "verified": 39,
+    "whitelist": 130
+  },
+  "replay": {
+    "scope": "content rules only; current engine with current versus live catalog; reported examples are not ground truth",
+    "versions": {
+      "current": "2026.09.13.2",
+      "liveCatalog": "2026.09.12.4",
+      "list": "2026.09.13.1"
+    },
+    "rawReports": 1578,
+    "unique": {
+      "n": 1428,
+      "handles": 1166,
+      "currentHit": 826,
+      "livePackHit": 716,
+      "withoutBioHit": 799,
+      "listed": 383,
+      "currentMissUnlisted": 479,
+      "gained": 125,
+      "lost": 15,
+      "missingBio": 772,
+      "byCurrentRule": {
+        "miss": 602,
+        "weak-signal-combo": 234,
+        "keyword:official:adult-gray-traffic-7688eea3ceb1f3c3": 219,
+        "keyword:official:adult-fu-not-black": 183,
+        "keyword:official:adult-gray-traffic-ec8cb04640c17c5c": 73,
+        "keyword:official:adult-gray-traffic-a8b0aabaa0562b5d-py1": 53,
+        "keyword:official:adult-terms-local-door": 17,
+        "keyword:official:adult-wuchangyue": 14,
+        "keyword:official:adult-gray-traffic-dc4156e0b24de172": 11,
+        "keyword:official:adult-gray-traffic-fc42ccbaebce4a79": 6,
+        "keyword:official:adult-gray-traffic-77f87e83a9a9ec6a": 5,
+        "contact-number-bait": 2,
+        "keyword:official:adult-gray-traffic-f3f8cf9e41eb4d89": 1,
+        "keyword:official:adult-gray-traffic-6339d66a1807b2bf": 1,
+        "keyword:official:adult-gray-traffic-3da44e277868b99a": 1,
+        "keyword:official:adult-gray-traffic-4a8dbea08c8d76a5": 1,
+        "keyword:official:adult-gray-traffic-beea215ad136eaca": 1,
+        "keyword:official:adult-gray-traffic-9c3250ff63e15e91": 1,
+        "keyword:official:adult-gray-traffic-d640d34151499df5": 1,
+        "keyword:official:adult-gray-traffic-c01dc884cf268927": 1,
+        "keyword:official:adult-gray-traffic-e998241d6861ff3f": 1
+      }
+    },
+    "withTweet": {
+      "n": 993,
+      "handles": 782,
+      "currentHit": 823,
+      "livePackHit": 713,
+      "withoutBioHit": 797,
+      "listed": 311,
+      "currentMissUnlisted": 119,
+      "gained": 125,
+      "lost": 15,
+      "missingBio": 770,
+      "byCurrentRule": {
+        "weak-signal-combo": 232,
+        "keyword:official:adult-gray-traffic-7688eea3ceb1f3c3": 219,
+        "keyword:official:adult-fu-not-black": 183,
+        "miss": 170,
+        "keyword:official:adult-gray-traffic-ec8cb04640c17c5c": 73,
+        "keyword:official:adult-gray-traffic-a8b0aabaa0562b5d-py1": 53,
+        "keyword:official:adult-terms-local-door": 17,
+        "keyword:official:adult-wuchangyue": 14,
+        "keyword:official:adult-gray-traffic-dc4156e0b24de172": 11,
+        "keyword:official:adult-gray-traffic-fc42ccbaebce4a79": 6,
+        "keyword:official:adult-gray-traffic-77f87e83a9a9ec6a": 5,
+        "contact-number-bait": 2,
+        "keyword:official:adult-gray-traffic-f3f8cf9e41eb4d89": 1,
+        "keyword:official:adult-gray-traffic-6339d66a1807b2bf": 1,
+        "keyword:official:adult-gray-traffic-3da44e277868b99a": 1,
+        "keyword:official:adult-gray-traffic-4a8dbea08c8d76a5": 1,
+        "keyword:official:adult-gray-traffic-beea215ad136eaca": 1,
+        "keyword:official:adult-gray-traffic-9c3250ff63e15e91": 1,
+        "keyword:official:adult-gray-traffic-d640d34151499df5": 1,
+        "keyword:official:adult-gray-traffic-e998241d6861ff3f": 1
+      }
+    },
+    "withoutTweet": {
+      "n": 435,
+      "handles": 435,
+      "currentHit": 3,
+      "livePackHit": 3,
+      "withoutBioHit": 2,
+      "listed": 72,
+      "currentMissUnlisted": 360,
+      "gained": 0,
+      "lost": 0,
+      "missingBio": 2,
+      "byCurrentRule": {
+        "miss": 432,
+        "weak-signal-combo": 2,
+        "keyword:official:adult-gray-traffic-c01dc884cf268927": 1
+      }
+    },
+    "bySource": {
+      "missing": 987,
+      "manual": 441
+    },
+    "probes": [
+      {
+        "name": "salad_without_bio",
+        "input": {
+          "handle": "qzxvbnmasdfrt",
+          "text": "hard fire 💙 lift road"
+        },
+        "rule": "weak-signal-combo",
+        "reason": "启发式：批量注册特征 + 英文单词沙拉形状"
+      },
+      {
+        "name": "salad_with_bio",
+        "input": {
+          "handle": "qzxvbnmasdfrt",
+          "text": "hard fire 💙 lift road",
+          "bio": "Software engineer. Open source enthusiast."
+        },
+        "rule": null,
+        "reason": null
+      },
+      {
+        "name": "plain_contact",
+        "input": {
+          "handle": "sample_user",
+          "text": "12345678901",
+          "bio": "看我简介"
+        },
+        "rule": "contact-number-bait",
+        "reason": "检测到可疑垃圾特征"
+      },
+      {
+        "name": "fullwidth_contact",
+        "input": {
+          "handle": "sample_user",
+          "text": "１２３４５６７８９０１",
+          "bio": "看我简介"
+        },
+        "rule": null,
+        "reason": null
+      },
+      {
+        "name": "zwsp_contact",
+        "input": {
+          "handle": "sample_user",
+          "text": "12345​678901",
+          "bio": "看我简介"
+        },
+        "rule": null,
+        "reason": null
+      },
+      {
+        "name": "ordinary_number_name_emoji",
+        "input": {
+          "handle": "jenny83922",
+          "displayName": "摄影爱好者 🌻 📷",
+          "text": "今天拍到了日出，心情很好。"
+        },
+        "rule": "weak-signal-combo",
+        "reason": "启发式：批量注册特征 + 装饰昵称（2 个 emoji）"
+      },
+      {
+        "name": "quoted_spam_research",
+        "input": {
+          "handle": "spam_research",
+          "displayName": "反垃圾研究",
+          "text": "提醒大家：「我福不黑不信你看」是常见垃圾评论话术，请勿点击。"
+        },
+        "rule": "keyword:official:adult-fu-not-black",
+        "reason": "命中官方规则：我福不黑 · 正文"
+      },
+      {
+        "name": "benign_customer_support",
+        "input": {
+          "handle": "shop_support",
+          "text": "客服电话 12345678901，有售后问题请联系我。"
+        },
+        "rule": "contact-number-bait",
+        "reason": "检测到可疑垃圾特征"
+      }
+    ],
+    "corpus": {
+      "n": 68,
+      "knownLimitations": [
+        {
+          "id": "adversarial-zero-width",
+          "expected": null,
+          "note": "零宽字符拆碎关键词：当前正则漏报（已知局限，规则层待修复）"
+        },
+        {
+          "id": "adversarial-fullwidth-bait",
+          "expected": null,
+          "note": "全角字母/数字黄推引流：启发式 \\b 词边界不识别全角，漏报（已知局限；指纹 v1 NFKC 折叠后 exact 覆盖，见 detect.test v1 用例）"
+        },
+        {
+          "id": "zh-paraphrase-variant",
+          "expected": null,
+          "note": "中文换词变体（福利主页 看 vs 福 利在简介 自取）：启发式与指纹 simhash 均不覆盖，仅指纹 exact 可命中（已知局限）"
+        },
+        {
+          "id": "matchmaking-bait-a",
+          "expected": null,
+          "note": "婚介引流话术（2026-09-07 真机采集，handle 匿名化）：点主页 + 专业牵线 + 全国1-5线覆盖。启发式/词包均漏报（已知局限；指纹 exact 覆盖，见 detect.test 真实样本用例）"
+        },
+        {
+          "id": "matchmaking-bait-b",
+          "expected": null,
+          "note": "同上模板换 emoji 的变体（🌙🌹 → 🍓😸）：归一化后与 a 逐字相同，指纹 exact 命中（corpus 只测启发式层，故记为局限）"
+        },
+        {
+          "id": "word-salad-clean-nickname-guard",
+          "expected": null,
+          "note": "已知局限：批量形态 handle + 干净昵称的单词沙拉漏判（宁可漏判；此类由社区指纹/SimHash 变体层兜底）"
+        }
+      ],
+      "productionHits": 26
+    }
+  },
+  "diagnostics": {
+    "fingerprintProbes": {
+      "guards": 30,
+      "guardHits": [
+        {
+          "id": "contact-number-phone-without-hook-guard",
+          "v0": {
+            "handle": "old_fried",
+            "marked": true,
+            "source": "fingerprint",
+            "reason": "已知垃圾模板 · 话术变体（SimHash）",
+            "ruleId": "community-fingerprint-sim",
+            "matchedFingerprint": "ffff103030303164"
+          },
+          "v1": null
+        }
+      ],
+      "missRows": 170,
+      "fpMissCoverage": {
+        "v0": {
+          "fingerprints": 353,
+          "covered": 85
+        },
+        "v1": {
+          "fingerprints": 816,
+          "covered": 100
+        }
+      },
+      "prefixDistances": [
+        {
+          "pair": [
+            "我福不黑不信你看",
+            "gC我福不黑不信你看9o"
+          ],
+          "distance": 12
+        },
+        {
+          "pair": [
+            "比她好看的没她骚比她骚的没她好看",
+            "gC比她好看的没她骚9o比她骚的没她好看"
+          ],
+          "distance": 11
+        }
+      ]
+    },
+    "tupleProbes": [
+      {
+        "text": "同城上门",
+        "ruleResult": "命中官方规则：同城 + 上门 · 正文"
+      },
+      {
+        "text": "同城甲甲甲甲甲甲甲甲甲甲甲甲甲同城上门",
+        "ruleResult": null
+      }
+    ],
+    "configProbe": [
+      {
+        "step": "catalog_A",
+        "trailingDigits": 8
+      },
+      {
+        "step": "catalog_B_partial",
+        "trailingDigits": 8,
+        "expectedDefault": 2
+      }
+    ],
+    "nodeOnlyTiming": {
+      "content": {
+        "n": 993,
+        "p50ms": 2.906,
+        "p95ms": 11.148,
+        "p99ms": 18.066,
+        "maxMs": 34.223
+      },
+      "fingerprintColdSet": {
+        "n": 150,
+        "p50ms": 0.694,
+        "p95ms": 4.45,
+        "p99ms": 8.202,
+        "maxMs": 10.732
+      },
+      "note": "Node isolated calls only; fingerprint sets recreated per sample in this diagnostic; not authenticated browser performance"
+    }
+  },
+  "feedback_observed_at": "2026-09-13T09:42:27.297711+08:00",
+  "feedback_queries": [
+    {
+      "query": 1,
+      "results": [
+        {
+          "source": "community-list",
+          "rule_id": "list",
+          "n": 1786,
+          "handles": 184,
+          "installs": 1071
+        },
+        {
+          "source": "fingerprint",
+          "rule_id": "community-fingerprint-sim",
+          "n": 496,
+          "handles": 400,
+          "installs": 123
+        },
+        {
+          "source": "heuristic",
+          "rule_id": "weak-signal-combo",
+          "n": 222,
+          "handles": 165,
+          "installs": 119
+        },
+        {
+          "source": "builtin-list",
+          "rule_id": "list",
+          "n": 86,
+          "handles": 2,
+          "installs": 84
+        },
+        {
+          "source": "missing",
+          "rule_id": "missing",
+          "n": 35,
+          "handles": 35,
+          "installs": 3
+        },
+        {
+          "source": "fingerprint",
+          "rule_id": "community-fingerprint",
+          "n": 12,
+          "handles": 12,
+          "installs": 12
+        },
+        {
+          "source": "heuristic",
+          "rule_id": "contact-number-bait",
+          "n": 4,
+          "handles": 3,
+          "installs": 4
+        },
+        {
+          "source": "domain",
+          "rule_id": "community-domain",
+          "n": 1,
+          "handles": 1,
+          "installs": 1
+        }
+      ]
+    },
+    {
+      "query": 2,
+      "results": [
+        {
+          "rule_id": "list",
+          "handles": 184,
+          "feedback": 1872,
+          "max_feedback_for_one_handle": 201
+        },
+        {
+          "rule_id": "community-fingerprint-sim",
+          "handles": 400,
+          "feedback": 496,
+          "max_feedback_for_one_handle": 9
+        },
+        {
+          "rule_id": "weak-signal-combo",
+          "handles": 165,
+          "feedback": 222,
+          "max_feedback_for_one_handle": 22
+        },
+        {
+          "rule_id": null,
+          "handles": 35,
+          "feedback": 35,
+          "max_feedback_for_one_handle": 1
+        },
+        {
+          "rule_id": "community-fingerprint",
+          "handles": 12,
+          "feedback": 12,
+          "max_feedback_for_one_handle": 1
+        },
+        {
+          "rule_id": "contact-number-bait",
+          "handles": 3,
+          "feedback": 4,
+          "max_feedback_for_one_handle": 2
+        },
+        {
+          "rule_id": "community-domain",
+          "handles": 1,
+          "feedback": 1,
+          "max_feedback_for_one_handle": 1
+        }
+      ]
+    },
+    {
+      "query": 3,
+      "results": [
+        {
+          "reports_with_post_id": 0
+        }
+      ]
+    },
+    {
+      "query": 4,
+      "results": [
+        {
+          "status": "strong",
+          "n": 3578
+        }
+      ]
+    },
+    {
+      "query": 5,
+      "results": [
+        {
+          "n": 10,
+          "top_reporter": 333
+        }
+      ]
+    }
+  ],
+  "existing_tests": {
+    "files_passed": 14,
+    "tests_passed": 265
+  },
+  "implementation_follow_up": {
+    "implemented_at": "2026-09-13",
+    "phase": "A",
+    "changes": [
+      "Preserve evidence_post_id, tweet_text, display_name and bio for manual and detected positive reports.",
+      "Preserve rule_id and signal_ids on positive reports.",
+      "Evaluate weak-signal text and bio shapes independently.",
+      "Normalize fullwidth, zero-width and separated contact-number payloads.",
+      "Remove generic contact wording and emoji-only display-name evidence as independent triggers.",
+      "Search later valid starts for ordered keyword terms.",
+      "Reset omitted detector override fields between remote pack versions.",
+      "Extract display name from the author link without timestamp contamination."
+    ],
+    "same_sample_replay": {
+      "with_tweet_n": 993,
+      "before_hits": 823,
+      "after_hits": 753,
+      "changed": 72,
+      "changed_transition": "weak-signal-combo to miss",
+      "interpretation": "Precision-oriented tightening on selected reports; not a measured recall change."
+    },
+    "verification": {
+      "root_tests_passed": 600,
+      "community_api_tests_passed": 191,
+      "typecheck": "passed",
+      "lint": "passed",
+      "community_api_build": "passed",
+      "extension_build": "passed"
+    },
+    "production": {
+      "migration": "0025_report_detection_evidence.sql",
+      "worker_version_id": "c6815eb4-581d-448e-9d7e-6e2207fe2203",
+      "keyword_pack_version": "2026.09.13.2",
+      "keyword_rules": 760,
+      "post_deploy_checks": "passed"
+    }
+  },
+  "contains_raw_production_text": false
+}

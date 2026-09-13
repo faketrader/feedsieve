@@ -90,7 +90,8 @@ function buildVariantIndex(): void {
 export function ensureVariantTables(): Promise<void> {
   if (!variantLoad) {
     variantLoad =
-      typeof (globalThis as { browser?: { runtime?: { getURL?: unknown } } }).browser?.runtime?.getURL === 'function'
+      typeof (globalThis as { browser?: { runtime?: { getURL?: unknown } } }).browser?.runtime
+        ?.getURL === 'function'
         ? (async () => {
             const res = await fetch(browser.runtime.getURL(VARIANT_TABLES_URL));
             const raw = (res.ok ? await res.json() : null) as VariantTableShape | null;
@@ -109,7 +110,10 @@ const VARIANT_BY_CODEPOINT = new Map<number, string>();
 // Node 工具链态（vitest / lint）没有 browser.runtime：从源文件同步装入，保证
 // normalizeKeywordPhrase 在测试里用的就是全量变体表；扩展运行时改走
 // ensureVariantTables()（随包 runtime 资源）。
-if (typeof (globalThis as { browser?: { runtime?: { getURL?: unknown } } }).browser?.runtime?.getURL !== 'function') {
+if (
+  typeof (globalThis as { browser?: { runtime?: { getURL?: unknown } } }).browser?.runtime
+    ?.getURL !== 'function'
+) {
   const candidates = [resolve(process.cwd(), 'apps/extension'), process.cwd()];
   const found = candidates
     .map((base) => join(base, 'src/lib/detection/variant-tables.json'))
@@ -142,19 +146,17 @@ const NORMALIZE_CACHE_MAX = 2048;
 export function normalizeKeywordPhrase(value: string): string {
   const cached = NORMALIZE_CACHE.get(value);
   if (cached !== undefined) return cached;
-  const computed = (
-    applyVariantMaps(
-      applyVariantMaps(value.trim())
-        .normalize('NFKC') // 全角、上标、数学字母、兼容汉字在此归并
-        // 零宽规避不止 200B-200D：U+2060 词连接符、U+00AD 软连字符、双向控制符等
-        // 全部是 Cf（格式字符），实战样本已被用来拆「我福不黑不信你看」，整类剥掉。
-        .replace(/[\p{Cf}\u{FE00}-\u{FE0F}]/gu, ''),
-    ) // NFKC 消不掉、先映射后 NFKC 可能再次产生的变体，第二轮映射补位
-      // NFKC 消不下的残余组合附加符只剩 Zalgo 装饰一类，一并剥；
-      // 韩文填充符（U+3164/U+115F/U+1160）写作空白但属 Lo，标点剥离碰不到。
-      .replace(/[\p{Mn}\u{3164}\u{115F}\u{1160}]/gu, '')
-      .toLocaleLowerCase()
-  );
+  const computed = applyVariantMaps(
+    applyVariantMaps(value.trim())
+      .normalize('NFKC') // 全角、上标、数学字母、兼容汉字在此归并
+      // 零宽规避不止 200B-200D：U+2060 词连接符、U+00AD 软连字符、双向控制符等
+      // 全部是 Cf（格式字符），实战样本已被用来拆「我福不黑不信你看」，整类剥掉。
+      .replace(/[\p{Cf}\u{FE00}-\u{FE0F}]/gu, ''),
+  ) // NFKC 消不掉、先映射后 NFKC 可能再次产生的变体，第二轮映射补位
+    // NFKC 消不下的残余组合附加符只剩 Zalgo 装饰一类，一并剥；
+    // 韩文填充符（U+3164/U+115F/U+1160）写作空白但属 Lo，标点剥离碰不到。
+    .replace(/[\p{Mn}\u{3164}\u{115F}\u{1160}]/gu, '')
+    .toLocaleLowerCase();
   if (NORMALIZE_CACHE.size >= NORMALIZE_CACHE_MAX) NORMALIZE_CACHE.clear();
   NORMALIZE_CACHE.set(value, computed);
   return computed;
@@ -208,21 +210,133 @@ function ruleMatchesText(value: string, rule: ActiveKeywordRule): boolean {
   const matchers = ruleMatchersForRule(rule);
   if (matchers.needleTexts) {
     const haystack = textForMatch(value);
-    let cursor = 0;
-    for (const needle of matchers.needleTexts) {
-      const index = haystack.indexOf(needle, cursor);
-      if (index < 0) return false;
-      if (cursor > 0 && index - cursor > (rule.maxGap ?? 12)) return false;
-      cursor = index + needle.length;
+    const maxGap = rule.maxGap ?? 12;
+    let ends: number[] = [];
+    let index = haystack.indexOf(matchers.needleTexts[0]!);
+    while (index >= 0) {
+      ends.push(index + matchers.needleTexts[0]!.length);
+      index = haystack.indexOf(matchers.needleTexts[0]!, index + 1);
     }
-    return true;
+    for (const needle of matchers.needleTexts.slice(1)) {
+      const nextEnds = new Set<number>();
+      for (const previousEnd of ends) {
+        let next = haystack.indexOf(needle, previousEnd);
+        while (next >= 0 && next - previousEnd <= maxGap) {
+          nextEnds.add(next + needle.length);
+          next = haystack.indexOf(needle, next + 1);
+        }
+      }
+      if (nextEnds.size === 0) return false;
+      ends = [...nextEnds];
+    }
+    return ends.length > 0;
   }
   if (matchers.ascii) return matchers.ascii.test(normalizeKeywordPhrase(value));
   return textForMatch(value).includes(matchers.phraseText);
 }
+
+interface MultiPatternNode {
+  next: Map<string, number>;
+  fail: number;
+  outputs: number[];
+}
+
+/**
+ * 把普通字面规则编译成 Aho-Corasick 自动机；有序分词和 ASCII 整词规则仍走
+ * 各自的精确语义。一次输入扫描会算出全部规则的首个命中字段，随后每条
+ * HeuristicRule 只做 O(1) 查询，且重叠短语不会像普通全局正则那样漏掉。
+ */
+function createKeywordMatchIndex(rules: readonly ActiveKeywordRule[]) {
+  const nodes: MultiPatternNode[] = [{ next: new Map(), fail: 0, outputs: [] }];
+  const plainRuleIndexes: number[] = [];
+  const asciiRuleIndexes: number[] = [];
+  const orderedRuleIndexes: number[] = [];
+
+  for (let ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
+    const rule = rules[ruleIndex]!;
+    const matchers = ruleMatchersForRule(rule);
+    if (matchers.needleTexts) {
+      orderedRuleIndexes.push(ruleIndex);
+      continue;
+    }
+    if (matchers.ascii) {
+      asciiRuleIndexes.push(ruleIndex);
+      continue;
+    }
+    if (!matchers.phraseText) continue;
+    plainRuleIndexes.push(ruleIndex);
+    let state = 0;
+    for (const char of matchers.phraseText) {
+      let next = nodes[state]!.next.get(char);
+      if (next === undefined) {
+        next = nodes.length;
+        nodes[state]!.next.set(char, next);
+        nodes.push({ next: new Map(), fail: 0, outputs: [] });
+      }
+      state = next;
+    }
+    nodes[state]!.outputs.push(ruleIndex);
+  }
+
+  const queue: number[] = [];
+  for (const state of nodes[0]!.next.values()) queue.push(state);
+  for (let head = 0; head < queue.length; head += 1) {
+    const state = queue[head]!;
+    for (const [char, next] of nodes[state]!.next) {
+      queue.push(next);
+      let fallback = nodes[state]!.fail;
+      while (fallback !== 0 && !nodes[fallback]!.next.has(char)) {
+        fallback = nodes[fallback]!.fail;
+      }
+      nodes[next]!.fail = nodes[fallback]!.next.get(char) ?? 0;
+      nodes[next]!.outputs.push(...nodes[nodes[next]!.fail]!.outputs);
+    }
+  }
+
+  const hitsByInput = new WeakMap<object, Map<number, number>>();
+  return (input: { displayName?: string; handle: string; text?: string; bio?: string }) => {
+    const cached = hitsByInput.get(input);
+    if (cached) return cached;
+    const hits = new Map<number, number>();
+    const fields = [input.displayName, input.handle, input.text, input.bio];
+
+    for (let fieldIndex = 0; fieldIndex < fields.length; fieldIndex += 1) {
+      const value = fields[fieldIndex];
+      if (!value) continue;
+      const normalized = normalizeKeywordPhrase(value);
+      const compact = normalized.replace(/[\p{P}\p{S}\s]+/gu, '');
+
+      if (plainRuleIndexes.length > 0) {
+        let state = 0;
+        for (const char of compact) {
+          while (state !== 0 && !nodes[state]!.next.has(char)) state = nodes[state]!.fail;
+          state = nodes[state]!.next.get(char) ?? 0;
+          for (const ruleIndex of nodes[state]!.outputs) {
+            if (!hits.has(ruleIndex)) hits.set(ruleIndex, fieldIndex);
+          }
+        }
+      }
+      for (const ruleIndex of asciiRuleIndexes) {
+        if (!hits.has(ruleIndex) && ruleMatchersForRule(rules[ruleIndex]!).ascii!.test(normalized)) {
+          hits.set(ruleIndex, fieldIndex);
+        }
+      }
+      for (const ruleIndex of orderedRuleIndexes) {
+        if (!hits.has(ruleIndex) && ruleMatchesText(value, rules[ruleIndex]!)) {
+          hits.set(ruleIndex, fieldIndex);
+        }
+      }
+    }
+    hitsByInput.set(input, hits);
+    return hits;
+  };
+}
+
 export function isValidPhrase(value: string): boolean {
   const phrase = value.trim();
-  return phrase.length >= 1 && phrase.length <= MAX_PHRASE_LENGTH;
+  return (
+    phrase.length >= 1 && phrase.length <= MAX_PHRASE_LENGTH && textForMatch(phrase).length > 0
+  );
 }
 function normalizeSettings(value: unknown): KeywordRuleSettings {
   const raw = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
@@ -234,9 +348,8 @@ function normalizeSettings(value: unknown): KeywordRuleSettings {
   // v0.7.4 曾把全部行业包设为默认订阅；v0.7.6 起默认只订阅黄推 / 成人引流。
   // 迁移标记写入后，才把订阅数组视为用户在新版里做出的明确选择，之后关闭全部
   // 也不会被重新打开。
-  const storedVersion = typeof raw.subscriptionDefaultsVersion === 'number'
-    ? raw.subscriptionDefaultsVersion
-    : null;
+  const storedVersion =
+    typeof raw.subscriptionDefaultsVersion === 'number' ? raw.subscriptionDefaultsVersion : null;
   const hasCurrentSubscriptionDefaults = storedVersion === SUBSCRIPTION_DEFAULTS_VERSION;
   // v4 新增 crypto_giveaway_scams 默认订阅：v3 存量用户的明确选择要保留，
   // 只把新默认包合并进去（不开启 hasCurrent 数组直通的路径）。
@@ -259,10 +372,13 @@ function normalizeSettings(value: unknown): KeywordRuleSettings {
   const subscribedCategoryIds = hasCurrentSubscriptionDefaults
     ? (storedSubscribedRaw ?? [])
     : storedSubscribedRaw
-      ? (storedSubscribedRaw.length > 0
-          ? [...storedSubscribedRaw, ...defaultPresent.filter((id) => !storedSubscribedRaw.includes(id))]
-          : /* 明确关闭全部：保留用户的空订阅 */
-            [])
+      ? storedSubscribedRaw.length > 0
+        ? [
+            ...storedSubscribedRaw,
+            ...defaultPresent.filter((id) => !storedSubscribedRaw.includes(id)),
+          ]
+        : /* 明确关闭全部：保留用户的空订阅 */
+          []
       : defaultPresent;
   const customRules = Array.isArray(raw.customRules)
     ? raw.customRules
@@ -305,7 +421,8 @@ export async function addCustomKeywordRule(value: string): Promise<KeywordRuleSe
   const normalized = normalizeKeywordPhrase(phrase);
   if (settings.customRules.some((rule) => normalizeKeywordPhrase(rule.phrase) === normalized))
     return settings;
-  if (settings.customRules.length >= MAX_CUSTOM_KEYWORD_RULES) throw new Error('keyword_rule_limit');
+  if (settings.customRules.length >= MAX_CUSTOM_KEYWORD_RULES)
+    throw new Error('keyword_rule_limit');
   const next = {
     ...settings,
     customRules: [
@@ -394,23 +511,17 @@ export function createKeywordHeuristics(
   /** 命中字段的标签语言（简介/正文…）：徽章上透出命中位置，方便核对是否误标 */
   fieldLabels: readonly [string, string, string, string] = ['昵称', '账号', '正文', '简介'],
 ): readonly HeuristicRule[] {
-  return activeKeywordRules(settings, catalog).map((rule) => ({
+  const rules = activeKeywordRules(settings, catalog);
+  const matchAll = createKeywordMatchIndex(rules);
+  return rules.map((rule, ruleIndex) => ({
     id: `keyword:${rule.id}`,
     check(input) {
       // 垃圾账号常把引流词直接放在昵称里，而正文只发图片或表情。
       // handle 也参与匹配，方便用户自定义拦截固定账号前缀。
       // 每个字段独立匹配，避免昵称末尾和正文开头偶然拼成一个规则；
       // 命中字段透出到理由里（简介/正文…），用户第一眼能核对来源。
-      const hitIndex = [
-        input.displayName,
-        input.handle,
-        input.text,
-        input.bio,
-      ].findIndex(
-        (value): value is string =>
-          typeof value === 'string' && value.length > 0 && ruleMatchesText(value, rule),
-      );
-      if (hitIndex < 0) return null;
+      const hitIndex = matchAll(input).get(ruleIndex);
+      if (hitIndex === undefined) return null;
       const fieldLabel = fieldLabels[hitIndex];
       const base =
         rule.source === 'custom'

@@ -102,7 +102,8 @@ export function validateDetectorConfigOverride(raw: unknown): boolean {
     for (const [key, value] of Object.entries(values)) {
       if (!allowed.includes(key)) return false;
       const def =
-        (DETECTOR_CONFIG as Record<string, Record<string, number> | undefined>)[section]?.[key] ?? 0;
+        (DETECTOR_CONFIG as Record<string, Record<string, number> | undefined>)[section]?.[key] ??
+        0;
       if (
         typeof value !== 'number' ||
         !Number.isFinite(value) ||
@@ -129,6 +130,8 @@ export function applyDetectorConfigOverride(raw: unknown): boolean {
     }
   };
   if (raw != null && validateDetectorConfigOverride(raw)) {
+    // 每个远程包都是完整的当前覆写；先清掉上一版未在本包出现的字段。
+    reset();
     for (const [section, values] of Object.entries(raw as Record<string, unknown>)) {
       Object.assign(
         detectorConfig[section as keyof typeof DETECTOR_CONFIG] as object,

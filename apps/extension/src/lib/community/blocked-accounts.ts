@@ -23,6 +23,9 @@ export interface BlockedAccount {
   linkDomains?: string[];
   /** 这次判断的来源；手动标记 = manual，与检测器命中区分开（规则质量分析用）。 */
   detectionSource?: string;
+  ruleId?: string;
+  signalIds?: string[];
+  evidencePostId?: string;
   /** 击杀时刻探活（#2）：本次拉黑伴随的 UserByScreenName 现场解析结果；缓存命中或未解析时缺省。
    * 只表达观测，不做清理决策；官方名单失效口径在服务端 account_health。 */
   liveness?: 'alive' | 'dead';
@@ -45,6 +48,9 @@ export interface BlockedAccountEvidence {
   contentFingerprint?: string;
   linkDomains?: string[];
   detectionSource?: string;
+  ruleId?: string;
+  signalIds?: string[];
+  evidencePostId?: string;
   origin?: BlockOrigin;
   communityVote?: boolean;
   batchId?: string;
@@ -96,6 +102,9 @@ export async function markBlocked(
         existing.contentFingerprint = evidence.contentFingerprint;
         existing.linkDomains = evidence.linkDomains;
         existing.detectionSource = evidence.detectionSource ?? existing.detectionSource;
+        existing.ruleId = evidence.ruleId ?? existing.ruleId;
+        existing.signalIds = evidence.signalIds ?? existing.signalIds;
+        existing.evidencePostId = evidence.evidencePostId ?? existing.evidencePostId;
         existing.origin = evidence.origin ?? existing.origin;
         existing.communityVote = evidence.communityVote ?? existing.communityVote;
         existing.batchId = evidence.batchId ?? existing.batchId;
@@ -127,6 +136,9 @@ export async function markBlocked(
       ...(evidence?.contentFingerprint ? { contentFingerprint: evidence.contentFingerprint } : {}),
       ...(evidence?.linkDomains?.length ? { linkDomains: evidence.linkDomains } : {}),
       ...(evidence?.detectionSource ? { detectionSource: evidence.detectionSource } : {}),
+      ...(evidence?.ruleId ? { ruleId: evidence.ruleId } : {}),
+      ...(evidence?.signalIds?.length ? { signalIds: evidence.signalIds } : {}),
+      ...(evidence?.evidencePostId ? { evidencePostId: evidence.evidencePostId } : {}),
       ...(evidence?.origin ? { origin: evidence.origin } : {}),
       ...(typeof evidence?.communityVote === 'boolean'
         ? { communityVote: evidence.communityVote }

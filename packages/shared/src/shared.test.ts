@@ -1,5 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CATEGORIES, categoryLabel, formatAgo, isCategory, normalizeHandle } from './index';
+import {
+  APPLICATION_KINDS,
+  APPLICATION_STATUSES,
+  CATEGORIES,
+  categoryLabel,
+  formatAgo,
+  isApplicationKind,
+  isApplicationStatus,
+  isOpenApplicationStatus,
+  isCategory,
+  normalizeHandle,
+} from './index';
 
 describe('categories', () => {
   it('canonical 顺序与历史各副本一致（community-api REPORT_REASONS / share-card CATEGORY_ORDER）', () => {
@@ -107,5 +118,36 @@ describe('formatAgo', () => {
     expect(formatAgo(Math.floor(tsJust / 1000), 'zh')).toBe('刚刚');
     const tsHour = Date.now() - 3_600_000;
     expect(formatAgo(Math.floor(tsHour / 1000), 'zh')).toBe('1 小时前');
+  });
+});
+
+describe('application kinds', () => {
+  it('isApplicationKind 接受全部成员并拒绝未知/类型不符输入', () => {
+    expect(APPLICATION_KINDS).toEqual(['whitelist', 'appeal']);
+    for (const kind of APPLICATION_KINDS) {
+      expect(isApplicationKind(kind)).toBe(true);
+    }
+    expect(isApplicationKind('blocklist')).toBe(false);
+    expect(isApplicationKind('')).toBe(false);
+    expect(isApplicationKind('WHITELIST')).toBe(false);
+  });
+});
+
+describe('application statuses', () => {
+  it('isApplicationStatus 接受全部状态并拒绝未知', () => {
+    expect(APPLICATION_STATUSES).toEqual(['pending', 'verified', 'approved', 'rejected']);
+    for (const status of APPLICATION_STATUSES) {
+      expect(isApplicationStatus(status)).toBe(true);
+    }
+    expect(isApplicationStatus('closed')).toBe(false);
+    expect(isApplicationStatus('Verified')).toBe(false);
+  });
+
+  it('isOpenApplicationStatus 只有 pending/verified 未决（approved/rejected 终态允许重新提交）', () => {
+    expect(isOpenApplicationStatus('pending')).toBe(true);
+    expect(isOpenApplicationStatus('verified')).toBe(true);
+    expect(isOpenApplicationStatus('approved')).toBe(false);
+    expect(isOpenApplicationStatus('rejected')).toBe(false);
+    expect(isOpenApplicationStatus('')).toBe(false);
   });
 });

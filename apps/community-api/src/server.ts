@@ -25,6 +25,14 @@ const SECURITY_HEADERS: Record<string, string> = {
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
   'X-Frame-Options': 'SAMEORIGIN',
+  // CSP 基线：站点有用户提交内容渲染（宣言/贡献短语）。TanStack Start 的
+  // 水合数据走内联 <script>，主题启动脚本也是内联的——script-src 必须留
+  // 'unsafe-inline'（nonce 需要改 Nitro 渲染管线，收益不成比例）；其余
+  // 面向（object/frame/base/form）全部收死。页面 fetch 全部同源相对路径。
+  'Content-Security-Policy':
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+    + "img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; "
+    + "frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'",
 };
 
 /** 包一层新 Response 注入安全头（不动缓存里已存的副本） */

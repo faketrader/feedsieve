@@ -11,16 +11,14 @@ import { SEARCH_F_LIVE_HTML } from '../../../../../fixtures/x/timeline/search-f-
 import { PROFILE_TIMELINE_HTML } from '../../../../../fixtures/x/profile/profile';
 import { THREAD_HTML } from '../../../../../fixtures/x/replies/thread';
 import { runDetectionPipeline } from './detection-pipeline';
-import {
-  BUNDLED_KEYWORD_PACK_CATALOG,
-  type KeywordPackCatalog,
-} from './keyword-packs';
+import { BUNDLED_KEYWORD_PACK_CATALOG, type KeywordPackCatalog } from './keyword-packs';
 import { createKeywordHeuristics, DEFAULT_KEYWORD_RULE_SETTINGS } from './keyword-rules';
 
 const keywordHeuristics = createKeywordHeuristics(DEFAULT_KEYWORD_RULE_SETTINGS);
 
 function runPipeline(input: {
   handle: string;
+  postId?: string;
   displayName?: string;
   text?: string;
   bio?: string;
@@ -139,6 +137,41 @@ describe('fixtures/x 生产管线联动（runDetectionPipeline）', () => {
     }
   });
 
+  it('拼音代字逃逸：真实漏检样本 sao货gs…（2026-09-13 全层漏检回归）由展开变体规则兜住', () => {
+    const result = runPipeline({
+      handle: 'lapseller01',
+      text: 'sao货gs 没人比她sao❣️ @lapchh 1i',
+    });
+    expect(result.presentation).toBe('review');
+    // sao货 = 骚货（adult-gray-traffic-a8b0aabaa0562b5d）的裸拼音变体 -py1；
+    // 同文本里的 没人比她sao 是 没人比她骚（-c8a5be76bc38ac44）的 -py1
+    expect(result.detection?.ruleId).toMatch(
+      /^keyword:official:adult-gray-traffic-(a8b0aabaa0562b5d|c8a5be76bc38ac44)-py1$/,
+    );
+  });
+
+  it('拼音代字家族：纯汉字原话与带调/leet 变体全部命中；正常外语文本不误伤', () => {
+    // 原话（词库新入库）与其展开变体（构建期生成，见 build-keyword-packs pinyinVariants）
+    for (const text of [
+      '没人比她骚',
+      '没人比她sao',
+      '没人比她sǎo',
+      '没人比她sa0',
+      'sǎo货',
+      'sa0货',
+    ]) {
+      const result = runPipeline({ handle: 'evade01', text });
+      expect(result.presentation, text).toBe('review');
+      // 原话命中词库本体规则（无 -py 后缀），变体命中 -pyN 派生规则
+      expect(result.detection?.ruleId, text).toMatch(
+        /^keyword:official:adult-gray-traffic-(c8a5be76bc38ac44|a8b0aabaa0562b5d)(-py[123])?$/,
+      );
+    }
+    // 全局归一化不受影响（约束见 build-keyword-packs PINYIN_SUBSTITUTIONS 注释）
+    const clean = runPipeline({ handle: 'traveler', text: 'Sao Paulo 之旅记录' });
+    expect(clean.detection).toBeNull();
+  });
+
   it('白名单一票豁免在生产管线最前：即使词库命中也放行', () => {
     const result = runPipeline({
       handle: 'pinnedauthor',
@@ -162,7 +195,12 @@ describe('fixtures/x 生产管线联动（runDetectionPipeline）', () => {
       version: 'test',
     };
     const exempt = runDetectionPipeline({
-      input: { handle: 'pinnedauthor', bio: '我福不黑不信你看' },
+      input: {
+        handle: 'pinnedauthor',
+        postId: '1999999999999999999',
+        text: '用户仍可手动覆盖',
+        bio: '我福不黑不信你看',
+      },
       community,
       builtinList: new Set(),
       keywordHeuristics,
@@ -172,6 +210,11 @@ describe('fixtures/x 生产管线联动（runDetectionPipeline）', () => {
     });
     expect(exempt.detection).toBeNull();
     expect(exempt.presentation).toBe('ignore');
+    expect(exempt.evidence).toMatchObject({
+      evidencePostId: '1999999999999999999',
+      tweetText: '用户仍可手动覆盖',
+      bio: '我福不黑不信你看',
+    });
     expect(result.detection).not.toBeNull();
   });
 });

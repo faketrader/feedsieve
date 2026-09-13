@@ -20,10 +20,9 @@ console.log('manifest signed by', m.signature.key_id);
 # 客户端拒绝接收（rollback_rejected）的旧版本，比如 Worker 后台已发布更新时。
 # API 不可达（离线发布）时告警继续；--force 可跳过该检查（如修复 latest 指针）。
 # API 地址: FEEDSIEVE_API 环境变量，或本地 ~/.config/feedsieve/api-base（0600，不入库）
-api_base="${FEEDSIEVE_API:-}"
-if [ -z "$api_base" ] && [ -f "$HOME/.config/feedsieve/api-base" ]; then
-  api_base="$(cat "$HOME/.config/feedsieve/api-base" 2>/dev/null || true)"
-fi
+. "$(dirname "$0")/lib/api-base.sh"
+resolve_feedsieve_api_base
+api_base="$FEEDSIEVE_API_BASE"
 latest_url="${api_base:+$api_base/v1/keyword-packs/latest}"
 if [ -z "$latest_url" ]; then
   echo "warning: 未设置 FEEDSIEVE_API / api-base，跳过远程版本检查（无法访问 latest）"

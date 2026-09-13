@@ -160,10 +160,13 @@ export function detect(
   }
 
   const heuristics = options.heuristics ?? DEFAULT_HEURISTICS;
+  // 同一轮的所有启发式共享同一个输入对象。关键词规则组会以对象身份缓存
+  // 一次批量匹配的结果，避免为数百条规则重复扫描同一昵称/正文/简介。
+  const heuristicInput = { ...input, handle };
   for (const rule of heuristics) {
     let matched: string | null;
     try {
-      matched = rule.check({ ...input, handle });
+      matched = rule.check(heuristicInput);
     } catch (error) {
       // 单条规则异常不拖垮整个检测，但必须留痕：一条线上必炸的规则静默消失
       // 等于无声漏报。detection-log 不记异常，console 是唯一痕迹。

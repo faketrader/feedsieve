@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { afterAll, describe, expect, it } from 'vitest';
 import worker from '../src/index';
-import { hashInstallationId } from '../src/lib/hash';
+import { hashIp } from '../src/lib/hash';
 import { decideKeywordContributions, listKeywordContributions } from '../src/keyword-contributions';
 
 const ORIGIN = 'https://api.example.com';
@@ -113,7 +113,8 @@ describe('keyword contributions', () => {
     // 网页单次上限 10
     expect((await postWebContributions('198.51.100.1', new Array(11).fill('x'))).status).toBe(413);
 
-    const webKey = `web-${await hashInstallationId(TEST_SALT, '198.51.100.1')}`;
+    // 与 lib/hash.ts 域分离口径一致：网页 IP 走独立 ip: 前缀哈希
+    const webKey = `web-${await hashIp(TEST_SALT, '198.51.100.1')}`;
     await postWebContributions(
       '198.51.100.1',
       Array.from({ length: 3 }, (_, i) => `web-0-${i}`),

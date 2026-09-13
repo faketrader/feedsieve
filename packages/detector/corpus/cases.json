@@ -606,6 +606,60 @@
         "text": "详情 https://shop.example.com/item?id=17891406690090 有售"
       },
       "expected": null
+    },
+    {
+      "id": "zh-sao-bita-marker",
+      "note": "「比她骚」marker 修复正样本：擦边emoji 佐证凑双信号",
+      "input": {
+        "handle": "sao_01",
+        "text": "没人比她骚 🍑"
+      },
+      "expected": "porn-bait-zh"
+    },
+    {
+      "id": "zh-sao-bita-guard",
+      "note": "误伤守卫：单一「比她骚」marker 不成立（正常语境八卦句式）",
+      "input": {
+        "handle": "normal_gossip",
+        "text": "她比她骚？也就那样吧"
+      },
+      "expected": null
+    },
+    {
+      "id": "zh-index-bait-combo",
+      "note": "捧主页话术家族正样本：主页能打+✈️ 双 marker（2026-09-13 实测二）",
+      "input": {
+        "handle": "verogonza93",
+        "text": "刷了半天的X ol就她的主页能打✈️了 @larelvis"
+      },
+      "expected": "porn-bait-zh"
+    },
+    {
+      "id": "zh-se-dingbuzhu-combo",
+      "note": "捧主页话术家族正样本：涩+顶不住 双 marker；正文嵌 2 字符垃圾后缀是本世代模板签名",
+      "input": {
+        "handle": "verogonza93",
+        "text": "她太涩了lj 我真顶不住 @larelvis"
+      },
+      "expected": "porn-bait-zh"
+    },
+    {
+      "id": "zh-dingbuzhu-guard",
+      "note": "误伤守卫：顶不住单独是游戏语境口语，单 marker 不成立",
+      "input": {
+        "handle": "gamer_pro",
+        "text": "这个BOSS我真顶不住，三管血刮痧"
+      },
+      "expected": null
+    },
+    {
+      "id": "zh-plane-emoji-guard",
+      "note": "误伤守卫：✈️ 单独是旅行语境，单 marker 不成立",
+      "input": {
+        "handle": "traveler_km",
+        "text": "明天✈️东京，期待馒头店"
+      },
+      "expected": null
     }
   ]
 }

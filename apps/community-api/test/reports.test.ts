@@ -126,6 +126,37 @@ describe('POST /v1/reports', () => {
     expect(absent).toBeNull();
   });
 
+  it('stores rule and structured signal ids and rejects malformed evidence', async () => {
+    const res = await post({
+      installation_id: 'rrrrrrrr-1111-4111-8111-rrrrrrrrrrrr',
+      reports: [
+        report('rule_ok', {
+          detection_source: 'heuristic',
+          rule_id: 'keyword:official:adult-local-door-hookup',
+          signal_ids: ['keyword:official:adult-local-door-hookup', 'weak-signal-combo'],
+        }),
+        report('rule_bad', { rule_id: 'contains spaces' }),
+        report('signals_bad', { signal_ids: ['ok', 42] }),
+      ],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { results: { status: string; error?: string }[] };
+    expect(body.results.map((item) => [item.status, item.error])).toEqual([
+      ['recorded', undefined],
+      ['rejected', 'invalid_rule_id'],
+      ['rejected', 'invalid_signal_ids'],
+    ]);
+
+    const stored = await env.DB.prepare('SELECT rule_id, signal_ids FROM reports WHERE handle = ?1')
+      .bind('rule_ok')
+      .first<{ rule_id: string; signal_ids: string }>();
+    expect(stored?.rule_id).toBe('keyword:official:adult-local-door-hookup');
+    expect(JSON.parse(stored?.signal_ids ?? '[]')).toEqual([
+      'keyword:official:adult-local-door-hookup',
+      'weak-signal-combo',
+    ]);
+  });
+
   it('stores evidence facts (tweet text / display name / bio) and enforces shape caps', async () => {
     const res = await post({
       installation_id: 'ffffffff-5555-4555-8555-ffffffffffff',
@@ -133,7 +164,7 @@ describe('POST /v1/reports', () => {
         report('facts_ok', {
           tweet_text: '领福利加微 xxx',
           display_name: '福利姐',
-          bio: ' punt '
+          bio: ' punt ',
         }),
         ...Array.from({ length: 10 }, (_, i) =>
           report(`facts_long_${i}`, { tweet_text: '长'.repeat(501) }),
@@ -196,9 +227,7 @@ describe('POST /v1/reports', () => {
     const ip = '203.0.113.77';
     const today = new Date().toISOString().slice(0, 10);
     const ipHash = await hashIp(env.INSTALLATION_SALT, ip);
-    await env.DB.prepare(
-      'INSERT INTO ip_usage (ip_hash, day, reports_today) VALUES (?1, ?2, ?3)',
-    )
+    await env.DB.prepare('INSERT INTO ip_usage (ip_hash, day, reports_today) VALUES (?1, ?2, ?3)')
       .bind(ipHash, today, 200)
       .run();
 
@@ -224,11 +253,10 @@ describe('POST /v1/reports', () => {
 
   it('keeps per-item outcomes inside one batch: intra-batch duplicate, alias fold-in, invalid item', async () => {
     // 正主 batch_mix_canon 带 x_user_id 555
-    expect(
-      (await postOne('batchmix-aaa1-4000-8000-aaaaaaaaaaa1', 'batch_mix_canon'))!.status,
-    ).toBe('recorded');
-    await env.DB
-      .prepare('UPDATE accounts SET x_user_id = ?2 WHERE handle = ?1')
+    expect((await postOne('batchmix-aaa1-4000-8000-aaaaaaaaaaa1', 'batch_mix_canon'))!.status).toBe(
+      'recorded',
+    );
+    await env.DB.prepare('UPDATE accounts SET x_user_id = ?2 WHERE handle = ?1')
       .bind('batch_mix_canon', '555')
       .run();
 
@@ -255,8 +283,7 @@ describe('POST /v1/reports', () => {
     expect((await accountRow('batch_mix_new'))?.report_count).toBe(1);
     expect((await accountRow('batch_mix_canon'))?.report_count).toBe(2);
     expect(await accountRow('batch_mix_ren')).toBeNull();
-    const aliases = await env.DB
-      .prepare('SELECT aliases FROM accounts WHERE handle = ?1')
+    const aliases = await env.DB.prepare('SELECT aliases FROM accounts WHERE handle = ?1')
       .bind('batch_mix_canon')
       .first<{ aliases: string }>();
     expect(JSON.parse(aliases?.aliases ?? '[]')).toContain('batch_mix_ren');
@@ -264,13 +291,18 @@ describe('POST /v1/reports', () => {
 
   it('alias creation is capped per installation per day; the vote still lands on the canonical handle', async () => {
     // 正主：老账号带 x_user_id 777
-    expect((await postOne('alias-cap-aaa-4000-8000-aaaaaaaaaaa1', 'alias_cap_old'))!.status).toBe('recorded');
+    expect((await postOne('alias-cap-aaa-4000-8000-aaaaaaaaaaa1', 'alias_cap_old'))!.status).toBe(
+      'recorded',
+    );
     await env.DB.prepare('UPDATE accounts SET x_user_id = ?2 WHERE handle = ?1')
       .bind('alias_cap_old', '777')
       .run();
 
     // 新安装的别名配额已用满
-    const installerHash = await hashInstallationId(env.INSTALLATION_SALT, 'alias-cap-aaa-4000-8000-aaaaaaaaaaa2');
+    const installerHash = await hashInstallationId(
+      env.INSTALLATION_SALT,
+      'alias-cap-aaa-4000-8000-aaaaaaaaaaa2',
+    );
     const today = new Date().toISOString().slice(0, 10);
     await env.DB.prepare(
       'INSERT INTO installations (id, first_seen_at, last_seen_at, aliases_day, aliases_today) VALUES (?1, ?2, ?2, ?3, ?4)',
@@ -294,7 +326,9 @@ describe('POST /v1/reports', () => {
     expect(JSON.parse(aliases?.aliases ?? '[]')).not.toContain('alias_cap_new');
 
     // 配额内的别名仍正常写入（另一个新安装，未预置配额行）
-    expect((await postOne('alias-cap-aaa-4000-8000-aaaaaaaaaaa3', 'alias_cap_later'))!.status).toBe('recorded');
+    expect((await postOne('alias-cap-aaa-4000-8000-aaaaaaaaaaa3', 'alias_cap_later'))!.status).toBe(
+      'recorded',
+    );
     await post({
       installation_id: 'alias-cap-aaa-4000-8000-aaaaaaaaaaa3',
       reports: [report('alias_cap_extra', { x_user_id: '777' })],

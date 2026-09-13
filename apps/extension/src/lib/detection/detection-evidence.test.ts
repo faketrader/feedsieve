@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  collectContentEvidence,
-  collectLinkDomains,
-  isSelfDomain,
-} from './detection-evidence';
+import { collectContentEvidence, collectLinkDomains, isSelfDomain } from './detection-evidence';
 
 describe('collectLinkDomains', () => {
   it('去自家域名、去重并封顶 5 个', () => {
@@ -39,15 +35,23 @@ describe('isSelfDomain', () => {
 });
 
 describe('collectContentEvidence', () => {
-  it('收集指纹与外链域名；无内容时两者皆空', () => {
+  it('收集指纹、外链和可回放页面证据；无内容时对应字段为空', () => {
     const withContent = collectContentEvidence({
       handle: '@a',
-      displayName: 'a',
+      postId: '1999999999999999999',
+      displayName: ' Display A ',
+      bio: ' bio A ',
       links: [{ href: 'https://spam.example.com', hostname: 'spam.example.com' }],
-      text: '免费刷量 加微信 12345',
+      text: ' 免费刷量 加微信 12345 ',
     });
     expect(withContent.contentFingerprint).toBeTruthy();
     expect(withContent.linkDomains).toEqual(['spam.example.com']);
+    expect(withContent).toMatchObject({
+      evidencePostId: '1999999999999999999',
+      tweetText: '免费刷量 加微信 12345',
+      displayName: 'Display A',
+      bio: 'bio A',
+    });
 
     const bare = collectContentEvidence({
       handle: '@a',
@@ -56,5 +60,6 @@ describe('collectContentEvidence', () => {
     });
     expect(bare.contentFingerprint).toBeUndefined();
     expect(bare.linkDomains).toBeUndefined();
+    expect(bare.tweetText).toBeUndefined();
   });
 });

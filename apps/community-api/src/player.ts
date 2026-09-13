@@ -9,6 +9,7 @@
  */
 
 import { sha256Hex } from './lib/hash';
+import { emailCodeHash, generateEmailCode } from './lib/email-code';
 import { markLeaderboardDirty } from './leaderboard';
 
 interface EmailServiceBinding {
@@ -202,16 +203,6 @@ export function normalizeXHandle(value: unknown): string | null | undefined {
 
 type PlayerResult<T> = { ok: true; value: T } | { ok: false; httpStatus: 400 | 403 | 404 | 429 | 503; error: string };
 
-function generateCode(): string {
-  const buffer = new Uint32Array(1);
-  crypto.getRandomValues(buffer);
-  return String((buffer[0] ?? 0) % 1_000_000).padStart(6, '0');
-}
-
-async function codeHash(salt: string, emailHash: string, code: string): Promise<string> {
-  return sha256Hex(`email-code:${salt}:${emailHash}:${code}`);
-}
-
 // ---------------------------------------------------------------------------
 // 档案凭证只有一种：安装 ID（扩展侧）。网页纯观看，不做认领/编辑——
 // 没有二次登录通道，也就没有「为什么插件和网页各要认领一遍」。
@@ -267,7 +258,7 @@ export async function bindEmail(
     return { ok: false, httpStatus: 429, error: 'too_many_code_requests' };
   }
 
-  const code = generateCode();
+  const code = generateEmailCode();
   await env.DB.prepare(
     `INSERT INTO email_codes (email_hash, installer_hash, code_hash, attempts, send_count, created_at, expires_at)
      VALUES (?1, ?2, ?3, 0, 1, ?4, ?5)
@@ -282,7 +273,7 @@ export async function bindEmail(
     .bind(
       emailHash,
       installHash,
-      await codeHash(env.INSTALLATION_SALT, emailHash, code),
+      await emailCodeHash(env.INSTALLATION_SALT, emailHash, code),
       now,
       now + PLAYER.codeTtlSeconds,
       now - 3600,
@@ -342,7 +333,7 @@ export async function verifyEmail(
   if (row.installer_hash !== installHash) {
     return { ok: false, httpStatus: 400, error: 'invalid_or_expired_code' };
   }
-  if ((await codeHash(env.INSTALLATION_SALT, emailHash, code)) !== row.code_hash) {
+  if ((await emailCodeHash(env.INSTALLATION_SALT, emailHash, code)) !== row.code_hash) {
     // 错码计数必须原子递增：并发错猜不能共享同一份 attempts 读数把
     // 5 次上限翻倍。条件 UPDATE 抢不到（changes = 0，已达上限）→ 锁定。
     const bumped = await env.DB.prepare(
@@ -436,6 +427,7 @@ export async function updateProfile(
 
   // 档案随时可写：写不写公开榜由 email_verified_at 门控，编辑本身不设门槛
   // （未建档时顺带建行，安装哈希即凭证）；last_seen 同步维护。
+  // UPSERT 已完整覆盖 display_name/bio/x_handle，不再补第二条 UPDATE（纯重复写）。
   const now = Math.floor(Date.now() / 1000);
   await env.DB.prepare(
     `INSERT INTO installations (id, first_seen_at, last_seen_at, display_name, bio, x_handle)
@@ -447,12 +439,6 @@ export async function updateProfile(
        x_handle = excluded.x_handle`,
   )
     .bind(installHash, now, displayName, bio, xHandle)
-    .run();
-
-  await env.DB.prepare(
-    'UPDATE installations SET display_name = ?2, bio = ?3, x_handle = ?4 WHERE id = ?1',
-  )
-    .bind(installHash, displayName, bio, xHandle)
     .run();
   await markLeaderboardDirty(env);
   return { ok: true, value: { display_name: displayName, bio, x_handle: xHandle } };

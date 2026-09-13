@@ -1,5 +1,6 @@
 import { validateRescue } from './lib/validate';
 import { POLICY } from './reports';
+import { nowSeconds, utcToday } from './lib/time';
 import {
   installationHash,
   refreshAccountsFromLabels,
@@ -25,14 +26,6 @@ export interface RescueResult {
 
 export type ProcessRescueResult =
   { ok: true; results: RescueResult[] } | { ok: false; httpStatus: 400 | 413 | 429; error: string };
-
-function utcToday(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function nowSeconds(): number {
-  return Math.floor(Date.now() / 1000);
-}
 
 /**
  * 误标票：认为某条社区标注可能误伤时投出。

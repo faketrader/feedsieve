@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { existsSync } from 'node:fs';
 import {
   buildSigningMessage,
   bytesToBase64,
@@ -38,21 +39,32 @@ describe('远程关键词包契约', () => {
       'adult_gray_traffic',
       'crypto_giveaway_scams',
     ]);
-    // 与仓库内构建产物同源比较，不再硬编码版本/条数：词包 bump 不用手改测试
+    // 与仓库内构建产物同源比较，不再硬编码版本/条数：词包 bump 不用手改测试。
+    // 构建期含拼音代字展开（pinyinVariants），产物条数 = build(source) 的条数。
     const { readFile } = await import('node:fs/promises');
     const { resolve } = await import('node:path');
     const sourcePath = resolve(
       process.cwd(),
       'community/keyword-packs/source.json',
     );
-    const source = JSON.parse(await readFile(sourcePath, 'utf8')) as {
+    const sourceRaw = await readFile(sourcePath, 'utf8');
+    const source = JSON.parse(sourceRaw) as {
       pack_version: string;
       packs: Array<{ rules: unknown[] }>;
     };
-    expect(BUNDLED_KEYWORD_PACK_CATALOG.pack_version).toBe(source.pack_version);
+    // scripts/build-keyword-packs.mjs 与 source.json 同仓定位（根跑 / 应用目录跑都兼容）
+    const scriptPath = [resolve(process.cwd(), 'scripts/build-keyword-packs.mjs'), resolve(process.cwd(), '../scripts/build-keyword-packs.mjs')].find((p) => existsSync(p));
+    if (!scriptPath) throw new Error('build-keyword-packs.mjs not found');
+    const { build } = await import(scriptPath);
+    // build 从 .mjs 导入无类型，这里对产物形状做最小注解
+    const built = build(source) as {
+      pack_version: string;
+      packs: Array<{ rules: Array<{ id: string; phrase: string }> }>;
+    };
+    expect(BUNDLED_KEYWORD_PACK_CATALOG.pack_version).toBe(built.pack_version);
     expect(
       BUNDLED_KEYWORD_PACK_CATALOG.packs.reduce((count, pack) => count + pack.rules.length, 0),
-    ).toBe(source.packs.reduce((count, pack) => count + pack.rules.length, 0));
+    ).toBe(built.packs.reduce((count: number, pack) => count + pack.rules.length, 0));
     expect(BUNDLED_KEYWORD_PACK_CATALOG.pack_version).toMatch(/^\d{4}\.\d{2}\.\d{2}\.\d{1,4}$/);
     expect(
       BUNDLED_KEYWORD_PACK_CATALOG.packs

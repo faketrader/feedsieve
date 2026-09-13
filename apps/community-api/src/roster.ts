@@ -61,7 +61,7 @@ function asStringArray(value: unknown): string[] {
 /**
  * 公示 roster 按 snapshot_version 模块级 memo：6 个 SSR 路由 / OG 卡 /
  * /v1/roster/latest 在同一个 isolate 生命周期里共享一次 R2 读 + 全量 parse。
- * 快照版本化且发布后不可变，换版本即自然失效；容量上限 2 份防 grow。
+ * 快照版本化且发布后不可变，换版本即自然失效；单槽覆盖（同版本内黑/白名单页与 OG 卡全共享）。
  */
 let rosterMemo: { version: string; value: RosterPayload } | null = null;
 

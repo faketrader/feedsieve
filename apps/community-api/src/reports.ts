@@ -1,5 +1,6 @@
 import { validateReport, type ValidReport } from './lib/validate';
 import { hashIp } from './lib/hash';
+import { nowSeconds, utcToday } from './lib/time';
 import { recordHealthObservations, type HealthObservation } from './lib/account-health';
 import {
   installationHash,
@@ -29,35 +30,38 @@ export function effectiveDailyLimit(baseLimit: number, trust: number): number {
   return Math.max(POLICY.minDailyLimit, Math.round(baseLimit * trust));
 }
 
-/** 公开政策快照（/v1/policy 与 manifest 内嵌；与 community/policy/v3.yaml 对应） */
+/** 公开政策快照（/v1/policy 与 manifest 内嵌；与 community/policy/v3.yaml 对应）。
+ *  纯静态字面量，模块级冻结一份，roster 组装 / manifest 生成按引用复用。 */
+const PUBLIC_POLICY = Object.freeze({
+  version: 3,
+  blocklist: {
+    formula: 'block_votes - false_positive_votes',
+    min_net_votes: POLICY.communityNetThreshold,
+    one_current_vote_per_installation: true,
+  },
+  limits: {
+    daily_report_base: POLICY.dailyReportLimit,
+    daily_rescue_base: POLICY.rescueDailyLimit,
+    daily_min: POLICY.minDailyLimit,
+    max_batch: POLICY.maxBatch,
+    daily_ip_report_limit: POLICY.dailyIpReportLimit,
+    daily_alias_cap: POLICY.aliasesPerDay,
+  },
+  reporter_trust: {
+    default: 1,
+    floor: POLICY.trustFloor,
+    burst_threshold: POLICY.trustBurstThreshold,
+    burst_decay: POLICY.trustDecay,
+  },
+  // 影子公式：已计算但不参与入榜，公开声明避免误解
+  consensus_v2: {
+    status: 'shadow',
+    formula: 'trust × installation maturity weighted net votes + temporal/evidence independence',
+  },
+});
+
 export function publicPolicy() {
-  return {
-    version: 3,
-    blocklist: {
-      formula: 'block_votes - false_positive_votes',
-      min_net_votes: POLICY.communityNetThreshold,
-      one_current_vote_per_installation: true,
-    },
-    limits: {
-      daily_report_base: POLICY.dailyReportLimit,
-      daily_rescue_base: POLICY.rescueDailyLimit,
-      daily_min: POLICY.minDailyLimit,
-      max_batch: POLICY.maxBatch,
-      daily_ip_report_limit: POLICY.dailyIpReportLimit,
-      daily_alias_cap: POLICY.aliasesPerDay,
-    },
-    reporter_trust: {
-      default: 1,
-      floor: POLICY.trustFloor,
-      burst_threshold: POLICY.trustBurstThreshold,
-      burst_decay: POLICY.trustDecay,
-    },
-    // 影子公式：已计算但不参与入榜，公开声明避免误解
-    consensus_v2: {
-      status: 'shadow',
-      formula: 'trust × installation maturity weighted net votes + temporal/evidence independence',
-    },
-  };
+  return PUBLIC_POLICY;
 }
 
 export interface ReportResult {
@@ -68,14 +72,6 @@ export interface ReportResult {
 
 export type ProcessBatchResult =
   { ok: true; results: ReportResult[] } | { ok: false; httpStatus: 400 | 413 | 429; error: string };
-
-function utcToday(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function nowSeconds(): number {
-  return Math.floor(Date.now() / 1000);
-}
 
 export async function processReportBatch(
   env: Cloudflare.Env,
@@ -197,14 +193,7 @@ export async function processReportBatch(
          + excluded.reports_today
        ) <= MAX(?5, ROUND(?6 * installations.trust))`,
     )
-      .bind(
-        installHash,
-        now,
-        today,
-        quotaUnits,
-        POLICY.minDailyLimit,
-        POLICY.dailyReportLimit,
-      )
+      .bind(installHash, now, today, quotaUnits, POLICY.minDailyLimit, POLICY.dailyReportLimit)
       .run();
     if ((reserved.meta.changes ?? 0) === 0) {
       return { ok: false, httpStatus: 429, error: 'rate_limited' };
@@ -252,7 +241,9 @@ export async function processReportBatch(
     const knownRows = await batchReads<KnownAccount>(
       env,
       xUserIds.map((id) =>
-        env.DB.prepare('SELECT handle, aliases FROM accounts WHERE x_user_id = ?1 LIMIT 1').bind(id),
+        env.DB.prepare('SELECT handle, aliases FROM accounts WHERE x_user_id = ?1 LIMIT 1').bind(
+          id,
+        ),
       ),
     );
     xUserIds.forEach((id, index) => {
@@ -349,8 +340,9 @@ export async function processReportBatch(
       env.DB.prepare(
         `INSERT INTO reports
            (handle, x_user_id, reason, evidence_post_id, installation_id, client_version, created_at,
-            content_fingerprint, link_domains, detection_source, tweet_text, display_name, bio)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            content_fingerprint, link_domains, detection_source, rule_id, signal_ids,
+            tweet_text, display_name, bio)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(installation_id, handle) DO UPDATE SET
            x_user_id = COALESCE(excluded.x_user_id, reports.x_user_id),
            reason = excluded.reason,
@@ -360,25 +352,28 @@ export async function processReportBatch(
            content_fingerprint = COALESCE(excluded.content_fingerprint, reports.content_fingerprint),
            link_domains = COALESCE(excluded.link_domains, reports.link_domains),
            detection_source = COALESCE(excluded.detection_source, reports.detection_source),
+           rule_id = COALESCE(excluded.rule_id, reports.rule_id),
+           signal_ids = COALESCE(excluded.signal_ids, reports.signal_ids),
            tweet_text = COALESCE(excluded.tweet_text, reports.tweet_text),
            display_name = COALESCE(excluded.display_name, reports.display_name),
-           bio = COALESCE(excluded.bio, reports.bio)`
-      )
-        .bind(
-          canonical,
-          r.xUserId,
-          r.reason,
-          r.evidencePostId,
-          installHash,
-          clientVersion,
-          now,
-          r.contentFingerprint,
-          r.linkDomains.length > 0 ? JSON.stringify(r.linkDomains) : null,
-          r.detectionSource,
-          r.tweetText,
-          r.displayName,
-          r.bio,
-        ),
+           bio = COALESCE(excluded.bio, reports.bio)`,
+      ).bind(
+        canonical,
+        r.xUserId,
+        r.reason,
+        r.evidencePostId,
+        installHash,
+        clientVersion,
+        now,
+        r.contentFingerprint,
+        r.linkDomains.length > 0 ? JSON.stringify(r.linkDomains) : null,
+        r.detectionSource,
+        r.ruleId,
+        r.signalIds.length > 0 ? JSON.stringify(r.signalIds) : null,
+        r.tweetText,
+        r.displayName,
+        r.bio,
+      ),
     );
 
     // 标签是否变化的内存推演：与 setActiveLabel 的「同标签幂等」语义一致。
@@ -390,8 +385,7 @@ export async function processReportBatch(
            ON CONFLICT(installation_id, handle) DO UPDATE SET
              label = excluded.label,
              updated_at = excluded.updated_at`,
-        )
-          .bind(installHash, canonical, 'blocked', now),
+        ).bind(installHash, canonical, 'blocked', now),
       );
       labelState.set(canonical, 'blocked');
       // resultIndex 与 results 一同构造，下标必然有效。
@@ -437,8 +431,7 @@ export async function processReportBatch(
          ON CONFLICT(handle) DO UPDATE SET
            x_user_id = COALESCE(excluded.x_user_id, accounts.x_user_id),
            updated_at = ?4`,
-      )
-        .bind(handle, report.xUserId, report.reason, now),
+      ).bind(handle, report.xUserId, report.reason, now),
     );
   }
   await batchStatements(env, accountStatements);

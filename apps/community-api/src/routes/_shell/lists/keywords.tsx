@@ -5,13 +5,16 @@ import { ListsTabs, ListPageHeader, HelpIcon } from '@/site/pages/lists/lists-co
 import { KeywordsPanel } from '@/site/pages/lists/KeywordsPanel';
 
 export const Route = createFileRoute('/_shell/lists/keywords')({
-  head: () =>
-    pageHead({
+  head: (ctx) => {
+    const data = ctx.loaderData as Awaited<ReturnType<typeof getKeywordData>> | undefined;
+    return pageHead({
       title: '关键词词库公示',
       description: 'FeedSieve 官方关键词词库全量公示：与扩展执行的黄标规则同源同版本，可匿名贡献新短语。',
       path: '/lists/keywords',
-      ogImage: 'https://feedsieve.win/og/lists/keywords.png?v=1',
-    }),
+      ogImage: '/og/lists/keywords.png',
+      noindex: !data,
+    });
+  },
   loader: () => getKeywordData(),
   component: KeywordsRoute,
 });

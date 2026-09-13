@@ -13,9 +13,8 @@
  *   node scripts/promote-rescued-whitelist.mjs             # 拉取 + 追加
  */
 import { readFileSync, writeFileSync } from 'node:fs';
-/* global console, process, fetch */
 import path from 'node:path';
-import { entryBlock } from './ingest-whitelist-issues.mjs';
+import { entryBlock, existingHandles } from './lib/whitelist-yaml.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const SOURCE_FILE = 'community/lists/whitelist.yaml';
@@ -37,17 +36,8 @@ export function planEntries(roster) {
   return out;
 }
 
-/** yaml 里已存在的 handle（小写）。 */
-function existingHandles(yaml) {
-  const out = new Set();
-  for (const match of yaml.matchAll(/^\s*- handle:\s*"?@?([\w-]+)"?\s*$/gm)) {
-    out.add(match[1].toLowerCase());
-  }
-  return out;
-}
-
 export async function main({ dryRun = false, sourceUrl = DEFAULT_SOURCE } = {}) {
-  const res = await fetch(sourceUrl);
+  const res = await fetch(sourceUrl, { signal: AbortSignal.timeout(30_000) });
   if (!res.ok) {
     console.error(`roster 拉取失败：HTTP ${res.status}（${sourceUrl}）`);
     process.exit(1);

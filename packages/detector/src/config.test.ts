@@ -48,4 +48,15 @@ describe('detector 运行时配置覆写', () => {
     expect(ref.strongMinWords).toBe(6);
     applyDetectorConfigOverride(null);
   });
+
+  it('新包的部分覆写不会残留上一包的字段', () => {
+    applyDetectorConfigOverride({
+      combo: { minNameEmoji: 4 },
+      wordSalad: { strongMinWords: 6 },
+    });
+    applyDetectorConfigOverride({ combo: { minNameEmoji: 3 } });
+    expect(detectorConfig.combo.minNameEmoji).toBe(3);
+    expect(detectorConfig.wordSalad.strongMinWords).toBe(4);
+    applyDetectorConfigOverride(null);
+  });
 });

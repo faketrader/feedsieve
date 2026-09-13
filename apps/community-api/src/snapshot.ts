@@ -30,7 +30,7 @@ const MIN_CAMPAIGN_ACCOUNTS = 2;
  * 存 meta 表供 O(1) 点读，取代每次轮询的全表排序扫。
  */
 const SNAPSHOT_R2_PREFIX = 'snapshots';
-const SNAPSHOT_LATEST_KEY = 'latest_snapshot_version';
+export const SNAPSHOT_LATEST_KEY = 'latest_snapshot_version';
 
 async function r2Text(env: Cloudflare.Env, key: string): Promise<string | null> {
   const object = await env.KEYWORD_PACKS?.get(key);
@@ -349,43 +349,32 @@ export async function generateSnapshot(
     .first<{ version: string }>();
   const version = nextVersion(latest?.version ?? null, dateStamp);
 
-  const accounts = await env.DB.prepare(
+  // accounts 一次全扫出三份投影（黑名单行 / verified 行 / 全量索引），原来是
+  // 三次独立全扫——前两次都是这份全量的过滤子集。
+  const allAccountRows = await env.DB.prepare(
     `SELECT handle, x_user_id, aliases, category, status, report_count, rescue_count,
             first_report_at, updated_at
      FROM accounts
-     WHERE report_count - rescue_count >= ?1
      ORDER BY handle ASC`,
-  )
-    .bind(POLICY.communityNetThreshold)
-    .all<AccountRow>();
+  ).all<AccountRow>();
+  const accountRows = allAccountRows.results.filter(
+    (row) => row.report_count - row.rescue_count >= POLICY.communityNetThreshold,
+  );
 
   // 社区白名单（verified）：入榜公式与黑名单严格镜像——抢救净票 >= 同一阈值。
   // rescue_count/report_count 由 refreshAccountsFromLabels 收敛（active_labels 计票），
   // 与黑名单入榜 SQL 同源，无独立安装/跨天二次筛选（COMMUNITY_FILTERING 口径一致）。
-  const verifiedRows = await env.DB.prepare(
-    `SELECT handle, x_user_id, report_count, rescue_count, first_report_at, updated_at
-     FROM accounts
-     WHERE rescue_count - report_count >= ?1
-     ORDER BY handle ASC`,
-  )
-    .bind(POLICY.communityNetThreshold)
-    .all<{
-      handle: string;
-      x_user_id: string | null;
-      report_count: number;
-      rescue_count: number;
-      first_report_at: number;
-      updated_at: number;
-    }>();
-  const verified: VerifiedEntry[] = verifiedRows.results.map((row) => ({
-    handle: row.handle,
-    x_user_id: row.x_user_id,
-    rescue_count: row.rescue_count,
-    report_count: row.report_count,
-    net_votes: row.rescue_count - row.report_count,
-    first_seen_at: new Date(row.first_report_at * 1000).toISOString(),
-    updated_at: new Date(row.updated_at * 1000).toISOString(),
-  }));
+  const verified: VerifiedEntry[] = allAccountRows.results
+    .filter((row) => row.rescue_count - row.report_count >= POLICY.communityNetThreshold)
+    .map((row) => ({
+      handle: row.handle,
+      x_user_id: row.x_user_id,
+      rescue_count: row.rescue_count,
+      report_count: row.report_count,
+      net_votes: row.rescue_count - row.report_count,
+      first_seen_at: new Date(row.first_report_at * 1000).toISOString(),
+      updated_at: new Date(row.updated_at * 1000).toISOString(),
+    }));
 
   // 推荐白名单（whitelist）：维护者在 GitHub 维护 whitelist.yaml，发布脚本同步进
   // maintainer_whitelist 表。与 verified 独立成段——verified 是社区抢救票合意，
@@ -402,11 +391,6 @@ export async function generateSnapshot(
 
   const entries: SnapshotEntry[] = [];
   const daysByHandle = aggregates.daysByHandle;
-  const allAccountRows = await env.DB.prepare(
-    `SELECT handle, x_user_id, aliases, category, status, report_count, rescue_count,
-            first_report_at, updated_at
-     FROM accounts`,
-  ).all<AccountRow>();
   const accountByHandle = new Map(allAccountRows.results.map((row) => [row.handle, row] as const));
   const reportCounts = new Map(
     allAccountRows.results.map((row) => [row.handle, row.report_count] as const),
@@ -432,7 +416,7 @@ export async function generateSnapshot(
       hasDomainEvidence: (domainsByHandle.get(handle)?.length ?? 0) > 0,
       hasFingerprintEvidence: (fingerprintsByHandle.get(handle)?.length ?? 0) > 0,
     });
-  for (const row of accounts.results) {
+  for (const row of accountRows) {
     const evidence = evidenceByHandle.get(row.handle) ?? [];
     const campaign = campaigns.get(row.handle);
     entries.push(
@@ -906,7 +890,7 @@ export async function killSwitchNeedsPublish(env: Cloudflare.Env): Promise<boole
  * 不产生新快照行，「数据比快照新」会永远为真导致每周期空转全量扫描。
  * value 存置脏时刻（毫秒）；清除带值比对，生成期间到达的新变更会保留标记。
  */
-const SNAPSHOT_DIRTY_KEY = 'snapshot_dirty';
+export const SNAPSHOT_DIRTY_KEY = 'snapshot_dirty';
 
 export async function markSnapshotDirty(env: Cloudflare.Env): Promise<void> {
   await env.DB.prepare(

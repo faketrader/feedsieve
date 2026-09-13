@@ -1,32 +1,16 @@
-import { copyFileSync, mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { defineConfig } from 'wxt';
+import { resolve } from 'node:path';
+import { copyRuntimeData } from './scripts/copy-runtime-data.mjs';
 
-// 大数据 JSON 不进 JS chunk：buildStart 时拷入 public/，随扩展以静态资源
-// 发布，运行时 browser.runtime.getURL + fetch 读取。此前静态 import 让
-// background / content / popup 三个入口各抄一份，产物膨胀到 4 MB，
-// CWS 上传 zip 也跟着翻倍。
+// 大数据 JSON 不进 JS chunk：buildStart 时按 scripts/copy-runtime-data.mjs
+// 的唯一清单拷入 public/，随扩展以静态资源发布，运行时
+// browser.runtime.getURL + fetch 读取。此前静态 import 让 background /
+// content / popup 三个入口各抄一份，产物膨胀到 4 MB，CWS 上传 zip 也跟着翻倍。
 function officialJsonPlugin() {
   return {
     name: 'feedsieve-copy-official-json',
     buildStart() {
-      const root = resolve(import.meta.dirname, '../..');
-      const listsDst = resolve(import.meta.dirname, 'public/community/lists');
-      mkdirSync(listsDst, { recursive: true });
-      copyFileSync(
-        resolve(root, 'community/lists/official.json'),
-        resolve(listsDst, 'official.json'),
-      );
-      const packsDst = resolve(import.meta.dirname, 'public/community/keyword-packs');
-      mkdirSync(packsDst, { recursive: true });
-      copyFileSync(
-        resolve(root, 'community/keyword-packs/official.json'),
-        resolve(packsDst, 'official.json'),
-      );
-      copyFileSync(
-        resolve(import.meta.dirname, 'src/lib/detection/variant-tables.json'),
-        resolve(packsDst, 'variant-tables.json'),
-      );
+      copyRuntimeData();
     },
   };
 }

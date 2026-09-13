@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-/* global process, console */
 /**
  * 维护者挑词辅助：从垃圾话术文本里提取候选短语（特征帖入库工作流的前置步骤）。
  *
@@ -114,7 +113,13 @@ function parseArgs(args) {
 
 function main() {
   const { top, json, file } = parseArgs(process.argv.slice(2));
-  const input = file ? readFileSync(file, 'utf8') : readFileSync(0, 'utf8');
+  let input;
+  try {
+    input = file ? readFileSync(file, 'utf8') : readFileSync(0, 'utf8');
+  } catch (error) {
+    console.error(`读取输入失败（${file ?? 'stdin'}）：${error?.code ?? error?.message ?? error}`);
+    process.exit(1);
+  }
   const candidates = extractKeywordCandidates(input, { top });
   if (json) {
     console.log(JSON.stringify(candidates, null, 2));

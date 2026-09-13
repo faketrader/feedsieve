@@ -6,16 +6,26 @@
  * 最终收录人是仓库所有者：跑完看 yaml diff，确认后再亲手跑
  * scripts/publish-community-whitelist.sh（D1 写入，发布即生效）。
  *
- * 解析/校验规则与 publish-community-whitelist.sh 的内嵌校验器完全同口径
- * （handle 正则 / note 4-240 单行 / name 1-40 / avatar 仅 pbs.twimg.com /
- * x_user_id 数字），生成行格式也一致（publish 脚本行解析吃的格式）。
+ * 解析/校验规则与发布链同口径：常量/上限统一取自 scripts/lib/whitelist-schema.mjs
+ * （原 publish-community-whitelist.sh 校验器的单一 JS 实现），消灭双份实现
+ * 的数字漂移面；本文件的报错文案面向 Issue 提交者，与发布侧文案独立。
  *
  * 用法（需要 gh CLI 登录仓库所有者账号）：
  *   node scripts/ingest-whitelist-issues.mjs --dry-run   # 只评估，不改文件不评论
  *   node scripts/ingest-whitelist-issues.mjs             # 拉取 + 写 yaml + 已处理 issue 打标/回帖
  */
 import { execFileSync } from 'node:child_process';
-/* global console, process */
+import { entryBlock, existingHandles } from './lib/whitelist-yaml.mjs';
+import {
+  AVATAR_PREFIX,
+  HANDLE_RE,
+  NAME_MAX,
+  NAME_MIN,
+  NOTE_MAX,
+  NOTE_MIN,
+  USER_ID_RE,
+  pyLen,
+} from './lib/whitelist-schema.mjs';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -33,9 +43,9 @@ export const FIELD_LABELS = {
   xUserId: 'X 数字 ID',
 };
 
-const HANDLE_RE = /^[A-Za-z0-9_]{1,15}$/;
-const USER_ID_RE = /^[0-9]{1,20}$/;
-const AVATAR_RE = /^https:\/\/pbs\.twimg\.com\/profile_images\/[\w\-./]+$/;
+// avatar 在提交层校验比 publish 层严：必须是 profile_images/ 下的真实路径
+// （publish 层只看前缀，见 lib/whitelist-schema.mjs）
+const AVATAR_RE = new RegExp(`^${AVATAR_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\w\\-./]+$`);
 
 /** 解析 issue 表单正文：按 `### 小标题` 切段，取每段正文。 */
 export function parseIssueBody(body) {
@@ -61,10 +71,11 @@ export function normalizeEntry(body) {
   if (!HANDLE_RE.test(handle)) errors.push(`handle 非法：「${val('handle')}」（字母数字下划线 1-15 位）`);
 
   const note = val('note');
-  if (!(4 <= note.length && note.length <= 240)) errors.push(`入册说明需 4-240 字（当前 ${note.length} 字）`);
+  const noteLen = pyLen(note);
+  if (!(NOTE_MIN <= noteLen && noteLen <= NOTE_MAX)) errors.push(`入册说明需 4-240 字（当前 ${noteLen} 字）`);
 
   const name = val('name') || null;
-  if (name && !(1 <= name.length && name.length <= 40)) errors.push('显示昵称需 1-40 字');
+  if (name && !(NAME_MIN <= pyLen(name) && pyLen(name) <= NAME_MAX)) errors.push('显示昵称需 1-40 字');
 
   const avatarUrl = val('avatarUrl') || null;
   if (avatarUrl && !AVATAR_RE.test(avatarUrl)) errors.push('头像必须是 pbs.twimg.com/profile_images/ 开头的公开链接');
@@ -85,24 +96,9 @@ export function normalizeEntry(body) {
   return { ok: true, entry };
 }
 
-/** 生成与 publish-community-whitelist.sh 兼容的条目 YAML 块（字段顺序固定）。 */
-export function entryBlock(entry) {
-  const lines = [`  - handle: ${entry.handle}`];
-  if (entry.name) lines.push(`    name: "${entry.name}"`);
-  if (entry.avatar_url) lines.push(`    avatar_url: "${entry.avatar_url}"`);
-  lines.push(`    note: "${entry.note}"`);
-  if (entry.x_user_id) lines.push(`    x_user_id: "${entry.x_user_id}"`);
-  return lines.join('\n');
-}
-
-/** yaml 里已存在的 handle（小写）。 */
-function existingHandles(yaml) {
-  const out = new Set();
-  for (const match of yaml.matchAll(/^\s*- handle:\s*"?@?([\w-]+)"?\s*$/gm)) {
-    out.add(match[1].toLowerCase());
-  }
-  return out;
-}
+// entryBlock 实现在 lib/whitelist-yaml.mjs；这里 re-export 保住既有导入路径
+// （ingest-whitelist-issues.test.ts / promote-rescued-whitelist.mjs）。
+export { entryBlock };
 
 function gh(args, opts = {}) {
   return execFileSync('gh', args, { encoding: 'utf8', ...opts }).toString().trim();

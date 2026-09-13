@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-/* global process, console */
 /**
  * golden corpus 用例添加：替代手工改 cases.json（误伤修复 / 规则新增都要先落 corpus）。
  *
@@ -30,6 +29,11 @@ function parseArgs(argv) {
     const flag = argv[i];
     if (!flag.startsWith('--')) throw new Error(`意外参数：${flag}（请用 --key value 形式）`);
     const key = flag.slice(2);
+    if (key === 'json') {
+      // 布尔旗标：按用法文档不带取值
+      out[key] = true;
+      continue;
+    }
     const next = argv[i + 1];
     if (next === undefined || next.startsWith('--')) throw new Error(`--${key} 缺少取值`);
     out[key] = next;

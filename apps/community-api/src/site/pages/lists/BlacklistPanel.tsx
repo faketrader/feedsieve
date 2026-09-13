@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { categoryLabel } from '@feedsieve/shared';
 import type { RosterBlacklistEntry } from '../../../roster';
 import { HandleLink, fmtDate } from './lists-common';
@@ -6,8 +6,7 @@ import { cn } from './../../lib/utils';
 
 /**
  * 黑名单公示面板：搜索 + 100/页分页 + 行展开明细（维护者说明 / 证据帖 / 外链 / 历史名）。
- * 数据来自 SSR loader（RosterPayload），数据来自 SSR loader（RosterPayload），
- * 搜索/分页为客户端状态，行为口径不变。
+ * 数据来自 SSR loader（RosterPayload），搜索/分页为客户端状态，行为口径不变。
  */
 export function BlacklistPanel({ entries }: { entries: RosterBlacklistEntry[] }) {
   const [query, setQuery] = useState('');
@@ -57,10 +56,10 @@ export function BlacklistPanel({ entries }: { entries: RosterBlacklistEntry[] })
             {rows.map((entry) => {
               const expandable =
                 !!(entry.maintainer_note || entry.aliases?.length || entry.evidence_post_ids?.length || entry.domains?.length);
+              // key 挂在 fragment 上：行 + 展开行作为一个可调和单元
               return (
-                <>
+                <Fragment key={entry.handle}>
                   <tr
-                    key={entry.handle}
                     onClick={(e) => {
                       const t = e.target as HTMLElement;
                       if (t.closest('a')) return;
@@ -84,7 +83,7 @@ export function BlacklistPanel({ entries }: { entries: RosterBlacklistEntry[] })
                     <td className="px-4 py-2.5 text-mist tabular-nums">{fmtDate(entry.updated_at)}</td>
                   </tr>
                   {open[entry.handle] && expandable && (
-                    <tr key={`${entry.handle}-detail`} className="border-b border-line/40 bg-soft-surface">
+                    <tr className="border-b border-line/40 bg-soft-surface">
                       <td colSpan={7} className="px-4 py-3 text-xs text-mist">
                         <DetailLine label="自述与说明" value={entry.maintainer_note} />
                         {entry.evidence_post_ids?.length ? (
@@ -107,7 +106,7 @@ export function BlacklistPanel({ entries }: { entries: RosterBlacklistEntry[] })
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               );
             })}
           </tbody>

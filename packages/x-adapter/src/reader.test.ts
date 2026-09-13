@@ -158,4 +158,17 @@ describe('extractFeedItem', () => {
     const item = extractFeedItem(article);
     expect(item?.author.displayName).toBe('Rose 🌸🌸');
   });
+
+  it('does not append timestamp text from the User-Name container', () => {
+    const article = renderTweet(`
+      <div data-testid="User-Name">
+        <a href="/cleanname"><span>Clean Name</span></a>
+        <a href="/cleanname"><span>@cleanname</span></a>
+        <span>·</span><time>1小时</time>
+      </div>
+      <a href="/cleanname/status/889"><time>1小时</time></a>
+      <div data-testid="tweetText">hello</div>
+    `);
+    expect(extractFeedItem(article)?.author.displayName).toBe('Clean Name');
+  });
 });

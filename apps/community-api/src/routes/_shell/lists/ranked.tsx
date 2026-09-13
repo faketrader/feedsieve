@@ -5,13 +5,16 @@ import { ListsTabs, ListPageHeader, HelpIcon } from '@/site/pages/lists/lists-co
 import { RankedPanel } from '@/site/pages/lists/RankedPanel';
 
 export const Route = createFileRoute('/_shell/lists/ranked')({
-  head: () =>
-    pageHead({
+  head: (ctx) => {
+    const board = ctx.loaderData as Awaited<ReturnType<typeof getRankedData>> | undefined;
+    return pageHead({
       title: '打野排位赛',
       description: 'FeedSieve 打野排位赛周榜与总榜公示：按共识击杀计分（确认击杀 +1 · 首杀 +1 · 误伤 −2），Top 3 获永久称号「猎黄人」。',
       path: '/lists/ranked',
-      ogImage: 'https://feedsieve.win/og/lists/ranked.png?v=1',
-    }),
+      ogImage: '/og/lists/ranked.png',
+      noindex: !board,
+    });
+  },
   loader: () => getRankedData(),
   component: RankedRoute,
 });

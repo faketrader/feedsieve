@@ -16,6 +16,9 @@ export interface ValidReport {
   linkDomains: string[];
   /** 检测来源（v0.7.6）：手动标记 = manual；检测器命中标记各自来源；旧客户端缺省为 null */
   detectionSource: string | null;
+  /** 客户端命中的首要规则及同次结构化信号；只用于质量评估，不参与服务端直接封禁。 */
+  ruleId: string | null;
+  signalIds: string[];
   /** 击杀时刻探活结果（#2 定稿）：扩展在用户浏览器对该 handle 做的一次 guest 存活探测；旧客户端缺省为 null */
   liveness: 'alive' | 'dead' | null;
   /** 判定材料（2026-09-12 拍板随票上报，推文本就是公开内容）：推文原文 / 作者昵称 / 简介原文。
@@ -34,6 +37,8 @@ const HOSTNAME_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 /** 自家/媒体域名无信息量，拒绝入库（防污染快照 domains 列表） */
 const SELF_DOMAINS = ['x.com', 'twitter.com', 't.co', 'twimg.com'];
 const MAX_LINK_DOMAINS = 5;
+const REPORT_RULE_ID_RE = /^[a-z0-9][a-z0-9:_-]{0,159}$/;
+const MAX_SIGNAL_IDS = 24;
 
 function isSelfDomain(hostname: string): boolean {
   return SELF_DOMAINS.some((d) => hostname === d || hostname.endsWith(`.${d}`));
@@ -107,11 +112,25 @@ export function validateReport(raw: unknown): ReportValidation {
   if (r.detection_source !== undefined && r.detection_source !== null) {
     if (
       typeof r.detection_source !== 'string' ||
-      !REPORT_DETECTION_SOURCES.includes(r.detection_source as (typeof REPORT_DETECTION_SOURCES)[number])
+      !REPORT_DETECTION_SOURCES.includes(
+        r.detection_source as (typeof REPORT_DETECTION_SOURCES)[number],
+      )
     ) {
       return { ok: false, error: 'invalid_detection_source' };
     }
     detectionSource = r.detection_source;
+  }
+
+  let ruleId: string | null = null;
+  if (r.rule_id !== undefined && r.rule_id !== null) {
+    if (typeof r.rule_id !== 'string' || !REPORT_RULE_ID_RE.test(r.rule_id)) {
+      return { ok: false, error: 'invalid_rule_id' };
+    }
+    ruleId = r.rule_id;
+  }
+  const signalIds = sanitizeSignalIds(r.signal_ids);
+  if (!signalIds.ok) {
+    return { ok: false, error: 'invalid_signal_ids' };
   }
 
   let liveness: 'alive' | 'dead' | null = null;
@@ -147,6 +166,8 @@ export function validateReport(raw: unknown): ReportValidation {
       contentFingerprint,
       linkDomains: domains.domains,
       detectionSource,
+      ruleId,
+      signalIds: signalIds.values,
       liveness,
       tweetText,
       displayName,
@@ -158,6 +179,17 @@ export function validateReport(raw: unknown): ReportValidation {
 const MAX_TWEET_TEXT_LENGTH = 500;
 const MAX_DISPLAY_NAME_LENGTH = 100;
 const MAX_BIO_TEXT_LENGTH = 500;
+
+function sanitizeSignalIds(value: unknown): { ok: true; values: string[] } | { ok: false } {
+  if (value === undefined || value === null) return { ok: true, values: [] };
+  if (!Array.isArray(value) || value.length > MAX_SIGNAL_IDS) return { ok: false };
+  const values: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || !REPORT_RULE_ID_RE.test(item)) return { ok: false };
+    if (!values.includes(item)) values.push(item);
+  }
+  return { ok: true, values };
+}
 
 function validateEvidenceText(value: unknown, max: number, field: string): string | null {
   if (value === undefined || value === null) {

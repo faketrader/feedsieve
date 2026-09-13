@@ -14,7 +14,6 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-/* global console, process, fetch, setTimeout */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const ROOT = path.resolve(import.meta.dirname, '..');
@@ -35,6 +34,8 @@ function sanitizeOneLine(value, max) {
 
 async function guestToken() {
   const res = await fetch('https://api.x.com/1.1/guest/activate.json', {
+    signal: AbortSignal.timeout(30_000),
+
     method: 'POST',
     headers: {
       Authorization: X_WEB_BEARER,
@@ -43,7 +44,16 @@ async function guestToken() {
     },
   });
   if (!res.ok) throw new Error(`guest activate HTTP ${res.status}`);
-  return (await res.json()).guest_token;
+  let payload;
+  try {
+    payload = await res.json();
+  } catch {
+    throw new Error(`guest activate 返回非 JSON（HTTP ${res.status}）`);
+  }
+  if (typeof payload?.guest_token !== 'string' || payload.guest_token.length === 0) {
+    throw new Error('guest activate 响应缺少 guest_token');
+  }
+  return payload.guest_token;
 }
 
 async function fetchProfile(handle, guest) {
@@ -122,7 +132,14 @@ export async function main({ dryRun = false } = {}) {
   }
   console.log(`待补资料 ${rescues.length} 条`);
 
-  const guest = await guestToken();
+  let guest;
+  try {
+    guest = await guestToken();
+  } catch (error) {
+    // X 侧 guest 通道抖动不该裸栈崩溃：如实报错退出，重跑即可续
+    console.error(`guest token 获取失败：${error?.message ?? error}`);
+    process.exit(1);
+  }
   const pending = new Set(rescues.map((r) => r.handle));
   for (const { handle } of rescues) {
     let profile = null;

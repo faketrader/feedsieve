@@ -1,19 +1,22 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { getRosterData } from '@/site/data.functions';
+import { getWhitelistData } from '@/site/data.functions';
 import { pageHead } from '@/site/seo';
 import { ListsTabs, ListPageHeader, HelpIcon } from '@/site/pages/lists/lists-common';
 import type { RosterWhitelistEntry } from '@/roster';
 import { RescuePanel } from '@/site/pages/lists/RescuePanel';
 
 export const Route = createFileRoute('/_shell/lists/rescue')({
-  head: () =>
-    pageHead({
+  head: (ctx) => {
+    const roster = ctx.loaderData as Awaited<ReturnType<typeof getWhitelistData>> | undefined;
+    return pageHead({
       title: '社区抢救名单公示',
       description: 'FeedSieve 社区抢救公开镜像：被验证为「误标正常」的账号，与扩展执行的豁免口径同源。',
       path: '/lists/rescue',
-      ogImage: 'https://feedsieve.win/og/lists/rescue.png?v=1',
-    }),
-  loader: () => getRosterData(),
+      ogImage: '/og/lists/rescue.png',
+      noindex: !roster,
+    });
+  },
+  loader: () => getWhitelistData(),
   component: RescueRoute,
 });
 

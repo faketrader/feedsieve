@@ -7,10 +7,28 @@
 import { createServerFn } from '@tanstack/react-start';
 import { env } from 'cloudflare:workers';
 import { getPublicRoster, type RosterPayload } from '../roster';
-import { getLeaderboard, LEADERBOARD, type HunterRow, type SeasonChampion, type SeasonWindow } from '../leaderboard';
+import { getLeaderboard, LEADERBOARD, toPublicHunterRow, type HunterRow, type SeasonChampion, type SeasonWindow } from '../leaderboard';
 
 export const getRosterData = createServerFn({ method: 'GET' }).handler(async (): Promise<RosterPayload | null> =>
   getPublicRoster(env),
+);
+
+/** 白名单/抢救公示面的瘦身 loader：这两个页面用不到 blacklist.entries（含全部
+ *  证据字段），整份 RosterPayload 反序列化进 HTML 是公示站最重两页的传输放大。 */
+export interface WhitelistRosterData {
+  snapshot_version: string;
+  whitelist: Pick<RosterPayload['whitelist'], 'maintained' | 'verified'>;
+}
+
+export const getWhitelistData = createServerFn({ method: 'GET' }).handler(
+  async (): Promise<WhitelistRosterData | null> => {
+    const roster = await getPublicRoster(env);
+    if (!roster) return null;
+    return {
+      snapshot_version: roster.snapshot_version,
+      whitelist: { maintained: roster.whitelist.maintained, verified: roster.whitelist.verified },
+    };
+  },
 );
 
 /** 词库公示面：latest manifest + 版本化 official.json（R2 内部直读，与 /v1 同源） */
@@ -119,5 +137,5 @@ export interface PublicBoard {
 }
 
 function trimRow(row: HunterRow & { rank: number }): PublicBoardRow {
-  return { ...row, id: String(row.id).slice(0, 12) } as PublicBoardRow;
+  return toPublicHunterRow(row) as PublicBoardRow;
 }

@@ -86,7 +86,17 @@ export function RankedPanel({
         ))}
       </div>
       <p className="mt-4 text-center text-xs text-mist" id="ranked-foot">
-        {foot} · 更新于 {board.updated_at ? new Date(board.updated_at * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '—'}
+        {foot} · 更新于{' '}
+        {/* 时区性 hydration 差异：SSR 输出 UTC 文本、客户端首帧按本地时区渲染，
+            该文本不属于内容语义（水合后本地时间即正确），抑制告警避免整树回退 */}
+        <span suppressHydrationWarning>
+          {board.updated_at
+            ? new Date(board.updated_at * 1000).toLocaleTimeString('zh-CN', {
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+            : '—'}
+        </span>
       </p>
     </div>
   );

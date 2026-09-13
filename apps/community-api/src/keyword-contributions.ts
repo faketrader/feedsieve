@@ -1,5 +1,6 @@
 import { installationHash } from './labels';
-import { hashInstallationId } from './lib/hash';
+import { hashIp } from './lib/hash';
+import { nowSeconds, utcToday } from './lib/time';
 
 /**
  * 关键词贡献：用户在关键词页显式把自己的自定义短语匿名提交给运营审阅。
@@ -49,14 +50,6 @@ function validatedPhrase(raw: unknown): { display: string; norm: string } | { er
   return { display, norm: normPhrase(display) };
 }
 
-function utcToday(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-function nowSeconds(): number {
-  return Math.floor(Date.now() / 1000);
-}
-
 export async function processKeywordContributions(
   env: Cloudflare.Env,
   { body, ip }: ProcessKeywordContributionInput,
@@ -74,8 +67,8 @@ export async function processKeywordContributions(
     if (typeof ip !== 'string' || ip.length === 0) {
       return { ok: false, httpStatus: 400, error: 'ip_required_for_web_submission' };
     }
-    // 与 reports 的 IP 哈希同盐同法：绝不存原始 IP。
-    submissionKey = `web-${await hashInstallationId(env.INSTALLATION_SALT, ip)}`;
+    // 与 reports 的 IP 哈希同盐同法（独立 ip: 域前缀，见 lib/hash.ts 域分离口径）：绝不存原始 IP。
+    submissionKey = `web-${await hashIp(env.INSTALLATION_SALT, ip)}`;
   } else {
     const installationId = b.installation_id;
     if (

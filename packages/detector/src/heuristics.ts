@@ -217,8 +217,10 @@ function isGarbledBatchHandle(handle: string | undefined): boolean {
     return false;
   }
   const rare = normalized.match(WORD_SALAD_RARE_LETTER_RE)?.length ?? 0;
-  return rare >= detectorConfig.garbledHandle.rareLetterCount &&
-    maxConsonantRun(normalized) >= detectorConfig.garbledHandle.maxConsonantRun;
+  return (
+    rare >= detectorConfig.garbledHandle.rareLetterCount &&
+    maxConsonantRun(normalized) >= detectorConfig.garbledHandle.maxConsonantRun
+  );
 }
 
 const wordSalad: HeuristicRule = {
@@ -259,9 +261,15 @@ const PORN_BAIT_FU_RE =
  */
 const EROGENOUS_MARKERS: ReadonlyArray<readonly [RegExp, string]> = [
   [/涩|色色/, '涩'],
-  [/没我骚|比我[^。]{0,8}骚/, '骚'],
+  // 比较对象不限于「我」：没人比她骚 / 比你骚 同族（2026-09-13 实测「比她」逃逸）
+  [/没[我她你他]骚|比[我她你他][^。]{0,8}骚/, '骚'],
   [/玩[得的]{1,2}更?开/, '玩得开'],
-  [/[🍑🍒🍆💧💋🌹]/u, '擦边emoji'],
+  // 2026-09-13 捧主页话术家族：「就她的主页能打✈️了」「她太涩了我真顶不住」。
+  // 各自单独都是普通口语（游戏/旅行语境），永远不单独成立。
+  [/顶不住/, '顶不住'],
+  [/主页能打/, '主页能打'],
+  // ✈️ 是多码点字符（U+2708+FE0F），不能进字符类（no-misleading-character-class）
+  [/🍑|🍒|🍆|💧|💋|🌹|✈️/u, '擦边emoji'],
 ];
 
 const pornBaitZh: HeuristicRule = {
@@ -309,17 +317,14 @@ const URL_STRIP_RE = /https?:\/\/\S+|\b[\w-]+(?:\.[\w-]+)+\/\S*/gi;
 const REPEATED_CHAR_RE = /([^\s\p{P}\p{S}])\1{3,}/u;
 
 function countEmoji(text: string): number {
-  return (text.match(EMOJI_CHAR_RE)?.length ?? 0);
+  return text.match(EMOJI_CHAR_RE)?.length ?? 0;
 }
 
 function isPureEmojiText(text: string): boolean {
   if (!countEmoji(text)) {
     return false;
   }
-  const remaining = text
-    .replace(EMOJI_SEQUENCE_RE, '')
-    .replace(LEFTOVER_SYMBOL_RE, '')
-    .trim();
+  const remaining = text.replace(EMOJI_SEQUENCE_RE, '').replace(LEFTOVER_SYMBOL_RE, '').trim();
   return remaining === '';
 }
 
@@ -387,27 +392,32 @@ const weakSignalCombo: HeuristicRule = {
       return null;
     }
     const evidence: string[] = [];
-    const text = [input.text, input.bio].filter(Boolean).join('\n');
-    if (text) {
+    const fields = [input.text, input.bio].filter(
+      (value): value is string => typeof value === 'string' && value.length > 0,
+    );
+    if (fields.length > 0) {
       // 单个擦边 marker（≥2 条已由 porn-bait-zh 先行命中，这里只收尾）
-      const marker = EROGENOUS_MARKERS.find(([pattern]) => pattern.test(text));
+      const marker = EROGENOUS_MARKERS.find(([pattern]) =>
+        fields.some((field) => pattern.test(field)),
+      );
       if (marker) {
         evidence.push(`擦边特征（${marker[1]}）`);
-      } else if (isPureEmojiText(text)) {
+      } else if (fields.some(isPureEmojiText)) {
         evidence.push('纯 emoji 正文');
       }
-      if (isWordSaladShape(text)) {
+      if (fields.some(isWordSaladShape)) {
         evidence.push('英文单词沙拉形状');
-      } else if (wordSaladShapeStrength(text) === 'weak') {
+      } else if (fields.some((field) => wordSaladShapeStrength(field) === 'weak')) {
         // 弱形状（2–3 词 + ≥2 emoji）永不单独定案，仅在锚点成立时作为佐证之一
         evidence.push('英文单词沙拉弱形状');
       }
-      if (hasRepeatedChars(text)) {
+      if (fields.some(hasRepeatedChars)) {
         evidence.push('重复灌水字符');
       }
     }
     const nameEmoji = countEmoji(input.displayName?.trim() ?? '');
-    if (nameEmoji >= detectorConfig.combo.minNameEmoji) {
+    // 装饰昵称只增强已有内容证据；正常用户昵称里的 emoji 不能独立定案。
+    if (evidence.length > 0 && nameEmoji >= detectorConfig.combo.minNameEmoji) {
       evidence.push(`装饰昵称（${nameEmoji} 个 emoji）`);
     }
     if (evidence.length === 0) {
@@ -429,17 +439,32 @@ const weakSignalCombo: HeuristicRule = {
  */
 const PAYLOAD_DIGITS_RE = /(?<![\d.])\d{11,}(?![\d.])/;
 const CONTACT_HINT_RE =
-  /看我简介|看简介|我主页|私信|加我|威信|微信|薇信|vx|vx号|wx|tg|telegram|联系|看头像/i;
+  /看我简介|看简介|我主页|私信|加我|威信|微信|薇信|vx|vx号|wx|tg|telegram|看头像/i;
 const PAYLOAD_URL_STRIP_RE = /https?:\/\/\S+|\b[\w-]+(?:\.[\w-]+)+\/\S*/gi;
+
+function normalizedContactPayload(value: string): string {
+  return (
+    value
+      .normalize('NFKC')
+      .replace(/\p{Cf}/gu, '')
+      .replace(PAYLOAD_URL_STRIP_RE, ' ')
+      // 号码常被空格、点、横线和表情拆开；只有夹在数字之间的分隔符才移除。
+      .replace(/(?<=\d)[\s\p{P}\p{S}]*(?=\d)/gu, '')
+  );
+}
 
 const contactNumberBait: HeuristicRule = {
   id: 'contact-number-bait',
   check(input) {
-    const text = (input.text ?? '').replace(PAYLOAD_URL_STRIP_RE, ' ');
+    const text = normalizedContactPayload(input.text ?? '');
     if (!PAYLOAD_DIGITS_RE.test(text)) {
       return null;
     }
-    const hints = [input.text, input.bio, input.displayName].filter(Boolean).join('\n');
+    const hints = [input.text, input.bio, input.displayName]
+      .filter(Boolean)
+      .join('\n')
+      .normalize('NFKC')
+      .replace(/\p{Cf}/gu, '');
     if (!CONTACT_HINT_RE.test(hints)) {
       return null;
     }

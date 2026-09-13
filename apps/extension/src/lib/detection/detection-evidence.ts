@@ -40,10 +40,18 @@ export interface BlockEvidence {
   linkDomains?: string[];
   /** 判断来源；手动标记路径强制 manual，检测器命中带各自来源。 */
   detectionSource?: string;
+  /** 命中的首要规则与同次观测信号，供规则精度和漏检簇回放分析。 */
+  ruleId?: string;
+  signalIds?: string[];
+  /** 用户作出判断时的公开页面证据快照。 */
+  evidencePostId?: string;
+  tweetText?: string;
+  displayName?: string;
+  bio?: string;
 }
 
 /** 内容证据只用于用户主动标记或高置信命中后的社区证据，识别主流程不消费这些值。 */
-export function collectContentEvidence(source: DetectInput): BlockEvidence {
+export function collectContentEvidence(source: DetectInput & { postId?: string }): BlockEvidence {
   // v0.8 起产 v1 指纹（NFKC + 停用字 + 更低门槛）：新拉黑账号随上报
   // 自然积累 v1 模板；本地旧记录的 v0 指纹值继续原样上报，两者在服务端并存。
   const evidence: BlockEvidence = {};
@@ -51,5 +59,9 @@ export function collectContentEvidence(source: DetectInput): BlockEvidence {
   if (fp) evidence.contentFingerprint = fp;
   const linkDomains = collectLinkDomains(source.links ?? []);
   if (linkDomains) evidence.linkDomains = linkDomains;
+  if (source.postId && /^\d{1,24}$/.test(source.postId)) evidence.evidencePostId = source.postId;
+  if (source.text?.trim()) evidence.tweetText = source.text.trim();
+  if (source.displayName?.trim()) evidence.displayName = source.displayName.trim();
+  if (source.bio?.trim()) evidence.bio = source.bio.trim();
   return evidence;
 }

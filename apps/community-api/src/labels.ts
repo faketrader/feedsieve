@@ -253,31 +253,56 @@ export async function processRetractionBatch(
     }
   }
 
-  for (const validatedHandle of validatedHandles) {
-    const known = await env.DB.prepare(
-      `SELECT a.handle
-       FROM accounts a
-       WHERE a.handle = ?1
-          OR EXISTS (SELECT 1 FROM json_each(a.aliases) WHERE value = ?1)
-       ORDER BY CASE WHEN a.handle = ?1 THEN 0 ELSE 1 END
-       LIMIT 1`,
+  // 归一化两阶段：直查命中主键索引（IN 点读）→ 未命中的才走别名扫描
+  // （json_each 无索引，扫一次总比每 handle 扫一次强）。
+  const canonicalByHandle = new Map<string, string>();
+  if (validatedHandles.length > 0) {
+    const direct = await env.DB.prepare(
+      `SELECT handle FROM accounts
+       WHERE handle IN (${validatedHandles.map((_, index) => `?${index + 1}`).join(', ')})`,
     )
-      .bind(validatedHandle)
-      .first<{ handle: string }>();
-    const canonical = known?.handle ?? validatedHandle;
-    const deletion = await env.DB.prepare(
-      `DELETE FROM active_labels
-       WHERE installation_id = ?1 AND (handle = ?2 OR handle = ?3)`,
-    )
-      .bind(identity.hash, validatedHandle, canonical)
-      .run();
-    if ((deletion.meta.changes ?? 0) === 0) {
+      .bind(...validatedHandles)
+      .all<{ handle: string }>();
+    for (const row of direct.results) canonicalByHandle.set(row.handle, row.handle);
+    const unresolved = validatedHandles.filter((handle) => !canonicalByHandle.has(handle));
+    if (unresolved.length > 0) {
+      const aliased = await env.DB.prepare(
+        `SELECT je.value AS alias, a.handle AS handle
+         FROM accounts a, json_each(a.aliases) je
+         WHERE je.value IN (${unresolved.map((_, index) => `?${index + 1}`).join(', ')})`,
+      )
+        .bind(...unresolved)
+        .all<{ alias: string; handle: string }>();
+      for (const row of aliased.results) {
+        if (!canonicalByHandle.has(row.alias)) canonicalByHandle.set(row.alias, row.handle);
+      }
+    }
+  }
+
+  // 删除按 handle 逐条出语句但一次 batch 下发（≤MAX_LABEL_BATCH 条），
+  // 每条独立取 meta.changes 维持 per-handle retracted/absent 语义。
+  const deletions =
+    validatedHandles.length > 0
+      ? await env.DB.batch(
+          validatedHandles.map((validatedHandle) => {
+            const canonical = canonicalByHandle.get(validatedHandle) ?? validatedHandle;
+            return env.DB.prepare(
+              `DELETE FROM active_labels
+               WHERE installation_id = ?1 AND (handle = ?2 OR handle = ?3)`,
+            ).bind(identity.hash, validatedHandle, canonical);
+          }),
+        )
+      : [];
+  validatedHandles.forEach((validatedHandle, index) => {
+    const canonical = canonicalByHandle.get(validatedHandle) ?? validatedHandle;
+    const deletion = deletions[index];
+    if (!deletion || (deletion.meta?.changes ?? 0) === 0) {
       results.push({ handle: validatedHandle, status: 'absent' });
-      continue;
+      return;
     }
     refreshingHandles.push(canonical, validatedHandle);
     results.push({ handle: validatedHandle, status: 'retracted' });
-  }
+  });
   // 批量收敛计数：单账号逐次刷新在批量撤回时会把 D1 调用放大几十倍
   await refreshAccountsFromLabels(env, refreshingHandles);
   return { ok: true, results };

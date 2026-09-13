@@ -9,6 +9,7 @@ export interface PageSeo {
   description: string;
   /** 站内路径，如 /lists/blacklist */
   path: string;
+  /** OG 分享卡：站内路径（自动拼 SITE_URL + OG_VERSION 缓存破坏）或完整 URL */
   ogImage?: string;
   /** loader 空数据时的软 404 防法：整页 noindex */
   noindex?: boolean;
@@ -17,9 +18,15 @@ export interface PageSeo {
 /** OG 图缓存破坏版本（发布期手动 +1）；走环境变量的原因：随快照节奏走 */
 const OG_VERSION = (globalThis as { __FS_OG_V__?: number }).__FS_OG_V__ ?? 1;
 
+function ogImageUrl(ogImage: string | undefined): string {
+  if (!ogImage) return `${SITE_URL}/og/site.png?v=${OG_VERSION}`;
+  if (/^https?:\/\//.test(ogImage)) return ogImage;
+  return `${SITE_URL}${ogImage}?v=${OG_VERSION}`;
+}
+
 export function pageHead(seo: PageSeo) {
   const url = `${SITE_URL}${seo.path}`;
-  const image = seo.ogImage ?? `${SITE_URL}/og/site.png?v=${OG_VERSION}`;
+  const image = ogImageUrl(seo.ogImage);
   const robots = seo.noindex ? [{ name: 'robots', content: 'noindex' }] : [];
   return {
     meta: [

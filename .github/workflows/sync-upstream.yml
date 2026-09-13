@@ -2,8 +2,8 @@ name: sync-upstream
 
 on:
   schedule:
-    # 每周六 23:45 UTC（新加坡/北京时间周日 07:45）检查上游。
-    - cron: '45 23 * * 6'
+    # 每天 12:34 UTC（新加坡/北京时间 20:34）检查最新正式 Release。
+    - cron: '34 12 * * *'
   workflow_dispatch:
 
 permissions:
@@ -24,25 +24,33 @@ jobs:
         with:
           ref: firefox
           fetch-depth: 0
-      - name: Fast-forward main and open integration PR
+      - name: Fast-forward main to latest release and open integration PR
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          git remote add upstream https://github.com/realchendahuang/feedsieve.git
-          git fetch upstream main
+          upstream_repo='realchendahuang/feedsieve'
+          git remote add upstream "https://github.com/${upstream_repo}.git"
           git fetch origin main firefox
-          # Divergence requires investigation; never reset or force-push main.
-          git merge-base --is-ancestor origin/main upstream/main
-          git push origin refs/remotes/upstream/main:refs/heads/main
-          if git merge-base --is-ancestor upstream/main origin/firefox; then
-            echo 'Firefox already contains upstream.' >> "$GITHUB_STEP_SUMMARY"
+          release_tag=$(gh api "repos/${upstream_repo}/releases/latest" --jq '.tag_name')
+          git check-ref-format "refs/tags/${release_tag}"
+          git fetch upstream "refs/tags/${release_tag}"
+          release_commit=$(git rev-parse 'FETCH_HEAD^{commit}')
+
+          # main 只能沿正式 Release 快进；分叉或曾同步到 Release 之后时停止。
+          git merge-base --is-ancestor origin/main "$release_commit"
+          git push origin "$release_commit":refs/heads/main
+          if git merge-base --is-ancestor "$release_commit" origin/firefox; then
+            echo "Firefox already contains upstream ${release_tag} (${release_commit})." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           pr=$(gh pr list --base firefox --head main --state open --json number --jq '.[0].number // empty')
           if [ -z "$pr" ]; then
-            gh pr create --base firefox --head main --title 'chore: sync upstream into firefox' --body 'Merge upstream history into the Firefox branch. Review conflicts and the verify workflow before merging. Use a merge commit to preserve upstream ancestry.'
+            gh pr create --base firefox --head main --title "chore: sync upstream ${release_tag} into firefox" --body "Merge upstream release ${release_tag} (${release_commit}) into the Firefox branch. Review conflicts and the verify workflow before merging. Use a merge commit to preserve upstream ancestry."
+            pr=$(gh pr list --base firefox --head main --state open --json number --jq '.[0].number')
+          else
+            gh pr edit "$pr" --title "chore: sync upstream ${release_tag} into firefox" --body "Merge upstream release ${release_tag} (${release_commit}) into the Firefox branch. Review conflicts and the verify workflow before merging. Use a merge commit to preserve upstream ancestry."
           fi
           # Explicit dispatch works with GITHUB_TOKEN and tests the merge result.
           gh workflow run verify.yml --ref firefox -f integrate_upstream=true
-          echo 'Opened or updated main → firefox PR; dispatched integration verification.' >> "$GITHUB_STEP_SUMMARY"
+          echo "Opened or updated PR #${pr} for ${release_tag}; dispatched integration verification." >> "$GITHUB_STEP_SUMMARY"

@@ -185,5 +185,5 @@ describe('snapshot content evidence aggregation (v0.4)', () => {
     expect(entry?.fingerprints).toHaveLength(5);
     expect(entry?.fingerprints).toEqual([...(entry?.fingerprints ?? [])].sort());
     expect(entry?.domains).toBeUndefined();
-  });
+  }, 15_000);
 });

@@ -80,7 +80,18 @@ describe('GET /v1/roster/latest（官网名单公示）', () => {
       .bind('good_user', null, '好用户', 'https://pbs.twimg.com/profile_images/1/ok_400x400.jpg', '本人宣言：不刷屏不引流', Math.floor(Date.now() / 1000))
       .run();
 
-    await generateSnapshot(env, 0, { bypassDailyOnce: true });
+    // 每次生成独立测试密钥，使签名徽章验证可在干净 CI 环境运行。
+    const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+    const privateKey = new Uint8Array(await crypto.subtle.exportKey('pkcs8', keys.privateKey));
+    await generateSnapshot(
+      {
+        ...env,
+        SIGNING_PRIVATE_KEY: btoa(String.fromCharCode(...privateKey)),
+        SIGNING_KEY_ID: 'roster-test',
+      },
+      0,
+      { bypassDailyOnce: true },
+    );
 
     const res = await worker.fetch(new Request(`${ORIGIN}/v1/roster/latest`), env);
     expect(res.status).toBe(200);
@@ -89,7 +100,7 @@ describe('GET /v1/roster/latest（官网名单公示）', () => {
 
     expect(roster.snapshot_version).toMatch(/^\d{4}\.\d{2}\.\d{2}\.\d{1,4}$/);
     expect(roster.generated_at).toBeTruthy();
-    // 测试环境配置了签名私钥（与 snapshot.test.ts 同一部署面）→ 公示徽章如实展示已签名
+    // 公示徽章如实展示该快照的签名状态。
     expect(roster.signed).toBe(true);
 
     const spam = roster.blacklist.entries.find((entry) => entry.handle === 'spam_user');

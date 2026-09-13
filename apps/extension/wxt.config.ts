@@ -13,7 +13,10 @@ function officialJsonPlugin() {
       const root = resolve(import.meta.dirname, '../..');
       const listsDst = resolve(import.meta.dirname, 'public/community/lists');
       mkdirSync(listsDst, { recursive: true });
-      copyFileSync(resolve(root, 'community/lists/official.json'), resolve(listsDst, 'official.json'));
+      copyFileSync(
+        resolve(root, 'community/lists/official.json'),
+        resolve(listsDst, 'official.json'),
+      );
       const packsDst = resolve(import.meta.dirname, 'public/community/keyword-packs');
       mkdirSync(packsDst, { recursive: true });
       copyFileSync(
@@ -30,29 +33,56 @@ function officialJsonPlugin() {
 
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
-  manifest: (env) => ({
-    name: 'FeedSieve',
-    short_name: 'FeedSieve',
-    description: 'X 赛博清洁工：黄框标注垃圾账号，一键批量真拉黑。标注永不隐藏内容。',
-    permissions: ['storage', 'sidePanel'],
-    side_panel: {
-      default_path: 'popup.html',
-    },
-    host_permissions: [
-      'https://x.com/*',
-      // dev 模式放行本地社区 API（wrangler dev）；生产构建不包含 localhost。
-      ...(env.mode === 'development' ? ['http://localhost/*'] : []),
-      // 社区名单下载 + 用户黑白名单同步（Cloudflare Worker，自部署见 apps/community-api）
-      'https://feedsieve-api.chendahuang.com/*',
-    ],
-    icons: {
+  manifest: (env) => {
+    const firefox = env.browser === 'firefox';
+    const icons = {
       16: '/icon-16.png',
       32: '/icon-32.png',
       48: '/icon-48.png',
       64: '/icon.png',
       128: '/icon-128.png',
-    },
-  }),
+    };
+    return {
+      name: 'FeedSieve',
+      short_name: 'FeedSieve',
+      description: 'X 赛博清洁工：黄框标注垃圾账号，一键批量真拉黑。标注永不隐藏内容。',
+      permissions: firefox ? ['storage'] : ['storage', 'sidePanel'],
+      ...(firefox
+        ? {
+            sidebar_action: {
+              default_title: 'FeedSieve',
+              default_panel: 'popup.html?panel=1',
+              default_icon: icons,
+              open_at_install: false,
+            },
+            browser_specific_settings: {
+              gecko: {
+                id: 'feedsieve@faketrader.github.io',
+                strict_min_version: '140.0',
+                data_collection_permissions: {
+                  required: ['personallyIdentifyingInfo', 'websiteContent'],
+                },
+              },
+              gecko_android: {
+                strict_min_version: '142.0',
+              },
+            },
+          }
+        : {
+            side_panel: {
+              default_path: 'popup.html',
+            },
+          }),
+      host_permissions: [
+        'https://x.com/*',
+        // dev 模式放行本地社区 API（wrangler dev）；生产构建不包含 localhost。
+        ...(env.mode === 'development' ? ['http://localhost/*'] : []),
+        // 社区名单下载 + 用户黑白名单同步（Cloudflare Worker，自部署见 apps/community-api）
+        'https://feedsieve-api.chendahuang.com/*',
+      ],
+      icons,
+    };
+  },
   vite: (env) => ({
     plugins: [officialJsonPlugin()],
     define: {
@@ -66,5 +96,17 @@ export default defineConfig({
   }),
   zip: {
     name: 'feedsieve',
+    sourcesRoot: resolve(import.meta.dirname, '../..'),
+    includeSources: [
+      'apps/extension/**',
+      'packages/**',
+      'community/**',
+      'docs/firefox/SOURCE_CODE_REVIEW.md',
+      'package.json',
+      'pnpm-lock.yaml',
+      'pnpm-workspace.yaml',
+      'scripts/configure-git-hooks.mjs',
+      'tsconfig.base.json',
+    ],
   },
 });

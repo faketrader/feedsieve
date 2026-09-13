@@ -1,0 +1,58 @@
+name: release-firefox
+
+on:
+  push:
+    tags:
+      - 'firefox-v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-firefox-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'faketrader/feedsieve'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate release tag
+        run: |
+          package_version=$(node -p "require('./apps/extension/package.json').version")
+          test "$GITHUB_REF_NAME" = "firefox-v${package_version}"
+
+      - name: Verify source and dependencies
+        run: |
+          pnpm lint
+          pnpm keyword-packs:check
+          pnpm --filter @feedsieve/community-api build
+          pnpm typecheck
+          pnpm test
+          pnpm --filter @feedsieve/community-api test
+          pnpm audit --audit-level high
+
+      - name: Package Firefox extension and review sources
+        run: |
+          pnpm --filter @feedsieve/extension zip:firefox
+          pnpm dlx web-ext@10.6.0 lint --source-dir apps/extension/.output/firefox-mv3 --output text
+
+      - name: Create GitHub Release with packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t assets < <(find apps/extension/.output -maxdepth 1 -type f \( -name '*-firefox.zip' -o -name '*-sources.zip' \) -print | sort)
+          test "${#assets[@]}" -eq 2
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "FeedSieve Firefox ${GITHUB_REF_NAME#firefox-v}" "${assets[@]}"

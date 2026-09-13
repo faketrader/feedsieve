@@ -11,6 +11,9 @@ pnpm lint
 echo '==> keyword pack artifacts'
 pnpm keyword-packs:check
 
+echo '==> build community-api and generate route types'
+pnpm --filter @feedsieve/community-api build
+
 echo '==> typecheck'
 pnpm typecheck
 
@@ -22,5 +25,8 @@ pnpm --filter @feedsieve/community-api test
 
 echo '==> build extension'
 pnpm build:extension
+
+echo '==> build Firefox extension'
+pnpm --filter @feedsieve/extension build:firefox
 
 echo '==> all checks passed'

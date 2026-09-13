@@ -8,7 +8,7 @@ import {
 } from '../src/lib/community/community-store';
 import { flushContributions } from '../src/lib/community/contribute';
 import { syncKeywordPackCatalog } from '../src/lib/detection/keyword-packs';
-import { getChromeSidePanel } from '../src/lib/platform/sidepanel';
+import { getSidePanel } from '../src/lib/platform/sidepanel';
 
 export default defineBackground(() => {
   // MV3 service worker 随时可能被回收：这里只做事件入口。
@@ -81,7 +81,7 @@ export default defineBackground(() => {
     // 升级后补传历史黑名单/白名单；同步状态会防止重复上传。
     void flushContributions();
     // 默认点击图标打开浮层（popup），支持用户在浮层内一键切换为侧边栏
-    const sidePanel = getChromeSidePanel();
+    const sidePanel = getSidePanel();
     if (sidePanel?.setPanelBehavior) {
       sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
     }

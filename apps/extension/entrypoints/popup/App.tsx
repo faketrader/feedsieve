@@ -33,7 +33,7 @@ import HuntingView from './views/HuntingView';
 import {
   AppIcon,
   asPageMarkedList,
-  getChromeSidePanel,
+  getSidePanel,
   type PageMarkedItem,
 } from './views/shared';
 
@@ -241,7 +241,7 @@ export default function App() {
     );
   });
 
-  const sidePanelApi = getChromeSidePanel();
+  const sidePanelApi = getSidePanel();
   const canOpenSidePanel = Boolean(sidePanelApi?.open);
 
   useEffect(() => {
@@ -265,7 +265,7 @@ export default function App() {
   // 弹窗 → 侧边栏。Chrome 152 实测：setOptions 不支持 windowId（同步 TypeError，
   // 会拦死后续代码），只允许全局 {enabled, path}；setOptions 独立捕获，绝不让它拦住 open
   const handleOpenSidePanel = async () => {
-    const api = getChromeSidePanel();
+    const api = getSidePanel();
     if (!api?.open) return;
     try {
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });

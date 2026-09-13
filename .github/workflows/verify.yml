@@ -66,5 +66,11 @@ jobs:
       - name: Build extension (wxt)
         run: pnpm build:extension
 
+      - name: Build Firefox extension (WXT MV3)
+        run: pnpm --filter @feedsieve/extension build:firefox
+
+      - name: Lint Firefox package
+        run: pnpm dlx web-ext@10.6.0 lint --source-dir apps/extension/.output/firefox-mv3 --output text
+
       - name: Dependency audit
         run: pnpm audit --audit-level high

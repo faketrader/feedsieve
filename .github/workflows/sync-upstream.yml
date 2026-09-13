@@ -24,6 +24,7 @@ jobs:
         with:
           ref: firefox
           fetch-depth: 0
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v6
 
@@ -36,9 +37,13 @@ jobs:
         id: prepare
         env:
           GH_TOKEN: ${{ github.token }}
+          # 上游 Release 可能修改 .github/workflows；此时内置令牌权限不足。
+          SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
         run: |
           set -euo pipefail
           upstream_repo='realchendahuang/feedsieve'
+          git remote set-url origin "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          trap 'git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"' EXIT
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git remote add upstream "https://github.com/${upstream_repo}.git"
@@ -136,11 +141,14 @@ jobs:
         if: steps.prepare.outputs.release_needed == 'true' && steps.verify.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
+          SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
           FIREFOX_TAG: ${{ steps.prepare.outputs.firefox_tag }}
           INTEGRATED: ${{ steps.prepare.outputs.integrated }}
           RELEASE_TAG: ${{ steps.prepare.outputs.release_tag }}
         run: |
           set -euo pipefail
+          git remote set-url origin "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          trap 'git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"' EXIT
           git tag "$FIREFOX_TAG"
           if [ "$INTEGRATED" = 'true' ]; then
             git push --no-verify --atomic origin HEAD:refs/heads/firefox "refs/tags/${FIREFOX_TAG}"

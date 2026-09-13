@@ -58,12 +58,12 @@ jobs:
           if ! git merge-base --is-ancestor "$release_commit" HEAD; then
             if ! git merge --no-edit "$release_commit"; then
               git merge --abort
-              pr=$(gh pr list --base firefox --head main --state open --json number --jq '.[0].number // empty')
+              pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --base firefox --head main --state open --json number --jq '.[0].number // empty')
               body="Automated integration of upstream release ${release_tag} (${release_commit}) has merge conflicts. Resolve the conflicts and let the verify workflow pass before publishing the Firefox release."
               if [ -z "$pr" ]; then
-                gh pr create --base firefox --head main --title "chore: sync upstream ${release_tag} into firefox" --body "$body"
+                gh pr create --repo "$GITHUB_REPOSITORY" --base firefox --head main --title "chore: sync upstream ${release_tag} into firefox" --body "$body"
               else
-                gh pr edit "$pr" --title "chore: sync upstream ${release_tag} into firefox" --body "$body"
+                gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --title "chore: sync upstream ${release_tag} into firefox" --body "$body"
               fi
               echo "::error::Upstream ${release_tag} conflicts with the Firefox branch; an integration PR is available."
               exit 1
@@ -86,7 +86,7 @@ jobs:
             fi
             echo "release_needed=false" >> "$GITHUB_OUTPUT"
             echo "firefox_tag=${firefox_tag}" >> "$GITHUB_OUTPUT"
-            if gh release view "$firefox_tag" >/dev/null 2>&1; then
+            if gh release view "$firefox_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               echo "dispatch_needed=false" >> "$GITHUB_OUTPUT"
               echo "Firefox ${firefox_tag} is already synchronized and published." >> "$GITHUB_STEP_SUMMARY"
             else
@@ -122,12 +122,12 @@ jobs:
           RELEASE_COMMIT: ${{ steps.prepare.outputs.release_commit }}
         run: |
           set -euo pipefail
-          pr=$(gh pr list --base firefox --head main --state open --json number --jq '.[0].number // empty')
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --base firefox --head main --state open --json number --jq '.[0].number // empty')
           body="Automated verification failed while integrating upstream release ${RELEASE_TAG} (${RELEASE_COMMIT}). Inspect this workflow run and fix the Firefox compatibility checks before publishing."
           if [ -z "$pr" ]; then
-            gh pr create --base firefox --head main --title "chore: sync upstream ${RELEASE_TAG} into firefox" --body "$body"
+            gh pr create --repo "$GITHUB_REPOSITORY" --base firefox --head main --title "chore: sync upstream ${RELEASE_TAG} into firefox" --body "$body"
           else
-            gh pr edit "$pr" --title "chore: sync upstream ${RELEASE_TAG} into firefox" --body "$body"
+            gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --title "chore: sync upstream ${RELEASE_TAG} into firefox" --body "$body"
           fi
           echo "::error::Firefox verification failed; release was not published."
           exit 1
@@ -143,13 +143,13 @@ jobs:
           set -euo pipefail
           git tag "$FIREFOX_TAG"
           if [ "$INTEGRATED" = 'true' ]; then
-            git push --atomic origin HEAD:refs/heads/firefox "refs/tags/${FIREFOX_TAG}"
+            git push --no-verify --atomic origin HEAD:refs/heads/firefox "refs/tags/${FIREFOX_TAG}"
           else
-            git push origin "refs/tags/${FIREFOX_TAG}"
+            git push --no-verify origin "refs/tags/${FIREFOX_TAG}"
           fi
 
           # GITHUB_TOKEN 推送的标签不会触发 push 工作流，因此显式派发。
-          gh workflow run release-firefox.yml --ref "$FIREFOX_TAG"
+          gh workflow run release-firefox.yml --repo "$GITHUB_REPOSITORY" --ref "$FIREFOX_TAG"
           echo "Synchronized upstream ${RELEASE_TAG}, tagged ${FIREFOX_TAG}, and dispatched the Firefox release." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Retry missing GitHub Release
@@ -157,4 +157,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           FIREFOX_TAG: ${{ steps.prepare.outputs.firefox_tag }}
-        run: gh workflow run release-firefox.yml --ref "$FIREFOX_TAG"
+        run: gh workflow run release-firefox.yml --repo "$GITHUB_REPOSITORY" --ref "$FIREFOX_TAG"

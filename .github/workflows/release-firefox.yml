@@ -56,8 +56,8 @@ jobs:
         run: |
           mapfile -t assets < <(find apps/extension/.output -maxdepth 1 -type f \( -name '*-firefox.zip' -o -name '*-sources.zip' \) -print | sort)
           test "${#assets[@]}" -eq 2
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release ${GITHUB_REF_NAME} already exists." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --title "FeedSieve Firefox ${GITHUB_REF_NAME#firefox-v}" "${assets[@]}"
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes --title "FeedSieve Firefox ${GITHUB_REF_NAME#firefox-v}" "${assets[@]}"

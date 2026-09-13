@@ -1,0 +1,47 @@
+name: sync-upstream
+
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'faketrader/feedsieve'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: firefox
+          fetch-depth: 0
+      - name: Fast-forward main and open integration PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/realchendahuang/feedsieve.git
+          git fetch upstream main
+          git fetch origin main firefox
+          # Divergence requires investigation; never reset or force-push main.
+          git merge-base --is-ancestor origin/main upstream/main
+          git push origin refs/remotes/upstream/main:refs/heads/main
+          if git merge-base --is-ancestor upstream/main origin/firefox; then
+            echo 'Firefox already contains upstream.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          pr=$(gh pr list --base firefox --head main --state open --json number --jq '.[0].number // empty')
+          if [ -z "$pr" ]; then
+            gh pr create --base firefox --head main --title 'chore: sync upstream into firefox' --body 'Merge upstream history into the Firefox branch. Review conflicts and the verify workflow before merging. Use a merge commit to preserve upstream ancestry.'
+          fi
+          # Explicit dispatch works with GITHUB_TOKEN and tests the merge result.
+          gh workflow run verify.yml --ref firefox -f integrate_upstream=true
+          echo 'Opened or updated main → firefox PR; dispatched integration verification.' >> "$GITHUB_STEP_SUMMARY"

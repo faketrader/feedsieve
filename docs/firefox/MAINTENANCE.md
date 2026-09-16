@@ -2,7 +2,7 @@
 
 - `main`：上游最新正式 Release 对应提交的快进镜像。
 - `firefox`：默认分支，承载 Firefox 适配、维护文档和工作流。
-- 每天 12:34 UTC（新加坡/北京时间 20:34）查询上游最新正式 GitHub Release，也可在 Actions 手动运行。草稿和预发布版本不进入同步链路。
+- 每天 12:34 UTC（新加坡/北京时间 20:34）查询 `sdpong/feedsieve` 的最新正式 GitHub Release，也可在 Actions 手动运行。草稿和预发布版本不进入同步链路；上游尚无正式 Release 时任务正常结束，不改动分支。
 - 有新 Release 时将 `main` 快进到该 Release 对应提交，并把该提交合入 `firefox`。合并结果必须通过 lint、类型检查、测试、Chrome 与 Firefox 构建、`web-ext lint` 和高危依赖审计。
 - 验证通过后，工作流原子推送 `firefox` 分支和同版本发布标签，并派发 Firefox 发布。发生分叉、合并冲突或验证失败时停止发布；冲突和验证失败会创建或更新 `main → firefox` PR，供维护者修复。
 - 日常功能 PR 以 `firefox` 为目标。定时同步发现上游新 Release 后，会合并并验证 `firefox`，自动创建同版本的 `firefox-v<version>` 标签，再直接创建 GitHub Release 并附加 Firefox ZIP 与源码包，不使用 Actions Artifact。人工推送同格式标签仍可触发发布。
@@ -12,7 +12,9 @@
 ## 手动同步
 
 ```sh
-release_tag=$(gh api repos/realchendahuang/feedsieve/releases/latest --jq .tag_name)
+release_tag=$(gh api 'repos/sdpong/feedsieve/releases?per_page=100' \
+  --jq '[.[] | select(.draft == false and .prerelease == false)][0].tag_name // empty')
+[ -n "$release_tag" ] || { echo '上游暂无正式 Release'; exit 0; }
 git fetch upstream "refs/tags/$release_tag"
 git switch main
 git merge --ff-only FETCH_HEAD

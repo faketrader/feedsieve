@@ -41,7 +41,7 @@ jobs:
           SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
         run: |
           set -euo pipefail
-          upstream_repo='realchendahuang/feedsieve'
+          upstream_repo='sdpong/feedsieve'
           git remote set-url origin "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           trap 'git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"' EXIT
           git config user.name 'github-actions[bot]'
@@ -49,7 +49,16 @@ jobs:
           git remote add upstream "https://github.com/${upstream_repo}.git"
           git fetch origin main firefox --tags
 
-          release_tag=$(gh api "repos/${upstream_repo}/releases/latest" --jq '.tag_name')
+          # 先单独验证仓库可访问，避免把仓库删除、改名或权限问题误判为“暂无 Release”。
+          gh api "repos/${upstream_repo}" >/dev/null
+          release_tag=$(gh api "repos/${upstream_repo}/releases?per_page=100" \
+            --jq '[.[] | select(.draft == false and .prerelease == false)][0].tag_name // empty')
+          if [ -z "$release_tag" ]; then
+            echo "release_needed=false" >> "$GITHUB_OUTPUT"
+            echo "dispatch_needed=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream ${upstream_repo} has no formal GitHub Release; nothing to synchronize." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           git check-ref-format "refs/tags/${release_tag}"
           git fetch upstream "refs/tags/${release_tag}"
           release_commit=$(git rev-parse 'FETCH_HEAD^{commit}')

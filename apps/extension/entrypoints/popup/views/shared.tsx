@@ -1,3 +1,4 @@
+import type { BlockEvidence } from '../../../src/lib/detection/detection-evidence';
 import { useId, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import type { MarkStrength } from '@feedsieve/community-lists';
@@ -231,6 +232,7 @@ export const STRENGTH_HINTS: Record<UiLanguage, Record<MarkStrength, string>> = 
 };
 
 export interface PageMarkedItem {
+  evidence?: BlockEvidence;
   handle: string;
   category: string;
   reason: string;
@@ -263,6 +265,9 @@ export function asPageMarkedList(value: unknown): PageMarkedItem[] {
         : undefined;
     items.push({
       handle,
+      ...(raw.evidence && typeof raw.evidence === 'object'
+        ? { evidence: raw.evidence as BlockEvidence }
+        : {}),
       category: raw.category,
       reason: raw.reason,
       snippet,
@@ -316,13 +321,7 @@ export { getSidePanel, type SidePanelApi } from '../../../src/lib/platform/sidep
  * 官网公示页图标入口：按 tab 对应官网同名公示页引流（黑名单/白名单/词库）。
  * 图标即控件，靠 aria-label 表达去处。
  */
-export function OfficialLinkIcon({
-  target,
-  label,
-}: {
-  target: SiteList;
-  label: string;
-}) {
+export function OfficialLinkIcon({ target, label }: { target: SiteList; label: string }) {
   return (
     <button
       type="button"

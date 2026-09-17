@@ -1,3 +1,4 @@
+import { SamplesPanel } from './SamplesPanel';
 import { useQuery } from '@tanstack/react-query';
 import {
   Table,
@@ -15,6 +16,7 @@ export function FeedbackPage() {
   return (
     <section>
       <PageHeader title="用户反馈" />
+      <SamplesPanel />
       {feedback.isPending ? (
         <Loading />
       ) : feedback.isError ? (
@@ -34,9 +36,13 @@ export function FeedbackPage() {
               <TableBody>
                 {feedback.data.summary.map((item) => (
                   <TableRow key={`${item.detection_source}-${item.rule_id}`}>
-                    <TableCell className="font-semibold text-foreground">{item.detection_source}</TableCell>
+                    <TableCell className="font-semibold text-foreground">
+                      {item.detection_source}
+                    </TableCell>
                     <TableCell className="text-muted-foreground">{item.rule_id}</TableCell>
-                    <TableCell className="text-right font-semibold tabular-nums">{item.count}</TableCell>
+                    <TableCell className="text-right font-semibold tabular-nums">
+                      {item.count}
+                    </TableCell>
                   </TableRow>
                 ))}
                 {feedback.data.summary.length === 0 ? (

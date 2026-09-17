@@ -1,6 +1,6 @@
 # FeedSieve 隐私政策 / Privacy Policy
 
-生效日期：2026-09-01（2026-09-12 增补判定材料随票上报） · Contact: [GitHub Issues](https://github.com/realchendahuang/feedsieve/issues)
+生效日期：2026-09-01（2026-09-13 增补独立用户反馈样本） · Contact: [GitHub Issues](https://github.com/realchendahuang/feedsieve/issues)
 
 FeedSieve（福滤娃）是 X（Twitter）扩展：黄框标注垃圾账号，用户点击后执行拉黑。
 本政策说明它处理什么数据、什么数据出设备、什么数据绝不出设备。
@@ -11,7 +11,7 @@ FeedSieve（福滤娃）是 X（Twitter）扩展：黄框标注垃圾账号，�
 
 ### 只在本地处理（绝不出设备）
 
-- X 页面内容：推文文本、昵称、简介、链接 —— 用于识别垃圾账号。
+- X 页面内容：推文文本、昵称、简介、链接 —— 在本地用于识别垃圾账号；用户处理后的有限证据按下述授权上传。
 - 识别结果与动作记录：标注、拉黑、撤销、白名单、本地统计，以及你自定义的关键词规则、对官方预置词包的订阅/启停状态和最近一次校验通过的公开词库版本缓存。
 - 你的 X 关注列表：用于形成每个用户自己的「关注保护」名单，只保存在浏览器本地，绝不作为白名单或抢救票上传。
 - X 登录凭证（ct0 / bearer）：仅在你的浏览器内、你点击拉黑/撤销时，用于向 x.com 本身发起请求。不读取、不存储、不发送给 FeedSieve 或任何第三方。
@@ -24,7 +24,7 @@ FeedSieve（福滤娃）是 X（Twitter）扩展：黄框标注垃圾账号，�
 扩展从官方 API `api.feedsieve.win` 下载社区名单快照（黑名单与验证正常白名单，JSON，经 SHA-256 校验与发布者签名验证）。该请求不包含你的任何个人数据。
 
 **2. 黑白名单上传（默认开启，可一键关闭）**
-开启「名单上传」时，扩展同步你明确维护的本地黑名单和白名单，包括升级前已保存在本机的历史记录。它不上传仅仅浏览过、仅仅被标注但未处理的账号；也不上传关注保护名单、你的自定义关键词或官方词库的订阅/启停状态。公开词库下载不携带安装 ID、X 账号、浏览历史或自定义词；由本地关键词触发的拉黑会明确标记为仅本地，不会回灌成社区举报票；直接执行「社区清理」产生的批量拉黑同样只记录在本机。
+开启「名单上传」时，扩展同步你明确维护的本地黑名单和白名单，包括升级前已保存在本机的历史记录。它不上传仅仅浏览过、仅仅被标注但未处理的账号；也不上传关注保护名单、你的自定义关键词或官方词库的订阅/启停状态。公开词库下载不携带安装 ID、X 账号、浏览历史或自定义词；由关键词触发的拉黑不会回灌成社区举报票，但其显式操作证据可进入下述独立待审样本池；直接执行「社区清理」产生的批量拉黑同样只记录在本机。
 
 - 黑名单：`handle`（对方账号名）、可选 `x_user_id`、分类、话术指纹单向哈希、外链 hostname（最多 5 个），以及拉黑时刻的判定材料——命中那条推文的原文（截 500 字）、作者昵称与简介原文。这些内容本来就是你拉黑动作发生时公开发布的 X 内容，随票上传用于官方反滥用分析与误报治理，只在「名单上传」开启时发送，且不含你尚未处理的浏览内容。
 - 白名单：`handle`、可选 `x_user_id`、当时的检测来源、规则 ID 与检测理由（旧记录可能只有 handle）
@@ -40,6 +40,11 @@ FeedSieve（福滤娃）是 X（Twitter）扩展：黄框标注垃圾账号，�
 
 **5. 关键词贡献（显式动作）**
 你在关键词页点击「贡献给官方词库」（或在官网词库页提交）时，上传你主动挑选的短语与安装 ID（网页通道为加盐哈希后的 IP）。短语进入维护者人工审阅队列，审阅通过后才纳入官方词库；不参与黑名单计票。受每日额度限制。
+
+**6. 独立用户反馈样本（v0.9.4）**
+开启「名单上传」时，用户明确标记垃圾、采纳检测后拉黑（包括页面批量操作）、点击误标加入白名单，会保存独立事件。事件包含对方账号和可用的帖子 ID、正文（最多 4000 字符）、昵称（160 字符）、简介（1000 字符）、截断标记、证据采集与操作时间、扩展及词库版本、检测来源/规则/信号。个人用途拉黑、社区名单批量清理、普通添加白名单和仅浏览/仅检测不创建这些样本。自定义关键词正文不上传，规则 ID 脱敏。
+
+样本由用户反馈产生，不自动当作真实内容标签，不影响社区票数。维护者经受保护的后台复核，另存结论、模板家族、招揽/导流/引用/否定等标注及审计历史；复核后的证据用于反滥用评测及未来模型研究，不公开到名单、GitHub 或模型供应商。当前不调用外部语义模型。网络失败保留本地独立事件，下次同步补交；关闭「名单上传」暂停采集和补交，重新开启可补交此前积压。服务器删除请求覆盖这些样本及其复核记录；关闭上传本身不删除已提交记录。
 
 ### 服务器保存什么
 
@@ -61,7 +66,7 @@ FeedSieve（福滤娃）是 X（Twitter）扩展：黄框标注垃圾账号，�
 
 ### Processed locally only (never leaves the device)
 
-- X page content: tweet text, display names, bios, links — used to detect spam accounts.
+- X page content: tweet text, display names, bios, links — detection runs locally; bounded evidence from explicit actions may be uploaded as described below.
 - Detection results and actions: marks, blocks, unblocks, allowlist, local stats.
 - Your X following list: used as a per-user protection list and stored locally only. It is never uploaded as an allow or rescue vote.
 - Your X session credentials (ct0 / bearer): used only inside your browser, only when you click block/unblock, only against x.com itself. Never read, stored, or sent to FeedSieve or any third party.
@@ -90,6 +95,11 @@ Clicking rescue on a wrongly marked account reports its `handle`, optional `x_us
 
 **5. Keyword contributions (explicit action)**
 When you click “Contribute to official wordpacks” in the keywords page (or submit from the website wordpack tab), the phrases you actively selected are uploaded together with the installation ID (the web channel sends a salted, hashed IP instead). Phrases enter a maintainer review queue and are added to official wordpacks only after review; they never affect blocklist votes. Daily quotas apply.
+
+**6. Independent user feedback samples (v0.9.4)**
+While List uploads is enabled, explicit spam marking, accepting a detection by blocking (including page batches), and correcting a false positive create independent evidence events. Events include the target handle, available post ID, text (4000 characters), display name (160), bio (1000), truncation flags, observation/action times, extension/catalog versions, and detector source/rule/signals. Personal blocks, community batch cleanup, ordinary allowlist additions, passive browsing and engine judgments alone do not create samples. Custom keyword text is excluded and custom rule IDs are redacted.
+
+Feedback is an unverified claim, independent of community votes. Maintainers review evidence behind authenticated admin access and record separate labels, template families, semantic tags and review history. Reviewed evidence supports anti-abuse evaluation and future model research; it is not published in lists or GitHub or sent to model vendors. No external semantic model is called in this version. Failed uploads remain in a local outbox; disabling List uploads pauses collection and retries, and re-enabling can send the backlog. Server deletion requests cover samples and review history. Disabling uploads alone does not delete submitted data.
 
 ### What the server stores
 

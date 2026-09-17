@@ -34,6 +34,11 @@ const expected = [`${apiBase}/*`, 'https://x.com/*'].sort();
 JSON.stringify(hosts) === JSON.stringify(expected) ||
   fail(`host_permissions 异常: ${hosts.join(', ')}`);
 ok(`MV3 · v${m.version} · host_permissions = x.com + 官方 API`);
+const war = m.web_accessible_resources ?? [];
+if (war.some(e => (e.resources ?? []).some(p => p.includes('community') || p === '*' || p === '**'))) {
+  fail('随包检测数据不得通过 WAR 暴露；必须走后台缓存');
+}
+ok('随包检测数据仅由后台读取');
 EOF
 
 echo "==> ZIP 内容审计"
@@ -50,6 +55,37 @@ if (bad.length) {
 }
 console.log(`✓ ${files.length} 个文件，无 .env / 密钥 / 本地配置`);
 EOF
+
+echo "==> 随包数据资源审计"
+node - "$ZIP" <<'EOF'
+const [zipPath] = process.argv.slice(2);
+const { execFileSync } = require('node:child_process');
+const fail = (msg) => { console.error(`✗ ${msg}`); process.exit(1); };
+const ok = (msg) => console.log(`✓ ${msg}`);
+const read = (p) => {
+  try {
+    return JSON.parse(execFileSync('unzip', ['-p', zipPath, p], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }));
+  } catch (e) {
+    fail(`随包资源缺失或非法: ${p} (${e.message})`);
+  }
+};
+const list = read('community/lists/official.json');
+(Array.isArray(list.entries) && list.entries.length > 0 && typeof list.snapshot_version === 'string') ||
+  fail('lists/official.json 结构异常');
+ok(`名单快照 ${list.snapshot_version} · ${list.entries.length} 条`);
+const pack = read('community/keyword-packs/official.json');
+const ruleCount = (pack.packs ?? []).reduce((n, p) => n + (p.rules?.length ?? 0), 0);
+ruleCount > 0 || fail('keyword-packs/official.json 无规则');
+ok(`官方词库 ${pack.pack_version} · ${ruleCount} 条规则`);
+const vt = read('community/keyword-packs/variant-tables.json');
+for (const k of ['trad_simp', 'radicals', 'confusables']) {
+  (vt[k] && Object.keys(vt[k]).length > 0) || fail(`variant-tables.json 缺 ${k}`);
+}
+ok(`变体表 简${Object.keys(vt.trad_simp).length}/部${Object.keys(vt.radicals).length}/混${Object.keys(vt.confusables).length}`);
+EOF
+
+echo "==> Chromium MV3 离线冷启动与恢复验收"
+node scripts/smoke-extension-runtime.mjs
 
 echo "==> SHA-256"
 (cd "$OUT" && shasum -a 256 "feedsieve-${VERSION}-chrome.zip") |

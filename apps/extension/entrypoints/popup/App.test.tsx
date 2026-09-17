@@ -536,10 +536,10 @@ describe('popup App 渲染冒烟', () => {
     });
 
     const rootEl = renderApp();
-    await new Promise((resolve) => setTimeout(resolve, 150));
-
-    // 理由文案展示在清理页（页面批量按钮旁）
-    expect(rootEl.textContent).toContain('官方暂停了拉黑操作：接口排查中');
+    // Wait for observable async state, not machine-dependent fixed rendering latency.
+    await vi.waitFor(() => {
+      expect(rootEl.textContent).toContain('官方暂停了拉黑操作：接口排查中');
+    });
     await act(async () => buttonWithText(rootEl, '名单').click());
     // 社区批量入口本来可用（有合格条目），降级后必须禁用
     const cleanBtn = rootEl.querySelector<HTMLButtonElement>('.community-clean-action');

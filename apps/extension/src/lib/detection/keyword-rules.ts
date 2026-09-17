@@ -1,3 +1,7 @@
+import { createMentionInvitationRule, MENTION_INVITATION_RULE_ID } from './mention-invitation';
+import { LOCAL_CAMPAIGN_RULE_ID } from './local-campaign';
+import { createProfileInvitationRule, PROFILE_INVITATION_RULE_ID } from './profile-invitation';
+import { loadRuntimeData } from '../platform/runtime-data';
 import fs from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { HeuristicRule } from '@feedsieve/detector';
@@ -64,7 +68,7 @@ function flattenOfficialRules(catalog: KeywordPackCatalog): OfficialKeywordRule[
  * 否则“ＡＢＣ”和“abc”会在备份恢复时重复出现。
  */
 /** 规避变体映射数据（scripts/build-variant-tables.mjs 生成，随包构建；只收权威来源，禁止手补）。 */
-// 与名单快照/词库同策略：不进 JS bundle，扩展运行时 runtime.getURL + fetch 读取；
+// 与名单快照/词库同策略：不进 JS bundle，通过后台和 storage 读取；
 // Node 工具链态（vitest / lint）退回从源文件同步读，保持测试同步可用。
 const VARIANT_TABLES_URL = '/community/keyword-packs/variant-tables.json';
 
@@ -93,17 +97,20 @@ export function ensureVariantTables(): Promise<void> {
       typeof (globalThis as { browser?: { runtime?: { getURL?: unknown } } }).browser?.runtime
         ?.getURL === 'function'
         ? (async () => {
-            const res = await fetch(browser.runtime.getURL(VARIANT_TABLES_URL));
-            const raw = (res.ok ? await res.json() : null) as VariantTableShape | null;
+            const raw = (await loadRuntimeData(VARIANT_TABLES_URL)) as VariantTableShape | null;
             if (!raw?.trad_simp || !raw?.radicals || !raw?.confusables) {
               throw new Error('invalid variant tables');
             }
             VARIANT_TABLES = raw;
             buildVariantIndex();
+            NORMALIZE_CACHE.clear();
           })()
         : Promise.resolve(); // Node 工具链态已在模块加载时同步装入
   }
-  return variantLoad;
+  return variantLoad.catch((error) => {
+    variantLoad = null;
+    throw error;
+  });
 }
 // 三张表的链路统一收敛：confusable → 部首正字 → 简体；重复进入循环直到不动点（≤3 轮足够）。
 const VARIANT_BY_CODEPOINT = new Map<number, string>();
@@ -317,7 +324,10 @@ function createKeywordMatchIndex(rules: readonly ActiveKeywordRule[]) {
         }
       }
       for (const ruleIndex of asciiRuleIndexes) {
-        if (!hits.has(ruleIndex) && ruleMatchersForRule(rules[ruleIndex]!).ascii!.test(normalized)) {
+        if (
+          !hits.has(ruleIndex) &&
+          ruleMatchersForRule(rules[ruleIndex]!).ascii!.test(normalized)
+        ) {
           hits.set(ruleIndex, fieldIndex);
         }
       }
@@ -366,9 +376,9 @@ function normalizeSettings(value: unknown): KeywordRuleSettings {
           ),
         ]
       : null;
-  const defaultPresent = DEFAULT_SUBSCRIBED_CATEGORY_IDS.filter((id) =>
-    BUNDLED_KEYWORD_PACK_CATALOG.packs.some((pack) => pack.id === id),
-  );
+  // Defaults must not depend on an asynchronously loaded catalog. With a valid
+  // remote snapshot, the bundled catalog may remain empty for the entire session.
+  const defaultPresent = DEFAULT_SUBSCRIBED_CATEGORY_IDS;
   const subscribedCategoryIds = hasCurrentSubscriptionDefaults
     ? (storedSubscribedRaw ?? [])
     : storedSubscribedRaw
@@ -513,7 +523,7 @@ export function createKeywordHeuristics(
 ): readonly HeuristicRule[] {
   const rules = activeKeywordRules(settings, catalog);
   const matchAll = createKeywordMatchIndex(rules);
-  return rules.map((rule, ruleIndex) => ({
+  const heuristics: HeuristicRule[] = rules.map((rule, ruleIndex) => ({
     id: `keyword:${rule.id}`,
     check(input) {
       // 垃圾账号常把引流词直接放在昵称里，而正文只发图片或表情。
@@ -530,11 +540,22 @@ export function createKeywordHeuristics(
       return fieldLabel ? `${base} · ${fieldLabel}` : base;
     },
   }));
+  if (settings.subscribedCategoryIds.includes('adult_gray_traffic')) {
+    heuristics.push(createProfileInvitationRule(normalizeKeywordPhrase));
+    heuristics.push(createMentionInvitationRule(normalizeKeywordPhrase));
+  }
+  return heuristics;
 }
 export function categoryForKeywordRuleId(
   ruleId: string | null | undefined,
   catalog: KeywordPackCatalog = BUNDLED_KEYWORD_PACK_CATALOG,
 ): string | undefined {
+  if (
+    ruleId === PROFILE_INVITATION_RULE_ID ||
+    ruleId === LOCAL_CAMPAIGN_RULE_ID ||
+    ruleId === MENTION_INVITATION_RULE_ID
+  )
+    return 'adult_gray_traffic';
   if (!ruleId?.startsWith('keyword:official:')) return undefined;
   const officialId = ruleId.slice('keyword:official:'.length);
   return flattenOfficialRules(catalog).find((rule) => rule.id === officialId)?.category;

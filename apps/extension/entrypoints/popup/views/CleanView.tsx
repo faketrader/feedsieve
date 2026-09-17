@@ -1,3 +1,5 @@
+import { createTrainingSample } from '../../../src/lib/community/training-samples';
+import { syncLocalLabels } from '../../../src/lib/community/contribute';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   blockQueueProgress,
@@ -77,7 +79,6 @@ export default function CleanView({
     const timeout = window.setTimeout(() => setBlockResult(null), 4000);
     return () => window.clearTimeout(timeout);
   }, [blockResult]);
-
 
   /**
    * 队列状态回调：page-batch 批量拉黑收尾（completed/cancelled）时，
@@ -217,10 +218,23 @@ export default function CleanView({
     setOperatingHandles((prev) => new Set(prev).add(item.handle));
     notify(null);
     try {
-      await addAllowlist(item.handle, undefined, {
-        detectionSource: 'page-marked',
-        detectionReason: item.reason,
-      }, item.displayName);
+      const sample = createTrainingSample(
+        item.handle,
+        'false-positive',
+        item.evidence ?? { tweetText: item.snippet, displayName: item.displayName },
+      );
+      await addAllowlist(
+        item.handle,
+        undefined,
+        {
+          detectionSource: item.evidence?.detectionSource ?? 'heuristic',
+          ruleId: item.evidence?.ruleId,
+          detectionReason: item.reason,
+        },
+        item.displayName,
+        sample,
+      );
+      void syncLocalLabels();
       notify(t.allowlistAdded(item.handle));
       // 本地立即移除，不等 content script 储库回调链路广播回来的刷新
       setDismissedHandles((prev) => new Set(prev).add(item.handle));
@@ -252,15 +266,14 @@ export default function CleanView({
   const queueSummary = blockQueueProgress(queue);
   const queueDone = queueSummary.success + queueSummary.failed;
   const queueActive =
-    queue &&
-    queueSummary.total > 0 &&
-    (queue.status === 'running' || queue.status === 'paused');
+    queue && queueSummary.total > 0 && (queue.status === 'running' || queue.status === 'paused');
   // 页面批量收尾后的失败项：失败账号仍留在黄框清单里，原因如实展示在
   // 「当前页面」卡片（账号已消失 vs 可重试的解析失败），避免无声的死循环。
   const pageQueueFailedTasks =
     queue && queue.source === 'page-batch' && !queueActive
       ? queue.tasks.filter((task) => task.status === 'failed')
-      : [];  const queueStatusLabel = queue
+      : [];
+  const queueStatusLabel = queue
     ? {
         running: t.queueRunning,
         paused: t.queuePaused,
@@ -334,11 +347,7 @@ export default function CleanView({
               <span className="selection-summary">
                 {t.selectedCount(pendingCount, displayedItems.length)}
               </span>
-              <button
-                type="button"
-                className="toolbar-text-btn"
-                onClick={toggleSelectAll}
-              >
+              <button type="button" className="toolbar-text-btn" onClick={toggleSelectAll}>
                 {deselectedHandles.size > 0 ? t.selectAll : t.deselectAll}
               </button>
             </div>
@@ -354,10 +363,7 @@ export default function CleanView({
                   >
                     <div className="review-item-header">
                       <div className="review-meta-group">
-                        <label
-                          className="checkbox-control"
-                          title={t.excludeItemHint}
-                        >
+                        <label className="checkbox-control" title={t.excludeItemHint}>
                           <input
                             type="checkbox"
                             checked={!isDeselected}
@@ -414,9 +420,7 @@ export default function CleanView({
 
                     {/* 帖子正文：信息架构的核心第一视觉重心 */}
                     <div className="review-snippet">
-                      <p className="snippet-text">
-                        {item.snippet || t.noPostContent}
-                      </p>
+                      <p className="snippet-text">{item.snippet || t.noPostContent}</p>
                     </div>
                   </li>
                 );
@@ -438,8 +442,7 @@ export default function CleanView({
               <ul className="queue-failed-list" role="status">
                 {blockResult.failed.map((failure) => (
                   <li key={failure.handle}>
-                    @{failure.handle}（
-                    {FAILURE_LABELS[language][failure.code] ?? failure.code}）
+                    @{failure.handle}（{FAILURE_LABELS[language][failure.code] ?? failure.code}）
                   </li>
                 ))}
               </ul>
@@ -452,9 +455,7 @@ export default function CleanView({
             {pageQueueFailedTasks.map((task) => (
               <li key={task.handle}>
                 @{task.handle}（
-                {FAILURE_LABELS[language][task.failureCode ?? ''] ??
-                  task.failureCode ??
-                  t.unknown}
+                {FAILURE_LABELS[language][task.failureCode ?? ''] ?? task.failureCode ?? t.unknown}
                 ）
               </li>
             ))}
@@ -482,7 +483,9 @@ export default function CleanView({
           <div className="primary-actions">
             <button
               className="primary-action"
-              disabled={!pageCount || pendingCount === 0 || running || queueActive || pauseDestructive}
+              disabled={
+                !pageCount || pendingCount === 0 || running || queueActive || pauseDestructive
+              }
               onClick={() => void runBatch()}
             >
               {running

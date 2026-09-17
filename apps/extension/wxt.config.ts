@@ -4,7 +4,7 @@ import { copyRuntimeData } from './scripts/copy-runtime-data.mjs';
 
 // 大数据 JSON 不进 JS chunk：buildStart 时按 scripts/copy-runtime-data.mjs
 // 的唯一清单拷入 public/，随扩展以静态资源发布，运行时
-// browser.runtime.getURL + fetch 读取。此前静态 import 让 background /
+// 由后台读取并缓存到 storage。此前静态 import 让 background /
 // content / popup 三个入口各抄一份，产物膨胀到 4 MB，CWS 上传 zip 也跟着翻倍。
 function officialJsonPlugin() {
   return {

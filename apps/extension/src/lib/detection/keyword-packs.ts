@@ -1,3 +1,4 @@
+import { loadRuntimeData } from '../platform/runtime-data';
 import fs from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
@@ -8,10 +9,7 @@ import {
   type ManifestSignature,
   type TrustedKey,
 } from '@feedsieve/community-lists';
-import {
-  applyDetectorConfigOverride,
-  validateDetectorConfigOverride,
-} from '@feedsieve/detector';
+import { applyDetectorConfigOverride, validateDetectorConfigOverride } from '@feedsieve/detector';
 import { API_BASE } from '../platform/api-base';
 
 export interface KeywordPackRule {
@@ -172,7 +170,10 @@ export function parseKeywordPackCatalog(value: unknown): KeywordPackCatalog | nu
   // config 段可选：出现即必须整体合法，否则整包拒收（宁可 builtin，也不半信）
   if (raw.detector_config === undefined) return base;
   if (validateDetectorConfigOverride(raw.detector_config)) {
-    return { ...base, detector_config: raw.detector_config as Record<string, Record<string, number>> };
+    return {
+      ...base,
+      detector_config: raw.detector_config as Record<string, Record<string, number>>,
+    };
   }
   return null;
 }
@@ -216,9 +217,7 @@ function readBundledCatalogFromSource(): KeywordPackCatalog {
     .map((base) => join(base, 'community/keyword-packs/official.json'))
     .find((p) => fs.existsSync(p));
   if (!found) throw new Error('bundled keyword packs source not found');
-  const parsed = parseKeywordPackCatalog(
-    JSON.parse(fs.readFileSync(found, 'utf8')) as unknown,
-  );
+  const parsed = parseKeywordPackCatalog(JSON.parse(fs.readFileSync(found, 'utf8')) as unknown);
   if (!parsed) throw new Error('invalid bundled keyword packs');
   return installBundledCatalog(parsed);
 }
@@ -226,20 +225,26 @@ function readBundledCatalogFromSource(): KeywordPackCatalog {
 export function loadBundledKeywordPackCatalog(): Promise<KeywordPackCatalog> {
   if (!bundledLoad) {
     bundledLoad =
-      typeof (globalThis as { browser?: { runtime?: { getURL?: unknown } } }).browser?.runtime?.getURL === 'function'
+      typeof (globalThis as { browser?: { runtime?: { getURL?: unknown } } }).browser?.runtime
+        ?.getURL === 'function'
         ? (async () => {
-            const res = await fetch(browser.runtime.getURL(BUNDLED_PACK_URL));
-            const parsed = parseKeywordPackCatalog(res.ok ? await res.json() : null);
+            const parsed = parseKeywordPackCatalog(await loadRuntimeData(BUNDLED_PACK_URL));
             if (!parsed) throw new Error('invalid bundled keyword packs');
             return installBundledCatalog(parsed);
           })()
         : Promise.resolve(readBundledCatalogFromSource());
   }
-  return bundledLoad;
+  return bundledLoad.catch((error) => {
+    bundledLoad = null;
+    throw error;
+  });
 }
 // Node 工具链态（vitest / lint）：同步预装，保证 BUNDLED_KEYWORD_PACK_CATALOG
 // 在测试里拿到的就是真实目录，无须 async 装配。
-if (typeof (globalThis as { browser?: { runtime?: { getURL?: unknown } } }).browser?.runtime?.getURL !== 'function') {
+if (
+  typeof (globalThis as { browser?: { runtime?: { getURL?: unknown } } }).browser?.runtime
+    ?.getURL !== 'function'
+) {
   readBundledCatalogFromSource();
 }
 function parseManifest(value: unknown): KeywordPackManifest | null {
@@ -404,8 +409,8 @@ export async function syncKeywordPackCatalog(
       pack_version: catalog.pack_version,
       body,
       synced_at: Date.now(),
-      } satisfies StoredKeywordPackCatalog,
-    });
+    } satisfies StoredKeywordPackCatalog,
+  });
   syncDetectorOverride(catalog);
   return { status: 'updated', version: catalog.pack_version };
 }

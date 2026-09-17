@@ -1,3 +1,4 @@
+import { createTrainingSample } from '../community/training-samples';
 /**
  * 单账号拉黑核心链路：blockOne（顺手拉黑 / 徽章拉黑 / 手动拉黑 / 队列执行共用的
  * 唯一实现）与「是否给社区加票」的唯一口径 communityVoteForDetection。
@@ -102,6 +103,25 @@ export function createBlockOne(state: ContentState) {
       }
     }
 
+    // Freeze before the network action; the page may change while X responds.
+    const sample =
+      options.origin === 'manual-personal' || options.origin === 'community-batch'
+        ? null
+        : createTrainingSample(
+            handle,
+            options.origin === 'manual-spam'
+              ? 'manual-spam'
+              : options.origin === 'page-batch'
+                ? 'batch-block'
+                : 'accepted-detection',
+            {
+              ...item.evidence,
+              tweetText: options.tweetSnippet ?? item.evidence.tweetText ?? item.snippet,
+              displayName: options.displayName ?? item.evidence.displayName ?? item.displayName,
+              bio: options.bio ?? item.evidence.bio,
+            },
+            xUserId,
+          );
     const result = await runNativeAction('block', xUserId);
     if (!result.ok) {
       return {
@@ -143,6 +163,7 @@ export function createBlockOne(state: ContentState) {
           ? { bio: options.bio ?? item.evidence.bio ?? state.bioCache.get(handle)! }
           : {}),
       },
+      sample ?? undefined,
     );
     await bumpStat('blocked');
     // v0.6 战报：今日拉黑 + 分类计数

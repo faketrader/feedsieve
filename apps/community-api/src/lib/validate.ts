@@ -232,7 +232,7 @@ const DETECTION_SOURCES = [
 ] as const;
 /** 举报侧额外允许「人工」来源：用户手动标记 ≠ 检测器命中，规则质量分析据此区分。 */
 const REPORT_DETECTION_SOURCES = [...DETECTION_SOURCES, 'manual'] as const;
-const RULE_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const RULE_ID_RE = REPORT_RULE_ID_RE;
 const MAX_DETECTION_REASON_LENGTH = 240;
 
 /**

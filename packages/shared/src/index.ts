@@ -1,10 +1,4 @@
-export {
-  CATEGORIES,
-  type Category,
-  isCategory,
-  categoryLabel,
-  type Locale,
-} from './categories';
+export { CATEGORIES, type Category, isCategory, categoryLabel, type Locale } from './categories';
 export { HANDLE_INPUT_RE, NORMALIZED_HANDLE_RE, normalizeHandle } from './handle';
 export {
   APPLICATION_KINDS,
@@ -16,3 +10,13 @@ export {
   isOpenApplicationStatus,
 } from './application';
 export { formatAgo } from './format-ago';
+export {
+  SAMPLE_ACTIONS,
+  SEMANTIC_TAGS,
+  parseTrainingSample,
+  parseSampleReview,
+  type TrainingSample,
+  type SampleAction,
+  type SampleReview,
+  type SampleVerdict,
+} from './training-sample';

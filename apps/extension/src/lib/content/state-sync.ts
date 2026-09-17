@@ -6,10 +6,7 @@
  */
 
 import { contextFromPath, extractFeedItem, tweetSelectors } from '@feedsieve/x-adapter';
-import {
-  getBlockedAccounts,
-  subscribeBlocked,
-} from '../community/blocked-accounts';
+import { getBlockedAccounts, subscribeBlocked } from '../community/blocked-accounts';
 import { getAllowlist, subscribeAllowlist } from '../community/allowlist';
 import {
   getFollowingAllowlist,
@@ -24,16 +21,9 @@ import {
   getKeywordRuleSettings,
 } from '../detection/keyword-rules';
 import { getKeywordPackCatalog } from '../detection/keyword-packs';
-import {
-  HIDDEN_TWEET_CELL_ATTRIBUTE,
-  mutateWithStableViewport,
-} from '../platform/remove-tweets';
+import { HIDDEN_TWEET_CELL_ATTRIBUTE, mutateWithStableViewport } from '../platform/remove-tweets';
 import type { PageScanController } from '../detection/page-scan-controller';
-import {
-  MARK_ATTRIBUTE,
-  replaceHandleCache,
-  type ContentState,
-} from './page-state';
+import { MARK_ATTRIBUTE, replaceHandleCache, type ContentState } from './page-state';
 import type { BlockedFold } from './blocked-fold';
 
 export function createStateSync(deps: {
@@ -117,16 +107,54 @@ export function createStateSync(deps: {
     state.detectionEnabled = settings.enabled;
     state.strength = settings.strength;
     state.autoContribute = settings.autoContribute;
+    controller.reset();
+    controller.fullRescan();
+  }
+
+  let keywordRetry: ReturnType<typeof setTimeout> | undefined;
+  let keywordFailures = 0;
+  function retryKeywords(): void {
+    if (keywordRetry || keywordFailures >= 3) return;
+    keywordFailures += 1;
+    keywordRetry = setTimeout(() => {
+      keywordRetry = undefined;
+      void refreshKeywordHeuristics();
+    }, keywordFailures * 5_000);
   }
 
   async function refreshKeywordHeuristics(): Promise<void> {
-    await ensureVariantTables();
-    state.keywordCatalog = await getKeywordPackCatalog();
-    state.keywordHeuristics = createKeywordHeuristics(
-      await getKeywordRuleSettings(),
-      state.keywordCatalog,
-    );
-    controller.fullRescan();
+    // Start independently: normalization data cannot delay installation of official rules.
+    const variants = ensureVariantTables()
+      .then(() => {
+        if (state.keywordCatalog) {
+          void getKeywordRuleSettings()
+            .then((settings) => {
+              state.keywordHeuristics = createKeywordHeuristics(settings, state.keywordCatalog);
+              controller.reset();
+              controller.fullRescan();
+            })
+            .catch((error) => console.error('[FeedSieve] 规则刷新失败:', error));
+        }
+      })
+      .catch((error) => {
+        console.error('[FeedSieve] 变体表加载失败，繁简/部首抗规避归一化降级:', error);
+        retryKeywords();
+      });
+    try {
+      state.keywordCatalog = await getKeywordPackCatalog();
+      state.keywordHeuristics = createKeywordHeuristics(
+        await getKeywordRuleSettings(),
+        state.keywordCatalog,
+      );
+      controller.reset();
+      controller.fullRescan();
+    } catch (error) {
+      // 装载失败绝不能静默：2026-09-13 检测全灭事故里错误被 void 吞掉，用户只能靠
+      // 「黄框不见了」自己发现。这里必须留下可排查的现场。
+      console.error('[FeedSieve] 官方词库装载失败，保留现有检测规则:', error);
+      retryKeywords();
+    }
+    await variants;
   }
 
   /**

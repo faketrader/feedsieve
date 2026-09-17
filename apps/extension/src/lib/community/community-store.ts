@@ -1,3 +1,4 @@
+import { loadRuntimeData } from '../platform/runtime-data';
 /**
  * 社区名单本地状态：快照缓存（last-known-good）+ 用户设置。
  * 快照的拉取/校验逻辑在 @feedsieve/community-lists（纯函数），
@@ -42,24 +43,28 @@ function cleanupLegacySnapshot(): void {
   });
 }
 // 随包发布的最终名单不走 JS bundle：构建时由 wxt.config officialJsonPlugin 拷入
-// public/community/lists/，这里运行时 fetch（扩展自己的资源文件，无网络依赖）。
+// public/community/lists/，由后台读取并缓存到 storage（无网络依赖）。
 // 此前静态 import 让 background / content / popup 三个入口各抄一份，产物膨胀到 4 MB。
 const BUNDLED_SNAPSHOT_URL = '/community/lists/official.json';
 let bundledSnapshotCache: StoredSnapshot | null | undefined;
 export async function getBundledSnapshot(): Promise<StoredSnapshot | null> {
   if (bundledSnapshotCache !== undefined) return bundledSnapshotCache;
   try {
-    const raw = (await fetch(browser.runtime.getURL(BUNDLED_SNAPSHOT_URL)).then((res) =>
-      res.json(),
-    )) as { snapshot_version: string; generated_at: string; entries: unknown };
+    const raw = (await loadRuntimeData(BUNDLED_SNAPSHOT_URL)) as {
+      snapshot_version: string;
+      generated_at: string;
+      entries: unknown;
+    };
+    const parsed = parseSnapshotBody(`${JSON.stringify(raw)}\n`);
+    if (!parsed.ok) throw new Error('Invalid bundled community snapshot');
     bundledSnapshotCache = {
       snapshot_version: raw.snapshot_version,
       body: `${JSON.stringify(raw)}\n`,
       synced_at: Date.parse(raw.generated_at),
     };
-  } catch {
-    // 打包资源缺失属异常；按无兜底处理，后续仍会尝试线上同步
-    bundledSnapshotCache = null;
+  } catch (error) {
+    console.error('[FeedSieve] 随包名单加载失败，下次读取将重试:', error);
+    return null;
   }
   return bundledSnapshotCache;
 }
@@ -159,7 +164,11 @@ export async function requestOfficialPauseCheck(): Promise<OfficialPauseState> {
     })) as { paused?: unknown; reason?: string; disabledSince?: string } | null | undefined;
     if (res && typeof res.paused === 'boolean') {
       return res.paused
-        ? { destructive_actions_disabled: true, reason: res.reason, disabled_since: res.disabledSince }
+        ? {
+            destructive_actions_disabled: true,
+            reason: res.reason,
+            disabled_since: res.disabledSince,
+          }
         : { destructive_actions_disabled: false };
     }
   } catch {

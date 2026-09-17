@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 大数据 JSON（名单快照 / 词库目录 / 变体表）不进 JS bundle：拷入 public/
-// 作为随包资源，运行时 runtime.getURL + fetch 读取。
+// 作为随包资源，由后台读取并缓存到 storage。
 // 随包资源清单这里只维护一份：wxt.config.ts 的 buildStart 也 import 本函数。
 // wxt prepare 会按 public 里实际存在的文件生成 getURL 的 PublicPath 类型，
 // 所以在 postinstall（prepare 之前）与 typecheck/build 前都要保证文件在场。

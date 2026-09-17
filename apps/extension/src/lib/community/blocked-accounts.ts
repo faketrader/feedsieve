@@ -1,3 +1,5 @@
+import type { TrainingSample } from '@feedsieve/shared';
+import { enqueueTrainingSample } from './training-samples';
 /**
  * 已拉黑账号记录（一键撤销 Unblock 的数据源）。
  *
@@ -83,6 +85,7 @@ export async function markBlocked(
   evidence?: BlockedAccountEvidence,
   /** 判定材料快照；独立传参避免混进 evidence 展开链。 */
   facts?: BlockedAccountFacts,
+  sample?: TrainingSample,
 ): Promise<void> {
   return enqueueStorageWrite(async () => {
     const normalized = normalize(handle);
@@ -124,8 +127,8 @@ export async function markBlocked(
         existing.bio = truncateText(facts.bio.trim(), BIO_TEXT_MAX);
         changed = true;
       }
-      if (changed) {
-        await browser.storage.local.set({ [STORAGE_KEY]: accounts });
+      if (changed || sample) {
+        await enqueueTrainingSample(sample, { [STORAGE_KEY]: accounts });
       }
       return;
     }
@@ -148,7 +151,7 @@ export async function markBlocked(
       ...normalizeFacts(facts),
       blockedAt: Date.now(),
     });
-    await browser.storage.local.set({ [STORAGE_KEY]: accounts });
+    await enqueueTrainingSample(sample, { [STORAGE_KEY]: accounts });
   });
 }
 

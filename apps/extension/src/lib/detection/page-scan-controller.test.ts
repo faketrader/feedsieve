@@ -42,6 +42,23 @@ afterEach(() => {
 });
 
 describe('PageScanController', () => {
+  it('family evidence invalidates only the affected author and requeues unchanged text', async () => {
+    const ctx = setup();
+    const first = tweetArticle();
+    const second = tweetArticle();
+    document.body.append(first, second);
+    ctx.controller.remember(first, 'first');
+    ctx.controller.remember(second, 'second');
+    expect(ctx.controller.hasChanged(first, 'same-text')).toBe(true);
+    expect(ctx.controller.hasChanged(second, 'same-text')).toBe(true);
+    ctx.controller.invalidateHandle('first');
+    expect(ctx.controller.hasChanged(first, 'same-text')).toBe(true);
+    expect(ctx.controller.hasChanged(second, 'same-text')).toBe(false);
+    await vi.advanceTimersByTimeAsync(SCAN_DEBOUNCE_MS);
+    expect(ctx.processed.map((item) => item.article)).toEqual([first]);
+    ctx.controller.dispose();
+  });
+
   it('scanRevision 稳定且区分输入变化', () => {
     const item = {
       postId: '1800000000000000001',

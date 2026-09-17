@@ -22,19 +22,25 @@ export function createManualActions(deps: {
 }) {
   const { state, blockOne, fold } = deps;
 
+  const manualEvidence = new WeakMap<
+    HTMLButtonElement,
+    { handle: string; evidence: BlockEvidence }
+  >();
+
   // ---------- 标注 UI ----------
 
-  function attachManualAction(
-    article: HTMLElement,
-    handle: string,
-    evidence: BlockEvidence,
-  ): void {
-    if (article.querySelector('[data-fs-manual-action]')) return;
+  function attachManualAction(article: HTMLElement, handle: string, evidence: BlockEvidence): void {
+    const existing = article.querySelector<HTMLButtonElement>('[data-fs-manual-action]');
+    if (existing) {
+      manualEvidence.set(existing, { handle, evidence });
+      return;
+    }
     const actionAnchor = article.querySelector(tweetSelectors.actionAnchor);
     const actionGroup = actionAnchor?.closest(tweetSelectors.actionGroup);
     if (!actionGroup) return;
 
     const button = document.createElement('button');
+    manualEvidence.set(button, { handle, evidence });
     button.type = 'button';
     button.className = 'fs-manual-mark';
     button.setAttribute('data-fs-manual-action', 'true');
@@ -49,12 +55,13 @@ export function createManualActions(deps: {
       void (async () => {
         button.disabled = true;
         button.textContent = state.uiLanguage === 'zh' ? '拉黑中…' : 'Blocking…';
-        const outcome = await runManualSpamBlock(handle, evidence);
+        const current = manualEvidence.get(button)!;
+        const outcome = await runManualSpamBlock(current.handle, current.evidence);
         if (outcome.ok) {
           button.textContent = state.uiLanguage === 'zh' ? '已拉黑 ✓' : 'Blocked ✓';
           // 被拉黑者本人主页豁免折叠（与徽章路径 runBlockNow 同口径，见 blocked-fold）
-          if (fold.shouldFoldBlockedTweets(handle)) {
-            hideCellsSoon(fold.collectCellsForHandle(handle));
+          if (fold.shouldFoldBlockedTweets(current.handle)) {
+            hideCellsSoon(fold.collectCellsForHandle(current.handle));
           }
           return;
         }

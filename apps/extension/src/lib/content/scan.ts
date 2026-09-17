@@ -1,3 +1,10 @@
+import {
+  LocalCampaignIndex,
+  LOCAL_CAMPAIGN_RULE_ID,
+  campaignCandidateSignal,
+} from '../detection/local-campaign';
+import { normalizeKeywordPhrase } from '../detection/keyword-rules';
+import { PROFILE_INVITATION_RULE_ID } from '../detection/profile-invitation';
 /**
  * 单 article 的扫描管线：提取 → 检测 → 标注/折叠/豁免。
  * 只处理传入的这一个节点；调度（脏集合、分片、防重入）由 PageScanController 负责。
@@ -14,7 +21,7 @@ import {
 } from '../detection/page-scan-controller';
 import { getBundledEntries } from '../community/community-store';
 import { hideCellsSoon } from '../platform/remove-tweets';
-import type { ContentState } from './page-state';
+import { MARK_ATTRIBUTE, type ContentState } from './page-state';
 import type { Badges } from './badges';
 import type { BlockedFold } from './blocked-fold';
 import type { ManualActions } from './manual-actions';
@@ -23,17 +30,10 @@ import type { ManualActions } from './manual-actions';
  * 最近一次公开最终名单随扩展打包，作为离线兜底。
  * 社区名单走运行时同步（background SW -> storage.local -> 这里建索引），
  * 服务器快照永远是权威来源。
- * 名单 JSON（2 MB+ 级）不进 JS chunk，作为打包资源运行时 fetch（替换原来
+ * 名单 JSON（2 MB+ 级）不进 JS chunk，由后台读取随包资源（替换原来
  * 的静态 import——它会同步锁住 content script 的 JS 解析三个入口各一份）。
  */
 let builtinList: ReadonlySet<string> = toHandleSet([]);
-void getBundledEntries()
-  .then((entries) => {
-    builtinList = toHandleSet(entries as never[]);
-  })
-  .catch(() => {
-    // 打包资源缺失属异常；保持空集，社区名单同步通道仍可用
-  });
 
 export function createScan(deps: {
   state: ContentState;
@@ -45,6 +45,25 @@ export function createScan(deps: {
   const { state, controller, fold, badges, manual } = deps;
   const { markCell } = badges;
   const { attachManualAction } = manual;
+  const campaigns = new LocalCampaignIndex(normalizeKeywordPhrase);
+  let campaignRules = state.keywordHeuristics;
+  let campaignSeedRule = campaignRules.find((rule) => rule.id === PROFILE_INVITATION_RULE_ID);
+  const eligibleSeed = (author: string): boolean =>
+    !state.allowCache.has(author) &&
+    !state.followingCache.has(author) &&
+    author !== state.selfHandle &&
+    !state.community?.verifiedSet.has(author) &&
+    !state.community?.whitelistSet.has(author);
+  void getBundledEntries()
+    .then((entries) => {
+      builtinList = toHandleSet(entries as never[]);
+      controller.reset();
+      controller.fullRescan();
+    })
+    .catch((error) => {
+      // 打包资源缺失属异常；保持空集，社区名单同步通道仍可用。但绝不静默：
+      console.error('[FeedSieve] 随包名单快照加载失败，内置名单为空，仅剩服务端同步通道:', error);
+    });
 
   /**
    * 单个 article 的提取 + 检测 + 标注。
@@ -84,6 +103,19 @@ export function createScan(deps: {
       links: item.links,
     };
 
+    if (campaignRules !== state.keywordHeuristics) {
+      campaigns.clear();
+      campaignRules = state.keywordHeuristics;
+      campaignSeedRule = campaignRules.find((rule) => rule.id === PROFILE_INVITATION_RULE_ID);
+    }
+    const campaignEnabled = state.detectionEnabled && !!campaignSeedRule;
+    if (campaignEnabled) {
+      const directSeed = eligibleSeed(handle) && !!campaignSeedRule?.check(input);
+      for (const author of campaigns.observe(handle, item.text, directSeed)) {
+        controller.invalidateHandle(author);
+      }
+    }
+
     // 自己的帖子：永不折叠也永不标注（selfHandle 未知时防御性不跳过；
     // 后面 blockedCache 等检查都不得先于它，避免自己拉黑自己这种数据异常
     // 把帖子藏起来）。
@@ -105,7 +137,7 @@ export function createScan(deps: {
     }
 
     // 检测 / 增强 / 分层 / 分类推导统一走 detection-pipeline（可独立单测的单元）
-    const result = runDetectionPipeline({
+    let result = runDetectionPipeline({
       input,
       community: state.community,
       builtinList,
@@ -114,6 +146,47 @@ export function createScan(deps: {
       strength: state.strength,
       uiLanguage: state.uiLanguage,
     });
+    const count = campaignEnabled ? campaigns.match(handle, item.text, eligibleSeed) : 0;
+    const candidateSignal =
+      count >= 2 ? campaignCandidateSignal(item.text, normalizeKeywordPhrase) : null;
+    if (eligibleSeed(handle) && result.presentation === 'ignore' && count >= 2) {
+      result = runDetectionPipeline({
+        input,
+        community: state.community,
+        builtinList,
+        keywordHeuristics: [
+          ...state.keywordHeuristics,
+          {
+            id: LOCAL_CAMPAIGN_RULE_ID,
+            check: () =>
+              `命中官方规则：与 ${count} 个具有昵称招揽证据的账号同模板 + ${candidateSignal === 'anti-bot-claim' ? '正文自称非人机' : '长数字载荷'} · 正文`,
+          },
+        ],
+        catalog: state.keywordCatalog,
+        strength: state.strength,
+        uiLanguage: state.uiLanguage,
+      });
+      result.evidence.signalIds = [
+        LOCAL_CAMPAIGN_RULE_ID,
+        'same-template-direct-seeds',
+        candidateSignal!,
+      ];
+    }
+    result.evidence.observedAt = Date.now();
+    result.evidence.catalogVersion = state.keywordCatalog.pack_version;
+    // A withdrawn seed or changed profile must retract the previous inferred badge.
+    if (
+      result.presentation === 'ignore' &&
+      [LOCAL_CAMPAIGN_RULE_ID, PROFILE_INVITATION_RULE_ID].includes(
+        state.pageMarked.get(handle)?.ruleId ?? '',
+      )
+    ) {
+      const cell = article.closest(tweetSelectors.timelineCell) ?? article;
+      cell.removeAttribute(MARK_ATTRIBUTE);
+      cell.querySelectorAll('.fs-badge').forEach((badge) => badge.remove());
+      state.pageMarked.delete(handle);
+      state.notifyPageMarkedChanged();
+    }
     const isProtected = state.allowCache.has(handle) || state.followingCache.has(handle);
     if (isProtected) {
       // SPA 路由切换不会清 pageMarked：保护名单里的账号重现在扫描里时，

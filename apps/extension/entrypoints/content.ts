@@ -1,19 +1,13 @@
 import { noteTimelineHealth } from '@feedsieve/x-adapter';
 import { PageScanController, type ScanCallbacks } from '../src/lib/detection/page-scan-controller';
-import {
-  createKeywordHeuristics,
-  subscribeKeywordRules,
-} from '../src/lib/detection/keyword-rules';
+import { createKeywordHeuristics, subscribeKeywordRules } from '../src/lib/detection/keyword-rules';
 import {
   KEYWORD_PACK_SYNC_MAX_AGE_MS,
   subscribeKeywordPackCatalog,
 } from '../src/lib/detection/keyword-packs';
 import { subscribeCommunity } from '../src/lib/community/community-store';
 import { createFollowingSync } from '../src/lib/community/following-sync';
-import {
-  createQueueSupervisor,
-  QUEUE_HEARTBEAT_KEY,
-} from '../src/lib/queue/queue-supervisor';
+import { createQueueSupervisor, QUEUE_HEARTBEAT_KEY } from '../src/lib/queue/queue-supervisor';
 import {
   getPersistentBlockQueue,
   setPersistentBlockQueue,
@@ -131,7 +125,9 @@ export default defineContentScript({
     sync.refreshFollowingCache();
     sync.refreshBlockedCache();
     sync.refreshSelfCache();
-    void sync.refreshCommunity();
+    void sync
+      .refreshCommunity()
+      .catch((error) => console.error('[FeedSieve] 社区名单加载失败:', error));
     void sync.refreshKeywordHeuristics();
     void getUiLanguage().then((language) => {
       state.uiLanguage = language;
@@ -161,7 +157,14 @@ export default defineContentScript({
     requestKeywordPackSync();
     window.setInterval(requestKeywordPackSync, KEYWORD_PACK_SYNC_MAX_AGE_MS);
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') requestKeywordPackSync();
+      if (document.visibilityState === 'visible') {
+        requestKeywordPackSync();
+        void sync.refreshKeywordHeuristics();
+        void sync
+          .refreshCommunity()
+          .then(() => controller.fullRescan())
+          .catch((error) => console.error('[FeedSieve] 社区名单刷新失败:', error));
+      }
     });
     void queueSupervisor.pauseOrphaned(true);
     registerContentMessageHandlers({

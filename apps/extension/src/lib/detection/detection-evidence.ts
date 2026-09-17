@@ -36,6 +36,8 @@ export function collectLinkDomains(
 }
 
 export interface BlockEvidence {
+  observedAt?: number;
+  catalogVersion?: string;
   contentFingerprint?: string;
   linkDomains?: string[];
   /** 判断来源；手动标记路径强制 manual，检测器命中带各自来源。 */

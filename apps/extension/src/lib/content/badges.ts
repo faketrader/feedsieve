@@ -1,3 +1,4 @@
+import { createTrainingSample } from '../community/training-samples';
 /**
  * 黄框徽章与页面账本的写入：
  * - markCell：cell 打黄框属性 + 记入 pageMarked 账本 + 本地统计
@@ -125,13 +126,21 @@ export function createBadges(deps: {
         : 'Add to your allowlist and report this rule as a false positive';
     allowBtn.addEventListener('click', () => {
       void (async () => {
+        const sample = createTrainingSample(detection.handle, 'false-positive', {
+          ...evidence,
+          detectionSource: detection.source,
+          ruleId: detection.ruleId,
+        });
         const feedback = {
           detectionSource: detection.source,
           ...(detection.ruleId ? { ruleId: detection.ruleId } : {}),
           detectionReason: detection.reason,
         };
         const xUserId = (await getUserId(detection.handle)) ?? undefined;
-        await addAllowlist(detection.handle, xUserId, feedback);
+        await addAllowlist(detection.handle, xUserId, feedback, evidence.displayName, {
+          ...sample,
+          ...(xUserId ? { xUserId } : {}),
+        });
         cell.removeAttribute(MARK_ATTRIBUTE);
         badge.remove();
         // 本地白名单立即生效；同步器会补传失败记录和历史名单。

@@ -100,6 +100,16 @@ export class PageScanController {
     }
   }
 
+  /** Evidence for a template changed: invalidate only its currently rendered authors. */
+  invalidateHandle(handle: string): void {
+    for (const article of this.articlesByHandle.get(handle) ?? []) {
+      if (!article.isConnected) continue;
+      this.snapshots.delete(article);
+      this.dirtyArticles.add(article);
+    }
+    this.schedule();
+  }
+
   /** handle ↔ 节点索引维护（scanOne 提取后登记）。 */
   remember(article: Element, handle: string): void {
     const previous = this.articleHandles.get(article);

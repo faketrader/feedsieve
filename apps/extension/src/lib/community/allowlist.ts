@@ -1,3 +1,5 @@
+import type { TrainingSample } from '@feedsieve/shared';
+import { enqueueTrainingSample } from './training-samples';
 /**
  * 个人白名单：一票否决（误杀治理，PureTwitter 同款设计）。
  * 名单/启发式命中后，白名单命中即洗白——绝不标注、绝不进待拉黑。
@@ -41,6 +43,7 @@ export async function addAllowlist(
   xUserId?: string,
   evidence?: FalsePositiveEvidence,
   displayName?: string,
+  sample?: TrainingSample,
 ): Promise<void> {
   const normalized = normalize(handle);
   if (!normalized) {
@@ -48,6 +51,7 @@ export async function addAllowlist(
   }
   const items = await getAllowlist();
   if (items.some((item) => item.handle === normalized)) {
+    if (sample) await enqueueTrainingSample(sample);
     return;
   }
   items.push({
@@ -59,7 +63,7 @@ export async function addAllowlist(
     ...(evidence?.ruleId ? { ruleId: evidence.ruleId } : {}),
     ...(evidence?.detectionReason ? { detectionReason: evidence.detectionReason } : {}),
   });
-  await browser.storage.local.set({ [STORAGE_KEY]: items });
+  await enqueueTrainingSample(sample, { [STORAGE_KEY]: items });
 }
 
 export async function removeAllowed(handle: string): Promise<void> {

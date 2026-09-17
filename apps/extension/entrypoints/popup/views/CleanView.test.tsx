@@ -15,7 +15,12 @@ beforeEach(() => {
   for (const root of mountedRoots.splice(0)) root.unmount();
   document.body.replaceChildren();
   storageSet = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}')));
   vi.stubGlobal('browser', {
+    runtime: {
+      getManifest: () => ({ version: '0.9.4' }),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    },
     storage: {
       local: {
         get: vi.fn().mockResolvedValue({ uiLanguage: 'zh' }),
@@ -68,8 +73,8 @@ function rowOf(rootEl: HTMLElement, handle: string): HTMLElement {
 }
 
 function hasRow(rootEl: HTMLElement, handle: string): boolean {
-  return [...rootEl.querySelectorAll('.review-item .account-handle')].some(
-    (el) => el.textContent?.includes(handle),
+  return [...rootEl.querySelectorAll('.review-item .account-handle')].some((el) =>
+    el.textContent?.includes(handle),
   );
 }
 
@@ -84,9 +89,15 @@ describe('CleanView 误标', () => {
     const rootEl = renderCleanView(ITEMS, refreshPageMarked);
     expect(hasRow(rootEl, 'misfavored')).toBe(true);
     await act(async () => buttonInRow(rowOf(rootEl, 'misfavored'), '误标').click());
-    expect(storageSet).toHaveBeenCalledWith({
-      allowlist: expect.arrayContaining([expect.objectContaining({ handle: 'misfavored' })]),
-    });
+    expect(storageSet).toHaveBeenCalledWith(
+      expect.objectContaining({
+        allowlist: expect.arrayContaining([expect.objectContaining({ handle: 'misfavored' })]),
+      }),
+    );
+    const patch = storageSet.mock.calls.find(([value]) => value.allowlist)?.[0];
+    expect(
+      Object.entries(patch).find(([key]) => key.startsWith('trainingSamplePending:'))?.[1],
+    ).toMatchObject({ action: 'false-positive', handle: 'misfavored', text: '推文正文' });
     expect(refreshPageMarked).toHaveBeenCalled();
   });
 
@@ -146,7 +157,10 @@ describe('CleanView 剔除', () => {
     const msg = sendToXPage.mock.calls
       .map((call) => call[0])
       .find(
-        (m) => typeof m === 'object' && m !== null && (m as { type?: string }).type === 'feedsieve:run-page-block',
+        (m) =>
+          typeof m === 'object' &&
+          m !== null &&
+          (m as { type?: string }).type === 'feedsieve:run-page-block',
       ) as { handles?: string[] } | undefined;
     expect(msg?.handles).toEqual(['misfavored']);
   });

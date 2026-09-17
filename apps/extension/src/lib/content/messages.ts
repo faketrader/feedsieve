@@ -113,6 +113,7 @@ export function registerContentMessageHandlers(deps: {
           handle: m.handle,
           category: m.category,
           reason: m.reason,
+          evidence: m.evidence,
           snippet: m.snippet,
           displayName: m.displayName,
         })),

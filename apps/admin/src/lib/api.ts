@@ -284,11 +284,7 @@ const applicationEntrySchema = z.object({
 });
 const applicationsSchema = z.object({ entries: z.array(applicationEntrySchema) });
 
-async function request<T>(
-  path: string,
-  init: RequestInit = {},
-  schema?: z.ZodType<T>,
-): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, schema?: z.ZodType<T>): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body) headers.set('content-type', 'application/json');
   const response = await fetch(`/api/admin${path}`, {
@@ -398,27 +394,35 @@ export const getReleases = async () =>
 export const getMe = () => request<{ email: string }>('/me');
 
 export const importKeywordCatalog = () =>
-  request<{ imported: boolean; packs: number; rules: number }>('/keywords/import', { method: 'POST' });
+  request<{ imported: boolean; packs: number; rules: number }>('/keywords/import', {
+    method: 'POST',
+  });
 
 /** GET/POST /keywords/detector-config：天级判定参数（对象或 null=清除）。 */
 export const getDetectorConfig = () =>
   request<{ detector_config: unknown }>('/keywords/detector-config');
 export const saveDetectorConfig = (detector_config: unknown | null) =>
-  request<{ saved: boolean | null; version: string | null }>(
-    '/keywords/detector-config',
-    { method: 'POST', body: JSON.stringify({ detector_config }) },
-  );
+  request<{ saved: boolean | null; version: string | null }>('/keywords/detector-config', {
+    method: 'POST',
+    body: JSON.stringify({ detector_config }),
+  });
 
 // 保存/移除即发布：响应携带新版本号，界面不再有独立发布步骤。
 export const saveAccount = (body: AccountInput) =>
-  request<{ action: 'add' | 'update'; entry: AccountEntry; snapshot_version?: string }>('/accounts', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
+  request<{ action: 'add' | 'update'; entry: AccountEntry; snapshot_version?: string }>(
+    '/accounts',
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  );
 export const removeAccount = (handle: string) =>
-  request<{ changed: boolean; snapshot_version?: string }>(`/accounts/${encodeURIComponent(handle)}`, {
-    method: 'DELETE',
-  });
+  request<{ changed: boolean; snapshot_version?: string }>(
+    `/accounts/${encodeURIComponent(handle)}`,
+    {
+      method: 'DELETE',
+    },
+  );
 
 export const savePack = (body: PackInput) =>
   request<{ id: string; version?: string | null }>('/keywords/packs', {
@@ -431,12 +435,48 @@ export const saveRule = (body: RuleInput) =>
     body: JSON.stringify(body),
   });
 export const removePack = (id: string) =>
-  request<{ changed: boolean; version?: string | null }>(`/keywords/packs/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-  });
+  request<{ changed: boolean; version?: string | null }>(
+    `/keywords/packs/${encodeURIComponent(id)}`,
+    {
+      method: 'DELETE',
+    },
+  );
 export const removeRule = (id: string) =>
-  request<{ changed: boolean; version?: string | null }>(`/keywords/rules/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-  });
+  request<{ changed: boolean; version?: string | null }>(
+    `/keywords/rules/${encodeURIComponent(id)}`,
+    {
+      method: 'DELETE',
+    },
+  );
 export const rollbackRelease = (id: number) =>
-  request<{ version?: string; snapshot_version?: string }>(`/releases/${id}/rollback`, { method: 'POST' });
+  request<{ version?: string; snapshot_version?: string }>(`/releases/${id}/rollback`, {
+    method: 'POST',
+  });
+
+export interface SampleEntry {
+  id: number;
+  received_at: number;
+  content_hash: string;
+  review_id: number | null;
+  verdict: string | null;
+  family: string | null;
+  tags: string[];
+  note: string | null;
+  reviewed_at: number | null;
+  sample: import('@feedsieve/shared').TrainingSample;
+}
+export const getSamples = (after = 0, until?: number, reviewUntil?: number) =>
+  request<{
+    schema_version: number;
+    until: number;
+    review_until: number;
+    entries: SampleEntry[];
+    next_cursor: number | null;
+  }>(
+    `/samples?after=${after}${until === undefined ? '' : `&until=${until}`}${reviewUntil === undefined ? '' : `&review_until=${reviewUntil}`}`,
+  );
+export const reviewSample = (id: number, review: import('@feedsieve/shared').SampleReview) =>
+  request<{ changed: boolean }>(`/samples/${id}/review`, {
+    method: 'POST',
+    body: JSON.stringify(review),
+  });

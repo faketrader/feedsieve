@@ -232,6 +232,6 @@ flowchart TD
 
 号码探针现已覆盖半角、全角和零宽拆分三种形式，普通售后联系电话探针保持不命中。阶段 A 的最终门禁为根测试 600/600、Workers API 测试 191/191、全仓类型检查、lint、API 生产构建与扩展生产构建全部通过。
 
-线上已应用 D1 迁移并发布 Worker 版本 `c6815eb4-581d-448e-9d7e-6e2207fe2203`；签名词库 `2026.09.13.2` 已发布，共 760 条规则。发布后检查确认官网与后台为 HTTP 200，线上 D1 新列存在，词库 manifest 的签名和版本可读取。
+线上已应用 D1 迁移；最终 Worker 版本为 `8d72fe78-c6ba-470a-91bc-ffc5d20dded6`，签名词库 `2026.09.13.2` 已发布，共 760 条规则。发布后检查确认官网与后台为 HTTP 200，线上 D1 新列存在，词库 manifest 的签名和版本可读取。
 
 随后对 [x-spam-filter](https://github.com/ZPVIP/x-spam-filter) 与 [x-comment-blocker](https://github.com/amahteru/x-comment-blocker) 做了固定提交审阅，并独立实现关键词多模式索引。普通字面规则现在一次扫描昵称、账号、正文和简介即可得到全部候选；ASCII 整词、有序词组、规则优先级、规则 ID 与命中字段语义保持不变。具体采纳、拒绝和许可证边界见 [项目对照研究](./X_FILTER_PROJECTS_2026-09-13.md)。

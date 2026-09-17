@@ -1,3 +1,9 @@
+import {
+  ingestTrainingSamples,
+  listTrainingSamples,
+  reviewTrainingSample,
+} from './training-samples';
+import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
@@ -56,7 +62,12 @@ import {
   readAgentKeywordDetectorConfig,
   writeAgentKeywordDetectorConfig,
 } from './agent-admin';
-import { LEADERBOARD, DIRTY_KEY as LEADERBOARD_DIRTY_KEY, getLeaderboard, toPublicHunterRow } from './leaderboard';
+import {
+  LEADERBOARD,
+  DIRTY_KEY as LEADERBOARD_DIRTY_KEY,
+  getLeaderboard,
+  toPublicHunterRow,
+} from './leaderboard';
 import { runScheduledCron } from './scheduled';
 import { bindEmail, getProfile, updateProfile, verifyEmail } from './player';
 import { MAINTAINER_CATEGORIES } from './maintainer-blocklist';
@@ -158,6 +169,20 @@ export function createApp() {
       time: new Date().toISOString(),
     });
   });
+
+  app.post(
+    '/v1/training-samples',
+    bodyLimit({ maxSize: 450_000, onError: (c) => c.json({ error: 'samples_too_large' }, 413) }),
+    async (c) => {
+      c.header('Cache-Control', 'no-store');
+      const result = await ingestTrainingSamples(
+        c.env,
+        await c.req.json().catch(() => null),
+        c.req.header('cf-connecting-ip'),
+      );
+      return c.json(result.body, result.status);
+    },
+  );
 
   app.post('/v1/reports', async (c) => {
     const body = await c.req.json().catch(() => undefined);
@@ -487,6 +512,28 @@ export function createApp() {
   });
 
   // 只展示去标识化的规则级反馈；维护者不能读取安装 ID 或原始浏览内容。
+  app.get('/api/admin/samples', async (c) => {
+    const after = Number(c.req.query('after') ?? 0);
+    if (!Number.isSafeInteger(after) || after < 0) return c.json({ error: 'invalid_cursor' }, 400);
+    const until = c.req.query('until') === undefined ? undefined : Number(c.req.query('until'));
+    const reviewUntil =
+      c.req.query('review_until') === undefined ? undefined : Number(c.req.query('review_until'));
+    if ([until, reviewUntil].some((v) => v !== undefined && (!Number.isSafeInteger(v) || v < 0)))
+      return c.json({ error: 'invalid_cursor' }, 400);
+    return c.json(await listTrainingSamples(c.env, after, 100, until, reviewUntil));
+  });
+  app.post('/api/admin/samples/:id/review', async (c) => {
+    const id = Number(c.req.param('id'));
+    const changed = await reviewTrainingSample(
+      c.env,
+      id,
+      await c.req.json().catch(() => null),
+      c.get('maintainerEmail'),
+    );
+    if (!changed) return c.json({ error: 'invalid_sample_review' }, 400);
+    return c.json({ changed: true });
+  });
+
   app.get('/api/admin/feedback', async (c) => {
     const [summary, feedback] = await Promise.all([
       c.env.DB.prepare(

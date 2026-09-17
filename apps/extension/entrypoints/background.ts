@@ -1,3 +1,5 @@
+import { flushTrainingSamples } from '../src/lib/community/training-samples';
+import { registerRuntimeDataWorker } from '../src/lib/platform/runtime-data';
 import { syncCommunitySnapshot } from '@feedsieve/community-lists';
 import {
   COMMUNITY_API_BASE,
@@ -11,6 +13,7 @@ import { syncKeywordPackCatalog } from '../src/lib/detection/keyword-packs';
 import { getSidePanel } from '../src/lib/platform/sidepanel';
 
 export default defineBackground(() => {
+  registerRuntimeDataWorker();
   // MV3 service worker 随时可能被回收：这里只做事件入口。
   // 名单/词库同步不做定时 alarm：数据只在 X 页面打开时才被消费，
   // content script 启动、每 15 分钟、回到前台与 popup 打开都会触发同步，
@@ -54,8 +57,9 @@ export default defineBackground(() => {
     } catch {
       // 网络不可达：回退本地快照
     }
-    const state: OfficialPauseState =
-      (await getCommunityKillSwitch()) ?? { destructive_actions_disabled: false };
+    const state: OfficialPauseState = (await getCommunityKillSwitch()) ?? {
+      destructive_actions_disabled: false,
+    };
     officialPauseCheck = { at: now, state };
     return state;
   }
@@ -80,6 +84,7 @@ export default defineBackground(() => {
     void syncKeywordPacks(true);
     // 升级后补传历史黑名单/白名单；同步状态会防止重复上传。
     void flushContributions();
+    void flushTrainingSamples();
     // 默认点击图标打开浮层（popup），支持用户在浮层内一键切换为侧边栏
     const sidePanel = getSidePanel();
     if (sidePanel?.setPanelBehavior) {
@@ -93,12 +98,16 @@ export default defineBackground(() => {
     void syncKeywordPacks(false);
     // 补交上次网络失败时积压的社区贡献
     void flushContributions();
+    void flushTrainingSamples();
   });
 
   // 内容脚本启动/每 15 分钟/重新回到前台时请求关键词同步；popup 手动同步带 force。
   browser.runtime.onMessage.addListener((message: unknown) => {
     const msg = message as { type?: string; force?: boolean } | null;
+    if (msg?.type === 'feedsieve:samples-flush')
+      return flushTrainingSamples().then(() => ({ ok: true }));
     if (msg?.type === 'feedsieve:community-sync') {
+      void flushTrainingSamples();
       return sync(msg.force === true).then((outcome) => ({
         type: 'feedsieve:community-sync',
         outcome,

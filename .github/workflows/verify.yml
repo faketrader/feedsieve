@@ -66,6 +66,17 @@ jobs:
       - name: Build extension (wxt)
         run: pnpm build:extension
 
+      - name: Install Chromium for MV3 acceptance
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: MV3 offline startup and recovery
+        run: node scripts/smoke-extension-runtime.mjs
+
+      - name: Build admin and verify sample review/export
+        run: |
+          pnpm --filter @feedsieve/admin build
+          node scripts/smoke-sample-admin.mjs
+
       - name: Build Firefox extension (WXT MV3)
         run: pnpm --filter @feedsieve/extension build:firefox
 

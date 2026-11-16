@@ -41,7 +41,7 @@ jobs:
           SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
         run: |
           set -euo pipefail
-          upstream_repo='sdpong/feedsieve'
+          upstream_repo='realchendahuang/feedsieve'
           git remote set-url origin "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           trap 'git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"' EXIT
           git config user.name 'github-actions[bot]'
@@ -54,8 +54,10 @@ jobs:
           release_tag=$(gh api "repos/${upstream_repo}/releases?per_page=100" \
             --jq '[.[] | select(.draft == false and .prerelease == false)][0].tag_name // empty')
           if [ -z "$release_tag" ]; then
-            echo "release_needed=false" >> "$GITHUB_OUTPUT"
-            echo "dispatch_needed=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "release_needed=false"
+              echo "dispatch_needed=false"
+            } >> "$GITHUB_OUTPUT"
             echo "Upstream ${upstream_repo} has no formal GitHub Release; nothing to synchronize." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -64,7 +66,10 @@ jobs:
           release_commit=$(git rev-parse 'FETCH_HEAD^{commit}')
 
           # main 只沿正式 Release 快进，避免覆盖 fork 自身或未经发布的上游提交。
-          git merge-base --is-ancestor origin/main "$release_commit"
+          if ! git merge-base --is-ancestor origin/main "$release_commit"; then
+            echo "::error::Upstream ${upstream_repo} ${release_tag} is not a fast-forward of main. Reconcile the upstream history before retrying; no branch was changed."
+            exit 1
+          fi
           if ! git diff --quiet origin/main "$release_commit" -- .github/workflows && [ "$SYNC_TOKEN" = "$GH_TOKEN" ]; then
             echo "::error::This upstream release changes .github/workflows. Configure the UPSTREAM_SYNC_TOKEN secret with Contents and Workflows write access."
             exit 1
@@ -102,8 +107,10 @@ jobs:
               echo "::error::${firefox_tag} does not contain upstream ${release_tag}; refusing to rewrite a release tag."
               exit 1
             fi
-            echo "release_needed=false" >> "$GITHUB_OUTPUT"
-            echo "firefox_tag=${firefox_tag}" >> "$GITHUB_OUTPUT"
+            {
+              echo "release_needed=false"
+              echo "firefox_tag=${firefox_tag}"
+            } >> "$GITHUB_OUTPUT"
             if gh release view "$firefox_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               echo "dispatch_needed=false" >> "$GITHUB_OUTPUT"
               echo "Firefox ${firefox_tag} is already synchronized and published." >> "$GITHUB_STEP_SUMMARY"
@@ -114,12 +121,14 @@ jobs:
             exit 0
           fi
 
-          echo "release_needed=true" >> "$GITHUB_OUTPUT"
-          echo "dispatch_needed=true" >> "$GITHUB_OUTPUT"
-          echo "integrated=${integrated}" >> "$GITHUB_OUTPUT"
-          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
-          echo "release_commit=${release_commit}" >> "$GITHUB_OUTPUT"
-          echo "firefox_tag=${firefox_tag}" >> "$GITHUB_OUTPUT"
+          {
+            echo "release_needed=true"
+            echo "dispatch_needed=true"
+            echo "integrated=${integrated}"
+            echo "release_tag=${release_tag}"
+            echo "release_commit=${release_commit}"
+            echo "firefox_tag=${firefox_tag}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify integrated Firefox source
         id: verify

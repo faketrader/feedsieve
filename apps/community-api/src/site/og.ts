@@ -41,6 +41,28 @@ function textW(s: string, size: number): number {
   return em * size;
 }
 
+/**
+ * 按可用宽度贪心折行（最多 maxLines 行；放不下时最后一行补省略号）。
+ * OG 卡没有自动换行，锐评最长 60 个汉字，单行放不下，所以给两行。
+ */
+export function wrapLines(s: string, maxW: number, size: number, maxLines: number): string[] {
+  const chars = [...s];
+  const lines: string[] = [];
+  let rest = chars;
+  while (rest.length && lines.length < maxLines) {
+    let take = rest.length;
+    while (take > 1 && textW(rest.slice(0, take).join(''), size) > maxW - size) take -= 1;
+    const line = rest.slice(0, take).join('');
+    rest = rest.slice(take);
+    lines.push(line);
+  }
+  if (rest.length) {
+    const last = lines[maxLines - 1] ?? '';
+    lines[maxLines - 1] = truncate(last + '…', maxW, size);
+  }
+  return lines;
+}
+
 /** 超宽截断：留出一个省略号的宽度 */
 export function truncate(s: string, maxW: number, size: number): string {
   if (textW(s, size) <= maxW) return s;
@@ -95,10 +117,10 @@ export function siteOgSvg(stats: SiteOgStats, logo: OgLogo | null): string {
 <g font-family="${FONT}">
 ${frame(logo)}
 <text x="${PAD}" y="290" font-size="72" font-weight="700" fill="${INK}">福滤娃 FeedSieve</text>
-<text x="${PAD}" y="350" font-size="34" fill="${MIST}">黄框标注 · 原生拉黑 · 名单公开</text>
+<text x="${PAD}" y="350" font-size="34" fill="${MIST}">清理黄推 · 热帖榜 · 博主主页洞察</text>
 <text x="${PAD}" y="496" font-size="120" font-weight="700" fill="${GOLD}">${esc(String(stats.blacklistCount))}</text>
 <text x="${PAD}" y="546" font-size="28" fill="${MIST}">条垃圾账号公示 · ${esc(String(stats.whitelistCount))} 位博主入册推荐白名单</text>
-${footer('判断在本地完成，推文原文不出设备')}
+${footer('评论区不骚了，好帖也不漏了')}
 </g>
 </svg>`;
 }
@@ -127,6 +149,104 @@ ${frame(logo)}
 <text x="${PAD}" y="${496 - (bigSize - 128) * 0.6}" font-size="${bigSize}" font-weight="700" fill="${GOLD}">${esc(stat.big)}</text>
 <text x="${PAD}" y="546" font-size="28" fill="${MIST}">${esc(truncate(`${stat.bigLabel} · ${stat.sub}`, CONTENT_W, 28))}</text>
 ${footer('与扩展执行的名单同源（签名快照）')}
+</g>
+</svg>`;
+}
+
+/** AI 味结果页 OG 卡入参（公开结论，或待复核 / 争议中 / 真人 / 没测过的占位） */
+export interface AiOgCard {
+  handle: string;
+  displayName: string | null;
+  /** 头像 data URI（服务端已读好）；读不到画首字母圆 */
+  avatar: string | null;
+  state: 'public' | 'human' | 'contested' | 'pending' | 'none';
+  percent?: number;
+  tone?: 'ai' | 'mixed' | 'human';
+  level?: string;
+  /** 模型锐评；没有就整块不画（不再有手写评语兜底） */
+  comment?: string;
+  replyCount?: number;
+  aiVotes?: number;
+  humanVotes?: number;
+}
+
+const AI_TONE = { ai: '#ff4d6d', mixed: '#ffb020', human: '#22d39b' } as const;
+
+/** AI 味结果页 OG 卡：头像 + 名字 + @id，右侧大百分比 + 档位 + 锐评；没有公开结论时给邀请确认的文案 */
+export function aiCardOgSvg(card: AiOgCard): string {
+  const tone =
+    card.state === 'human'
+      ? AI_TONE.human
+      : card.state === 'contested'
+        ? AI_TONE.mixed
+        : card.tone
+          ? AI_TONE[card.tone]
+          : GOLD;
+  const name = card.displayName?.trim() || `@${card.handle}`;
+  const initial = esc([...name.replace(/^@/, '')][0]?.toUpperCase() ?? '?');
+  const avatar = card.avatar
+    ? `<clipPath id="aiav"><circle cx="190" cy="250" r="110"/></clipPath>
+<image x="80" y="140" width="220" height="220" clip-path="url(#aiav)" preserveAspectRatio="xMidYMid slice" href="${card.avatar}"/>`
+    : `<circle cx="190" cy="250" r="110" fill="#1f2430"/>
+<text x="190" y="285" font-size="96" font-weight="700" fill="${INK}" text-anchor="middle">${initial}</text>`;
+  const ring = `<circle cx="190" cy="250" r="118" fill="none" stroke="${tone}" stroke-width="8"/>`;
+  // 没有昵称时名字就是 @id，不重复写第二行
+  const nameBlock = `<text x="80" y="430" font-size="44" font-weight="700" fill="${INK}">${esc(truncate(name, 440, 44))}</text>${
+    card.displayName?.trim()
+      ? `\n<text x="80" y="478" font-size="30" fill="${MIST}">@${esc(card.handle)}</text>`
+      : ''
+  }`;
+  const right =
+    card.state === 'public' && card.percent !== undefined
+      ? `<text x="470" y="200" font-size="30" font-weight="700" fill="${MIST}">AI 味</text>
+<text x="462" y="370" font-size="190" font-weight="700" fill="${tone}">${card.percent}<tspan font-size="80">%</tspan></text>
+<rect x="470" y="404" width="${Math.min(640, textW(card.level ?? '', 38) + 56)}" height="64" rx="32" fill="${tone}"/>
+<text x="498" y="448" font-size="38" font-weight="700" fill="#0a0a0a">${esc(card.level ?? '')}</text>
+${
+  card.comment
+    ? wrapLines(`「${card.comment}」`, 650, 26, 3)
+        .map(
+          (line, index) =>
+            `<text x="470" y="${508 + index * 30}" font-size="26" fill="${SUBTLE}">${esc(line)}</text>`,
+        )
+        .join('\n')
+    : ''
+}`
+      : card.state === 'human'
+        ? `<text x="470" y="200" font-size="30" font-weight="700" fill="${MIST}">社区结论</text>
+<text x="462" y="370" font-size="150" font-weight="700" fill="${tone}">真人</text>
+<text x="470" y="448" font-size="30" fill="${MIST}">AI ${card.aiVotes ?? 0} 票 · 真人 ${card.humanVotes ?? 0} 票</text>
+<text x="470" y="526" font-size="30" fill="${SUBTLE}">社区投票认为这是真人，不是 AI 号</text>`
+        : card.state === 'contested'
+          ? `<text x="470" y="200" font-size="30" font-weight="700" fill="${MIST}">社区投票</text>
+<text x="462" y="370" font-size="110" font-weight="700" fill="${tone}">争议中</text>
+<text x="470" y="448" font-size="30" fill="${MIST}">AI ${card.aiVotes ?? 0} 票 · 真人 ${card.humanVotes ?? 0} 票</text>
+<text x="470" y="526" font-size="30" fill="${SUBTLE}">两边票数接近，继续投票决定</text>`
+          : card.state === 'public'
+            ? `<text x="470" y="200" font-size="30" font-weight="700" fill="${MIST}">社区结论</text>
+<text x="462" y="370" font-size="150" font-weight="700" fill="${tone}">AI</text>
+<text x="470" y="448" font-size="30" fill="${MIST}">AI ${card.aiVotes ?? 0} 票 · 真人 ${card.humanVotes ?? 0} 票</text>
+<text x="470" y="526" font-size="30" fill="${SUBTLE}">还没有可公开的判定分数</text>`
+            : `<text x="470" y="250" font-size="54" font-weight="700" fill="${INK}">${
+                card.state === 'pending' ? '已有人测过 · 待确认' : '还没人测过'
+              }</text>
+<text x="470" y="318" font-size="30" fill="${MIST}">${
+                card.state === 'pending'
+                  ? '再有一位用户测到同样的结果就公开'
+                  : '装上福滤娃，测测 TA 的回复有多少 AI 味'
+              }</text>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${OG_W}" height="${OG_H}" viewBox="0 0 ${OG_W} ${OG_H}" role="img" aria-label="${esc(name)} 的 AI 味 · 福滤娃 FeedSieve">
+<g font-family="${FONT}">
+<rect width="${OG_W}" height="${OG_H}" fill="#0a0a0a"/>
+<radialGradient id="aiglow"><stop offset="0" stop-color="${tone}" stop-opacity="0.22"/><stop offset="1" stop-color="${tone}" stop-opacity="0"/></radialGradient>
+<circle cx="900" cy="120" r="560" fill="url(#aiglow)"/>
+<rect x="0.75" y="0.75" width="${OG_W - 1.5}" height="${OG_H - 1.5}" rx="24" fill="none" stroke="${LINE}" stroke-width="1.5"/>
+<text x="80" y="92" font-size="30" font-weight="700" fill="${tone}">AI 味检测报告</text>
+${avatar}
+${ring}
+${nameBlock}
+${right}
+${footer(card.replyCount ? `根据最近 ${card.replyCount} 条公开回复 · 模型判定与锐评可能有误差 · 仅供娱乐参考` : '模型根据公开回复判定与锐评，可能有误差，仅供娱乐参考')}
 </g>
 </svg>`;
 }

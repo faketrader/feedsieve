@@ -119,7 +119,9 @@ function nativeActionState(latest: OpTrace): OpState {
 function resolveState(latest: OpTrace): OpState {
   // 查无此人 = 解析流程正常工作的确定结论
   if (latest.ok) return 'working';
-  return latest.reason === 'no_csrf' || latest.reason === 'network' || latest.reason === 'rate_limited'
+  return latest.reason === 'no_csrf' ||
+    latest.reason === 'network' ||
+    latest.reason === 'rate_limited'
     ? 'degraded'
     : 'failed';
 }

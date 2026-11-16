@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { getKeywordData } from '@/site/data.functions';
 import { pageHead } from '@/site/seo';
-import { ListsTabs, ListPageHeader, HelpIcon } from '@/site/pages/lists/lists-common';
+import { ListPageHeader, HelpIcon } from '@/site/pages/lists/lists-common';
 import { KeywordsPanel } from '@/site/pages/lists/KeywordsPanel';
 
 export const Route = createFileRoute('/_shell/lists/keywords')({
@@ -25,9 +25,8 @@ function KeywordsRoute() {
   return (
     <main className="mx-auto max-w-5xl px-[clamp(18px,2.2vw,34px)] pb-16 pt-8">
       <ListPageHeader
-        title="词库"
-        meta={data ? undefined : '词库加载失败'}
-        tabs={<ListsTabs />}
+        title="开源关键词库"
+        meta={data ? `共 ${data.total_rules} 条公开规则 · 版本 ${data.pack_version}` : '词库加载失败'}
         aside={
           <HelpIcon ariaLabel="词库说明">
             官方词库包与扩展执行的规则同源同版本（签名发布）；访客可匿名提交新短语，

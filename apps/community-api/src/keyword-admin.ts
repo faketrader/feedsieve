@@ -1,4 +1,7 @@
+import { and, asc, count, desc, eq, ilike, type SQL } from 'drizzle-orm';
 import { recordAdminAudit, recordRelease } from './admin-accounts';
+import { getDb } from './db/client';
+import { adminKeywordPacks, adminKeywordRules, meta } from './db/schema';
 import {
   buildSigningMessage,
   signManifestMessage,
@@ -6,14 +9,13 @@ import {
 } from '@feedsieve/community-lists';
 import { validateDetectorConfigOverride } from '@feedsieve/detector';
 import { sha256Hex } from './lib/hash';
-import { D1_CHUNK, escapeLike } from './lib/d1';
+import { collateC, escapeLike, stripNul } from './lib/sql';
 
 const PACK_ID = /^[a-z][a-z0-9_]{1,63}$/;
 const RULE_ID = /^[a-z][a-z0-9-]{2,95}$/;
 const VERSION = /^\d{4}\.\d{2}\.\d{2}\.\d{1,4}$/;
 const now = () => Math.floor(Date.now() / 1000);
 
-// D1 单条查询最多 100 个绑定参数，batch 分片按 100 切。
 type Row = Record<string, unknown>;
 
 interface KeywordRuleDocument {
@@ -70,10 +72,13 @@ function isRecord(value: unknown): value is Row {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value)
-    ? value
-        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-        .map((item) => item.trim())
+    ? value.map((item) => cleanText(item)).filter((item) => item.length > 0)
     : [];
+}
+
+/** 客户端文本字段：去 NUL（PG text 不收）并 trim；非字符串视为空。 */
+function cleanText(value: unknown): string {
+  return typeof value === 'string' ? stripNul(value).trim() : '';
 }
 
 function randomId(prefix: 'pack' | 'rule'): string {
@@ -95,7 +100,9 @@ function parseStringArrayColumn(raw: unknown): string[] {
   if (typeof raw !== 'string') return [];
   try {
     const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === 'string')
+      : [];
   } catch {
     return [];
   }
@@ -110,8 +117,9 @@ export async function importKeywordCatalog(
   env: Cloudflare.Env,
 ): Promise<{ imported: boolean; packs: number; rules: number }> {
   if (!env.KEYWORD_PACKS) throw new Error('keyword_packs_unavailable');
-  const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM admin_keyword_packs').first<{ n: number }>();
-  if ((count?.n ?? 0) > 0) return { imported: false, packs: 0, rules: 0 };
+  const db = getDb(env);
+  const [existing] = await db.select({ n: count() }).from(adminKeywordPacks);
+  if ((existing?.n ?? 0) > 0) return { imported: false, packs: 0, rules: 0 };
 
   const latest = await env.KEYWORD_PACKS.get('keyword-packs/latest.json');
   if (!latest) return { imported: false, packs: 0, rules: 0 };
@@ -138,126 +146,131 @@ export async function importKeywordCatalog(
     if (!isRecord(raw) || !PACK_ID.test(String(raw.id))) return [];
     const name = isRecord(raw.name) ? raw.name : {};
     const description = isRecord(raw.description) ? raw.description : {};
-    const zh = typeof name.zh === 'string' ? name.zh.trim() : '';
-    const en = typeof name.en === 'string' ? name.en.trim() : '';
-    const descriptionZh = typeof description.zh === 'string' ? description.zh.trim() : '';
-    const descriptionEn = typeof description.en === 'string' ? description.en.trim() : '';
+    const zh = cleanText(name.zh);
+    const en = cleanText(name.en);
+    const descriptionZh = cleanText(description.zh);
+    const descriptionEn = cleanText(description.en);
     if (!zh || !en || !descriptionZh || !descriptionEn) return [];
     const rules = Array.isArray(raw.rules)
       ? raw.rules.flatMap((candidate): KeywordRuleDocument[] => {
           if (!isRecord(candidate)) return [];
           const id = typeof candidate.id === 'string' ? candidate.id : '';
-          const phrase = typeof candidate.phrase === 'string' ? candidate.phrase.trim() : '';
+          const phrase = cleanText(candidate.phrase);
           const terms = stringArray(candidate.terms);
           const maxGap = parseMaxGap(candidate.max_gap);
           if (!RULE_ID.test(id) || !phrase || phrase.length > 80) return [];
-          if (terms.length > 0 && (terms.length < 2 || terms.length > 5 || maxGap === null)) return [];
+          if (terms.length > 0 && (terms.length < 2 || terms.length > 5 || maxGap === null))
+            return [];
           return [{ id, phrase, ...(terms.length ? { terms, max_gap: maxGap! } : {}) }];
         })
       : [];
-    return [{
-      id: String(raw.id),
-      name: { zh, en },
-      description: { zh: descriptionZh, en: descriptionEn },
-      source_refs: stringArray(raw.source_refs),
-      rules,
-    }];
+    return [
+      {
+        id: String(raw.id),
+        name: { zh, en },
+        description: { zh: descriptionZh, en: descriptionEn },
+        source_refs: stringArray(raw.source_refs),
+        rules,
+      },
+    ];
   });
   if (!packs.length) return { imported: false, packs: 0, rules: 0 };
 
   const time = now();
-  const statements: D1PreparedStatement[] = [];
-  let ruleCount = 0;
-  for (const pack of packs) {
-    statements.push(
-      env.DB.prepare(
-        `INSERT OR IGNORE INTO admin_keyword_packs
-           (id, name_zh, name_en, description_zh, description_en, source_refs, active, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?7)`,
-      ).bind(
-        pack.id,
-        pack.name.zh,
-        pack.name.en,
-        pack.description.zh,
-        pack.description.en,
-        JSON.stringify(pack.source_refs),
-        time,
-      ),
-    );
-    for (const rule of pack.rules) {
-      ruleCount += 1;
-      statements.push(
-        env.DB.prepare(
-          `INSERT OR IGNORE INTO admin_keyword_rules
-             (id, pack_id, phrase, terms, max_gap, active, created_at, updated_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)`,
-        ).bind(
-          rule.id,
-          pack.id,
-          rule.phrase,
-          rule.terms?.length ? JSON.stringify(rule.terms) : null,
-          rule.terms?.length ? rule.max_gap ?? null : null,
-          time,
-        ),
-      );
+  const packValues = packs.map((pack) => ({
+    id: pack.id,
+    nameZh: pack.name.zh,
+    nameEn: pack.name.en,
+    descriptionZh: pack.description.zh,
+    descriptionEn: pack.description.en,
+    sourceRefs: JSON.stringify(pack.source_refs),
+    active: 1,
+    createdAt: time,
+    updatedAt: time,
+  }));
+  const ruleValues = packs.flatMap((pack) =>
+    pack.rules.map((rule) => ({
+      id: rule.id,
+      packId: pack.id,
+      phrase: rule.phrase,
+      terms: rule.terms?.length ? JSON.stringify(rule.terms) : null,
+      maxGap: rule.terms?.length ? (rule.max_gap ?? null) : null,
+      active: 1,
+      createdAt: time,
+      updatedAt: time,
+    })),
+  );
+  // 分类先于规则写入（外键）；整体一个事务，规则按 1000 条一批。
+  await db.transaction(async (tx) => {
+    await tx.insert(adminKeywordPacks).values(packValues).onConflictDoNothing();
+    for (let index = 0; index < ruleValues.length; index += 1000) {
+      await tx
+        .insert(adminKeywordRules)
+        .values(ruleValues.slice(index, index + 1000))
+        .onConflictDoNothing();
     }
-  }
-  for (let index = 0; index < statements.length; index += D1_CHUNK) {
-    await env.DB.batch(statements.slice(index, index + D1_CHUNK));
-  }
-  return { imported: true, packs: packs.length, rules: ruleCount };
+  });
+  return { imported: true, packs: packs.length, rules: ruleValues.length };
 }
-
-const PACK_COLUMNS =
-  'id, name_zh, name_en, description_zh, description_en, source_refs, active, created_at, updated_at';
-const RULE_COLUMNS = 'id, pack_id, phrase, terms, max_gap, active, created_at, updated_at';
 
 export async function listAdminKeywords(
   env: Cloudflare.Env,
   options: ListKeywordsOptions = {},
 ): Promise<{ packs: AdminKeywordPack[]; rules: AdminKeywordRule[] }> {
+  const db = getDb(env);
   const q = options.q?.trim();
   const packId = options.packId?.trim();
   const limit =
     typeof options.limit === 'number'
-      ? `LIMIT ${Math.min(Math.max(Math.trunc(options.limit), 1), 1000)}`
-      : '';
+      ? Math.min(Math.max(Math.trunc(options.limit), 1), 1000)
+      : null;
 
-  const conditions: string[] = [];
-  const bindings: string[] = [];
-  if (packId) {
-    conditions.push(`pack_id = ?${bindings.length + 1}`);
-    bindings.push(packId);
-  }
-  if (q) {
-    conditions.push(`phrase LIKE ?${bindings.length + 1} ESCAPE '\\'`);
-    bindings.push(`%${escapeLike(q)}%`);
-  }
-  const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const conditions: SQL[] = [];
+  if (packId) conditions.push(eq(adminKeywordRules.packId, packId));
+  if (q) conditions.push(ilike(adminKeywordRules.phrase, `%${escapeLike(q)}%`));
 
-  const ruleStatement = env.DB.prepare(
-    `SELECT ${RULE_COLUMNS}
-     FROM admin_keyword_rules
-     ${whereSql}
-     ORDER BY pack_id, active DESC, phrase
-     ${limit}`,
-  );
+  const ruleQuery = db
+    .select({
+      id: adminKeywordRules.id,
+      pack_id: adminKeywordRules.packId,
+      phrase: adminKeywordRules.phrase,
+      terms: adminKeywordRules.terms,
+      max_gap: adminKeywordRules.maxGap,
+      active: adminKeywordRules.active,
+      created_at: adminKeywordRules.createdAt,
+      updated_at: adminKeywordRules.updatedAt,
+    })
+    .from(adminKeywordRules)
+    .where(and(...conditions))
+    .orderBy(
+      asc(collateC(adminKeywordRules.packId)),
+      desc(adminKeywordRules.active),
+      asc(collateC(adminKeywordRules.phrase)),
+    );
   const [packRows, ruleRows] = await Promise.all([
-    env.DB.prepare(`SELECT ${PACK_COLUMNS} FROM admin_keyword_packs ORDER BY active DESC, id`).all<{
-      active: number;
-    } & Omit<AdminKeywordPack, 'active'>>(),
-    (bindings.length ? ruleStatement.bind(...bindings) : ruleStatement).all<{
-      active: number;
-      terms: string | null;
-    } & Omit<AdminKeywordRule, 'active' | 'terms'>>(),
+    db
+      .select({
+        id: adminKeywordPacks.id,
+        name_zh: adminKeywordPacks.nameZh,
+        name_en: adminKeywordPacks.nameEn,
+        description_zh: adminKeywordPacks.descriptionZh,
+        description_en: adminKeywordPacks.descriptionEn,
+        source_refs: adminKeywordPacks.sourceRefs,
+        active: adminKeywordPacks.active,
+        created_at: adminKeywordPacks.createdAt,
+        updated_at: adminKeywordPacks.updatedAt,
+      })
+      .from(adminKeywordPacks)
+      .orderBy(desc(adminKeywordPacks.active), asc(collateC(adminKeywordPacks.id))),
+    limit === null ? ruleQuery : ruleQuery.limit(limit),
   ]);
   return {
-    packs: packRows.results.map((row) => ({
+    packs: packRows.map((row) => ({
       ...row,
       active: row.active === 1,
       source_refs: parseStringArrayColumn(row.source_refs),
     })),
-    rules: ruleRows.results.map((row) => ({
+    rules: ruleRows.map((row) => ({
       ...row,
       active: row.active === 1,
       terms: parseStringArrayColumn(row.terms),
@@ -273,26 +286,38 @@ export async function saveAdminKeywordPack(
   const input = isRecord(raw) ? raw : {};
   const rawId = typeof input.id === 'string' ? input.id.trim() : '';
   const id = rawId || randomId('pack');
-  const nameZh = typeof input.name_zh === 'string' ? input.name_zh.trim() : '';
-  const nameEn = typeof input.name_en === 'string' && input.name_en.trim() ? input.name_en.trim() : nameZh;
-  const descriptionZh = typeof input.description_zh === 'string' ? input.description_zh.trim() : '';
-  const descriptionEn =
-    typeof input.description_en === 'string' && input.description_en.trim()
-      ? input.description_en.trim()
-      : descriptionZh;
+  const nameZh = cleanText(input.name_zh);
+  const nameEn = cleanText(input.name_en) || nameZh;
+  const descriptionZh = cleanText(input.description_zh);
+  const descriptionEn = cleanText(input.description_en) || descriptionZh;
   if (!PACK_ID.test(id) || !nameZh || !nameEn || !descriptionZh || !descriptionEn) return null;
   const refs = stringArray(input.source_refs);
   const time = now();
-  await env.DB.prepare(
-    `INSERT INTO admin_keyword_packs
-       (id,name_zh,name_en,description_zh,description_en,source_refs,active,created_at,updated_at)
-     VALUES (?1,?2,?3,?4,?5,?6,1,?7,?7)
-     ON CONFLICT(id) DO UPDATE SET
-       name_zh=?2,name_en=?3,description_zh=?4,description_en=?5,
-       source_refs=?6,active=1,updated_at=?7`,
-  )
-    .bind(id, nameZh, nameEn, descriptionZh, descriptionEn, JSON.stringify(refs), time)
-    .run();
+  await getDb(env)
+    .insert(adminKeywordPacks)
+    .values({
+      id,
+      nameZh,
+      nameEn,
+      descriptionZh,
+      descriptionEn,
+      sourceRefs: JSON.stringify(refs),
+      active: 1,
+      createdAt: time,
+      updatedAt: time,
+    })
+    .onConflictDoUpdate({
+      target: adminKeywordPacks.id,
+      set: {
+        nameZh,
+        nameEn,
+        descriptionZh,
+        descriptionEn,
+        sourceRefs: JSON.stringify(refs),
+        active: 1,
+        updatedAt: time,
+      },
+    });
   await recordAdminAudit(env, actorEmail, rawId ? 'update_draft' : 'add_draft', 'keyword_pack', id);
   return { id };
 }
@@ -306,7 +331,7 @@ export async function saveAdminKeywordRule(
   const rawId = typeof input.id === 'string' ? input.id.trim() : '';
   const id = rawId || randomId('rule');
   const packId = typeof input.pack_id === 'string' ? input.pack_id.trim() : '';
-  const phrase = typeof input.phrase === 'string' ? input.phrase.trim() : '';
+  const phrase = cleanText(input.phrase);
   const terms = stringArray(input.terms);
   const maxGap = parseMaxGap(input.max_gap);
   if (
@@ -318,20 +343,31 @@ export async function saveAdminKeywordRule(
   ) {
     return null;
   }
-  const exists = await env.DB.prepare('SELECT id FROM admin_keyword_packs WHERE id=?1 AND active=1')
-    .bind(packId)
-    .first();
+  const db = getDb(env);
+  const [exists] = await db
+    .select({ id: adminKeywordPacks.id })
+    .from(adminKeywordPacks)
+    .where(and(eq(adminKeywordPacks.id, packId), eq(adminKeywordPacks.active, 1)));
   if (!exists) return null;
   const time = now();
-  await env.DB.prepare(
-    `INSERT INTO admin_keyword_rules
-       (id,pack_id,phrase,terms,max_gap,active,created_at,updated_at)
-     VALUES (?1,?2,?3,?4,?5,1,?6,?6)
-     ON CONFLICT(id) DO UPDATE SET
-       pack_id=?2,phrase=?3,terms=?4,max_gap=?5,active=1,updated_at=?6`,
-  )
-    .bind(id, packId, phrase, terms.length ? JSON.stringify(terms) : null, terms.length ? maxGap : null, time)
-    .run();
+  const ruleTerms = terms.length ? JSON.stringify(terms) : null;
+  const ruleMaxGap = terms.length ? maxGap : null;
+  await db
+    .insert(adminKeywordRules)
+    .values({
+      id,
+      packId,
+      phrase,
+      terms: ruleTerms,
+      maxGap: ruleMaxGap,
+      active: 1,
+      createdAt: time,
+      updatedAt: time,
+    })
+    .onConflictDoUpdate({
+      target: adminKeywordRules.id,
+      set: { packId, phrase, terms: ruleTerms, maxGap: ruleMaxGap, active: 1, updatedAt: time },
+    });
   await recordAdminAudit(env, actorEmail, rawId ? 'update_draft' : 'add_draft', 'keyword_rule', id);
   return { id };
 }
@@ -343,12 +379,21 @@ export async function disableAdminKeyword(
   actorEmail = 'system',
 ) {
   if (!(table === 'admin_keyword_packs' ? PACK_ID : RULE_ID).test(id)) return false;
-  const result = await env.DB.prepare(
-    `UPDATE ${table} SET active=0, updated_at=?2 WHERE id=?1 AND active=1`,
-  )
-    .bind(id, now())
-    .run();
-  if (result.meta.changes > 0) {
+  const db = getDb(env);
+  const set = { active: 0, updatedAt: now() };
+  const changed =
+    table === 'admin_keyword_packs'
+      ? await db
+          .update(adminKeywordPacks)
+          .set(set)
+          .where(and(eq(adminKeywordPacks.id, id), eq(adminKeywordPacks.active, 1)))
+          .returning({ id: adminKeywordPacks.id })
+      : await db
+          .update(adminKeywordRules)
+          .set(set)
+          .where(and(eq(adminKeywordRules.id, id), eq(adminKeywordRules.active, 1)))
+          .returning({ id: adminKeywordRules.id });
+  if (changed.length > 0) {
     await recordAdminAudit(
       env,
       actorEmail,
@@ -357,7 +402,7 @@ export async function disableAdminKeyword(
       id,
     );
   }
-  return result.meta.changes > 0;
+  return changed.length > 0;
 }
 
 function nextVersion(current: string | undefined, stamp: string): string {
@@ -391,7 +436,7 @@ function assertKeywordSigningAvailable(env: Cloudflare.Env) {
  * 会算出同一个版本号交替写文件体与 latest 指针，产出 manifest 与内容 sha256
  * 不一致的 torn 写（客户端 checksum_mismatch 拒收，直到下一次发布才恢复）。
  * 单运营者场景的真实并发是双击 / 保存即发布连发，isolate 内 Promise 链互斥
- * 足够；跨 isolate 的 D1 版本号预留是后继项（快照侧已有 INSERT OR IGNORE 同款）。
+ * 足够；跨 isolate 的版本号预留是后继项（快照侧已有 INSERT OR IGNORE 同款）。
  */
 let publishLock: Promise<unknown> = Promise.resolve();
 function withPublishLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -411,7 +456,11 @@ async function signKeywordManifest(
     schemaVersion: manifest.schema_version,
     version: manifest.pack_version,
     generatedAt: manifest.generated_at,
-    files: manifest.files.map((file) => ({ path: file.path, sha256: file.sha256, count: file.rules })),
+    files: manifest.files.map((file) => ({
+      path: file.path,
+      sha256: file.sha256,
+      count: file.rules,
+    })),
   });
   return {
     ...manifest,
@@ -425,16 +474,17 @@ export async function publishAdminKeywords(env: Cloudflare.Env, actorEmail = 'sy
 
 /**
  * 天级判定参数（packages/detector 的运行时覆写）随词库发布链下发：
- * 当前生效值存 D1 meta；发布时嵌入 official.json 的 `detector_config` 段，
+ * 当前生效值存 meta 表；发布时嵌入 official.json 的 `detector_config` 段，
  * 与 manifest/checksum/验签同一条签名链。回滚随历史 body 原样找回。
  */
 export const KEYWORD_DETECTOR_CONFIG_META_KEY = 'keyword_detector_config';
 
 /** 读当前配置；无存值或存值非法时返回 null（发布缺省段，客户端回退内置兜底）。 */
 export async function getKeywordDetectorConfig(env: Cloudflare.Env): Promise<unknown | null> {
-  const row = await env.DB.prepare('SELECT value FROM meta WHERE key = ?1')
-    .bind(KEYWORD_DETECTOR_CONFIG_META_KEY)
-    .first<{ value: string }>();
+  const [row] = await getDb(env)
+    .select({ value: meta.value })
+    .from(meta)
+    .where(eq(meta.key, KEYWORD_DETECTOR_CONFIG_META_KEY));
   if (!row) return null;
   try {
     const parsed: unknown = JSON.parse(row.value);
@@ -447,15 +497,15 @@ export async function getKeywordDetectorConfig(env: Cloudflare.Env): Promise<unk
 /** 校验后写入配置；传 null 清除（等价回退发布段缺省）。非法值 fail closed。 */
 export function setKeywordDetectorConfig(env: Cloudflare.Env, raw: unknown): Promise<boolean> {
   const write = async (value: string | null): Promise<boolean> => {
+    const db = getDb(env);
     if (value === null) {
-      await env.DB.prepare('DELETE FROM meta WHERE key = ?1')
-        .bind(KEYWORD_DETECTOR_CONFIG_META_KEY)
-        .run();
+      await db.delete(meta).where(eq(meta.key, KEYWORD_DETECTOR_CONFIG_META_KEY));
       return true;
     }
-    await env.DB.prepare('INSERT INTO meta (key, value) VALUES (?1, ?2)')
-      .bind(KEYWORD_DETECTOR_CONFIG_META_KEY, value)
-      .run();
+    await db
+      .insert(meta)
+      .values({ key: KEYWORD_DETECTOR_CONFIG_META_KEY, value })
+      .onConflictDoUpdate({ target: meta.key, set: { value } });
     return true;
   };
   if (raw === null) return write(null);
@@ -480,7 +530,9 @@ async function detectorConfigForPublish(env: Cloudflare.Env): Promise<unknown | 
     );
     if (!body) return null;
     const document = JSON.parse(await body.text()) as { detector_config?: unknown };
-    return validateDetectorConfigOverride(document.detector_config) ? document.detector_config : null;
+    return validateDetectorConfigOverride(document.detector_config)
+      ? document.detector_config
+      : null;
   } catch {
     return null;
   }
@@ -531,7 +583,9 @@ async function publishAdminKeywordsInner(env: Cloudflare.Env, actorEmail: string
     schema_version: 1,
     pack_version: version,
     generated_at: generatedAt,
-    files: [{ path: 'official.json', sha256, packs: activePacks.length, rules: activeRules.length }],
+    files: [
+      { path: 'official.json', sha256, packs: activePacks.length, rules: activeRules.length },
+    ],
   };
   const manifest = `${JSON.stringify(await signKeywordManifest(env, manifestDocument))}\n`;
   await env.KEYWORD_PACKS.put(`keyword-packs/${version}/official.json`, body);
@@ -541,8 +595,16 @@ async function publishAdminKeywordsInner(env: Cloudflare.Env, actorEmail: string
     packs: activePacks.length,
     rules: activeRules.length,
   });
-  await recordAdminAudit(env, actorEmail, 'publish', 'keywords', version, { release_id: releaseId });
-  return { release_id: releaseId, version, sha256, packs: activePacks.length, rules: activeRules.length };
+  await recordAdminAudit(env, actorEmail, 'publish', 'keywords', version, {
+    release_id: releaseId,
+  });
+  return {
+    release_id: releaseId,
+    version,
+    sha256,
+    packs: activePacks.length,
+    rules: activeRules.length,
+  };
 }
 
 /**

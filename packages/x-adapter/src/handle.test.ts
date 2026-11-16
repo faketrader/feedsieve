@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it } from 'vitest';
-import { contextFromPath, extractHandleFromPath } from './handle';
+import { contextFromPath, extractHandleFromPath, profileFromPath } from './handle';
 
 describe('extractHandleFromPath', () => {
   it.each([
@@ -36,5 +36,23 @@ describe('contextFromPath', () => {
     ['/i/flow/login', 'other'],
   ] as const)('%s -> %s', (path, expected) => {
     expect(contextFromPath(path)).toBe(expected);
+  });
+});
+
+describe('profileFromPath', () => {
+  it.each([
+    ['/Kim', { handle: 'kim', tab: 'posts' }],
+    ['/kim/with_replies', { handle: 'kim', tab: 'replies' }],
+    ['/kim/reposts', { handle: 'kim', tab: 'reposts' }],
+    ['/kim/media?x=1', { handle: 'kim', tab: 'media' }],
+    ['/kim/highlights', { handle: 'kim', tab: 'highlights' }],
+    ['/kim/following', { handle: 'kim', tab: 'other' }],
+    ['/kim/status/123', null],
+    ['/home', null],
+    ['/search', null],
+    ['/i/bookmarks', null],
+    ['/a-very-long-handle-name', null],
+  ] as const)('%s', (path, expected) => {
+    expect(profileFromPath(path)).toEqual(expected);
   });
 });

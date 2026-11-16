@@ -1,5 +1,8 @@
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
+import { getDb } from '../src/db/client';
+import { adminKeywordPacks, adminKeywordRules, meta } from '../src/db/schema';
 import {
   getKeywordDetectorConfig,
   publishAdminKeywords,
@@ -16,18 +19,30 @@ const BAD_CONFIG = { combo: { unknown_key: 1 } };
 describe('keyword 发布链的 detector_config', () => {
   it('未设置且线上无携带时发布不带 config 段；设置后随发布写入官方 body', async () => {
     if (!env.KEYWORD_PACKS) return;
-    await env.DB.batch([
-      env.DB.prepare('DELETE FROM admin_keyword_rules'),
-      env.DB.prepare('DELETE FROM admin_keyword_packs'),
-      env.DB.prepare("DELETE FROM meta WHERE key = 'keyword_detector_config'"),
-    ]);
-    await env.DB.prepare(
-      `INSERT INTO admin_keyword_packs (id, name_zh, name_en, description_zh, description_en, source_refs, active, created_at, updated_at)
-       VALUES ('cfgpack', '测试分类', 'Test', '测试', 'Test', '[]', 1, strftime('%s','now'), strftime('%s','now'))`,
-    ).run();
-    await env.DB.prepare(
-      `INSERT INTO admin_keyword_rules (id, pack_id, phrase, active, created_at, updated_at) VALUES ('cfg-rule', 'cfgpack', '测试词组', 1, strftime('%s','now'), strftime('%s','now'))`,
-    ).run();
+    const db = getDb(env);
+    await db.delete(adminKeywordRules);
+    await db.delete(adminKeywordPacks);
+    await db.delete(meta).where(eq(meta.key, 'keyword_detector_config'));
+    const seededAt = Math.floor(Date.now() / 1000);
+    await db.insert(adminKeywordPacks).values({
+      id: 'cfgpack',
+      nameZh: '测试分类',
+      nameEn: 'Test',
+      descriptionZh: '测试',
+      descriptionEn: 'Test',
+      sourceRefs: '[]',
+      active: 1,
+      createdAt: seededAt,
+      updatedAt: seededAt,
+    });
+    await db.insert(adminKeywordRules).values({
+      id: 'cfg-rule',
+      packId: 'cfgpack',
+      phrase: '测试词组',
+      active: 1,
+      createdAt: seededAt,
+      updatedAt: seededAt,
+    });
 
     // 1. 无存值：发布不带段
     const plain = await publishAdminKeywords(env);
@@ -41,7 +56,9 @@ describe('keyword 发布链的 detector_config', () => {
     expect(await getKeywordDetectorConfig(env)).toEqual(CONFIG);
     const configured = await publishAdminKeywords(env);
     const configuredBody = JSON.parse(
-      await (await env.KEYWORD_PACKS.get(`keyword-packs/${configured.version}/official.json`))!.text(),
+      await (await env.KEYWORD_PACKS.get(
+        `keyword-packs/${configured.version}/official.json`,
+      ))!.text(),
     ) as { detector_config?: unknown };
     expect(configuredBody.detector_config).toEqual(CONFIG);
 
@@ -62,14 +79,19 @@ describe('keyword 发布链的 detector_config', () => {
       `keyword-packs/${configured.version}/official.json`,
       JSON.stringify({ ...plainBody, detector_config: CONFIG }),
     );
-    await env.KEYWORD_PACKS.put('keyword-packs/latest.json', JSON.stringify({
-      schema_version: 1,
-      pack_version: configured.version,
-      files: [{ path: 'official.json', sha256: 'a'.repeat(64), packs: 1, rules: 1 }],
-    }));
+    await env.KEYWORD_PACKS.put(
+      'keyword-packs/latest.json',
+      JSON.stringify({
+        schema_version: 1,
+        pack_version: configured.version,
+        files: [{ path: 'official.json', sha256: 'a'.repeat(64), packs: 1, rules: 1 }],
+      }),
+    );
     const inherited = await publishAdminKeywords(env);
     const inheritedBody = JSON.parse(
-      await (await env.KEYWORD_PACKS.get(`keyword-packs/${inherited.version}/official.json`))!.text(),
+      await (await env.KEYWORD_PACKS.get(
+        `keyword-packs/${inherited.version}/official.json`,
+      ))!.text(),
     ) as { detector_config?: unknown };
     expect(inheritedBody.detector_config).toEqual(CONFIG);
   });

@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { getRosterData } from '@/site/data.functions';
 import { pageHead } from '@/site/seo';
-import { ListsTabs, ListPageHeader, HelpIcon, fmtDate } from '@/site/pages/lists/lists-common';
+import { ListPageHeader, HelpIcon, fmtDate } from '@/site/pages/lists/lists-common';
 import { BlacklistPanel } from '@/site/pages/lists/BlacklistPanel';
 
 export const Route = createFileRoute('/_shell/lists/blacklist')({
@@ -24,8 +24,7 @@ function BlacklistRoute() {
   return (
     <main className="mx-auto max-w-5xl px-[clamp(18px,2.2vw,34px)] pb-16 pt-8">
       <ListPageHeader
-        title="黑名单"
-        tabs={<ListsTabs />}
+        title="黑名单公示"
         aside={
           <HelpIcon ariaLabel="黑名单说明">
             黑名单是举报与抢救投票的聚合（拉黑票 − 误标票 ≥ 3），反映社区意见，

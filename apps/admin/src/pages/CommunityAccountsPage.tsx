@@ -143,6 +143,7 @@ export function CommunityAccountsPage() {
                   <TableHead className="w-16 text-right">拉黑</TableHead>
                   <TableHead className="w-16 text-right">抢救</TableHead>
                   <TableHead className="w-20 text-right">指纹/域名</TableHead>
+                  <TableHead className="w-20 text-right">命中网段</TableHead>
                   <TableHead>来源</TableHead>
                   <TableHead className="w-28">更新</TableHead>
                   <TableHead className="w-24 text-right">操作</TableHead>
@@ -156,7 +157,7 @@ export function CommunityAccountsPage() {
                     <TableCell className="text-right">
                       <span
                         className={
-                          entry.net_votes >= 3 ? 'font-bold text-emerald-600 dark:text-emerald-400' : 'font-semibold'
+                          entry.listed ? 'font-bold text-emerald-600 dark:text-emerald-400' : 'font-semibold'
                         }
                       >
                         {entry.net_votes}
@@ -170,6 +171,9 @@ export function CommunityAccountsPage() {
                     </TableCell>
                     <TableCell className="text-right text-muted-foreground">
                       {entry.fingerprints > 0 || entry.domains > 0 ? `${entry.fingerprints}/${entry.domains}` : '—'}
+                    </TableCell>
+                    <TableCell className="text-right text-muted-foreground">
+                      {entry.hit_networks_7d > 0 ? entry.hit_networks_7d : '—'}
                     </TableCell>
                     <TableCell>
                       {entry.sources.length > 0 ? (

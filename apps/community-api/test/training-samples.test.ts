@@ -1,6 +1,16 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+import { count, eq, inArray } from 'drizzle-orm';
+import { hashInstallationId, hashIp } from '../src/lib/hash';
 import worker from '../src/index';
+import { getDb } from '../src/db/client';
+import {
+  activeLabels,
+  trainingSampleReviews,
+  trainingSamples,
+  trainingSampleUsage,
+} from '../src/db/schema';
+import { max } from 'drizzle-orm';
 import {
   ingestTrainingSamples,
   listTrainingSamples,
@@ -30,8 +40,8 @@ describe('immutable samples independent of votes', () => {
     expect(original.sample.text).toBe(s.text);
     expect(original.verdict).toBeNull();
     expect(
-      await env.DB.prepare('SELECT * FROM active_labels WHERE handle=?1').bind(s.handle).first(),
-    ).toBeNull();
+      await getDb(env).select().from(activeLabels).where(eq(activeLabels.handle, s.handle)),
+    ).toEqual([]);
     const next = { ...s, eventId: crypto.randomUUID(), action: 'manual-spam' };
     await ingestTrainingSamples(env, { ...body, samples: [next] });
     const all = await listTrainingSamples(env);
@@ -61,10 +71,11 @@ describe('immutable samples independent of votes', () => {
     );
     expect(
       (
-        await env.DB.prepare('SELECT COUNT(*) AS n FROM training_sample_reviews WHERE sample_id=?1')
-          .bind(original.id)
-          .first<{ n: number }>()
-      )?.n,
+        await getDb(env)
+          .select({ n: count() })
+          .from(trainingSampleReviews)
+          .where(eq(trainingSampleReviews.sampleId, original.id))
+      )[0]?.n,
     ).toBe(2);
     expect(
       (await listTrainingSamples(env)).entries.find((r) => r.id === original.id)?.verdict,
@@ -124,6 +135,44 @@ describe('immutable samples independent of votes', () => {
       ).status,
     ).toBe(429);
   });
+  it('does not charge the installation when the IP limit is exceeded', async () => {
+    const installationId = 'samples-ip-order-0001';
+    const ip = '203.0.113.88';
+    const ipKey = `ip:${await hashIp(env.INSTALLATION_SALT, ip)}`;
+    const installKey = `install:${await hashInstallationId(env.INSTALLATION_SALT, installationId)}`;
+    const db = getDb(env);
+    const counts = async () => {
+      const rows = await db
+        .select({ identity: trainingSampleUsage.identity, count: trainingSampleUsage.count })
+        .from(trainingSampleUsage)
+        .where(inArray(trainingSampleUsage.identity, [ipKey, installKey]));
+      return Object.fromEntries(rows.map((row) => [row.identity, row.count]));
+    };
+    const send = () =>
+      ingestTrainingSamples(env, { installation_id: installationId, samples: [sample()] }, ip);
+
+    expect((await send()).status).toBe(200);
+    expect(await counts()).toEqual({ [ipKey]: 1, [installKey]: 1 });
+
+    await db
+      .update(trainingSampleUsage)
+      .set({ count: 1000 })
+      .where(eq(trainingSampleUsage.identity, ipKey));
+    expect((await send()).status).toBe(429);
+    expect(await counts()).toEqual({ [ipKey]: 1000, [installKey]: 1 });
+
+    // IP 通过而安装超限：与逐项依次执行一致，IP 用量已扣
+    await db
+      .update(trainingSampleUsage)
+      .set({ count: 5 })
+      .where(eq(trainingSampleUsage.identity, ipKey));
+    await db
+      .update(trainingSampleUsage)
+      .set({ count: 300 })
+      .where(eq(trainingSampleUsage.identity, installKey));
+    expect((await send()).status).toBe(429);
+    expect(await counts()).toEqual({ [ipKey]: 6, [installKey]: 300 });
+  });
   it('protects admin evidence and bounds public request size', async () => {
     const get = await worker.fetch(new Request('https://api.example.com/api/admin/samples'), env);
     expect(get.status).toBe(404);
@@ -142,9 +191,10 @@ describe('immutable samples independent of votes', () => {
     expect(large.status).toBe(413);
   });
   it('exports a stable sample/review watermark while ingestion and reviews continue', async () => {
-    const before = await env.DB.prepare(
-      'SELECT COALESCE(MAX(id),0) AS id FROM training_samples',
-    ).first<{ id: number }>();
+    const [maxRow] = await getDb(env)
+      .select({ id: max(trainingSamples.id) })
+      .from(trainingSamples);
+    const before = { id: maxRow?.id ?? 0 };
     const s = sample();
     await ingestTrainingSamples(env, { installation_id: 'watermark-install', samples: [s] });
     const first = await listTrainingSamples(env, before!.id);

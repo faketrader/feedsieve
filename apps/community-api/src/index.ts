@@ -1,95 +1,53 @@
-import {
-  ingestTrainingSamples,
-  listTrainingSamples,
-  reviewTrainingSample,
-} from './training-samples';
+import { getHotBoards, ingestObservations } from './hot';
+import { ingestRuleHits } from './rule-hits';
+import { chargeProfileRead, getProfile, ingestProfileObservations } from './profiles';
+import { and, countDistinct, eq, sql } from 'drizzle-orm';
+import { describeDbError, getDb, withDb } from './db/client';
+import { accounts, activeLabels, meta } from './db/schema';
 import { bodyLimit } from 'hono/body-limit';
 import { cors } from 'hono/cors';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
-import {
-  deactivateAdminAccountDraft,
-  getAdminRelease,
-  listAdminAccountDrafts,
-  listAdminReleases,
-  publishAdminAccountDrafts,
-  recordAdminAudit,
-  rollbackAdminAccountRelease,
-  saveAdminAccountDraft,
-} from './admin-accounts';
-import { verifyAccess } from './lib/access';
 import { isAdminHost } from './lib/hosts';
-import { hashInstallationId } from './lib/hash';
-import { publicErrorCode } from './lib/public-error';
-import {
-  decideApplication,
-  listApplications,
-  submitApplication,
-  verifyApplication,
-} from './applications';
-import { listCommunityCandidates } from './candidates';
-import { listVerifiedAccounts } from './verified';
-import { getPublicRoster } from './roster';
-import { getDashboardMetrics } from './dashboard';
-import {
-  disableAdminKeyword,
-  getKeywordDetectorConfig,
-  importKeywordCatalog,
-  listAdminKeywords,
-  publishAdminKeywords,
-  rollbackAdminKeywordRelease,
-  saveAdminKeywordPack,
-  saveAdminKeywordRule,
-  setKeywordDetectorConfig,
-} from './keyword-admin';
-import {
-  agentKeyIdentity,
-  agentStatus,
-  importAgentKeywordCatalog,
-  listAgentAssets,
-  listAgentAudit,
-  listAgentKeywords,
-  listAgentMaintainerEntries,
-  listAgentReleases,
-  publishAgentKeywords,
-  recomputeAllAccountCategories,
-  removeAgentKeyword,
-  removeAgentMaintainerEntry,
-  rollbackAgentRelease,
-  upsertAgentKeywordPack,
-  upsertAgentKeywordRule,
-  upsertAgentMaintainerEntry,
-  readAgentKeywordDetectorConfig,
-  writeAgentKeywordDetectorConfig,
-} from './agent-admin';
-import {
-  LEADERBOARD,
-  DIRTY_KEY as LEADERBOARD_DIRTY_KEY,
-  getLeaderboard,
-  toPublicHunterRow,
-} from './leaderboard';
-import { runScheduledCron } from './scheduled';
-import { bindEmail, getProfile, updateProfile, verifyEmail } from './player';
-import { MAINTAINER_CATEGORIES } from './maintainer-blocklist';
-import { processRetractionBatch } from './labels';
+import { hashInstallationId, sha256Hex } from './lib/hash';
 import { POLICY, processReportBatch, publicPolicy } from './reports';
 import { processRescueBatch } from './rescues';
 import {
-  decideKeywordContributions,
-  listKeywordContributions,
-  processKeywordContributions,
-} from './keyword-contributions';
-import {
-  buildKillSwitch,
-  getLatestSnapshot,
-  getLatestSnapshotFile,
-  getLatestSnapshotVersion,
-  getSnapshotFile,
   PUBLIC_BLOCKLIST_PACK,
   SNAPSHOT_DIRTY_KEY,
   SNAPSHOT_LATEST_KEY,
   SNAPSHOT_PACK,
-} from './snapshot';
+} from './snapshot-keys';
+
+/**
+ * 低频模块的按需加载器。
+ *
+ * 快照读取、公示名单、AI 账号判定、入册申请、反馈样本、撤回落库这几族接口都不在
+ * 上报主路径上，却各自带一坨依赖（生成/签名/YAML、共识、评级、分类推断）。顶层
+ * import 会让每次 `/v1/*` 冷启动都替它们付求值成本——实测冷启动是这台 Worker 的
+ * 主要 CPU 开销，所以改成命中时再加载。
+ *
+ * 失败不缓存 rejected promise：否则一次瞬时错误会把整台 isolate 永久钉死。
+ */
+function lazy<T>(load: () => Promise<T>): () => Promise<T> {
+  let cached: Promise<T> | null = null;
+  return () =>
+    (cached ??= load().catch((error: unknown) => {
+      cached = null;
+      throw error;
+    }));
+}
+
+const loadSnapshot = lazy(() => import('./snapshot'));
+const loadRoster = lazy(() => import('./roster'));
+const loadAiCheck = lazy(() => import('./ai-accounts/check'));
+const loadAiJudge = lazy(() => import('./ai-accounts/judge'));
+const loadAiVote = lazy(() => import('./ai-accounts/vote'));
+const loadAiLookup = lazy(() => import('./ai-accounts/lookup'));
+const loadAiReview = lazy(() => import('./ai-accounts/review'));
+const loadLabels = lazy(() => import('./labels'));
+const loadApplications = lazy(() => import('./applications'));
+const loadTrainingSamples = lazy(() => import('./training-samples'));
 
 function staticAssetRequest(request: Request): Request {
   // assets.not_found_handling = single-page-application resolves TanStack routes
@@ -97,50 +55,33 @@ function staticAssetRequest(request: Request): Request {
   return request;
 }
 
+/** 管理台 / Agent 子应用；路由实体在 admin-routes.ts，按需加载。 */
+type AdminApp = Awaited<ReturnType<typeof import('./admin-routes').createAdminApp>>;
+
+/** Hono 的 executionCtx getter 在没有执行上下文时（单测里直接调 app.fetch）会抛错。 */
+function executionCtxOf(c: Context) {
+  try {
+    return c.executionCtx;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * 上报三端点（reports / rescues / labels/retract）的统一收尾：
- * 置快照脏 + 置榜单脏 + 读当前有效版本，三次串行 meta 往返并成一次 batch。
+ * 置快照脏 + 读当前有效版本，两条 meta 语句并发发出。
  * 版本指针缺失（首次发布前）回退 getLatestSnapshotVersion 的全量兜底。
  */
 async function markDirtyAndReadSnapshotVersion(env: Cloudflare.Env): Promise<string | null> {
-  const [snapshotDirty, leaderboardDirty, pointer] = await env.DB.batch<{ value: string }>([
-    env.DB.prepare(
-      `INSERT INTO meta (key, value) VALUES (?1, ?2)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-    ).bind(SNAPSHOT_DIRTY_KEY, String(Date.now())),
-    env.DB.prepare(
-      `INSERT INTO meta (key, value) VALUES (?1, ?2)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-    ).bind(LEADERBOARD_DIRTY_KEY, String(Math.floor(Date.now() / 1000))),
-    env.DB.prepare('SELECT value FROM meta WHERE key = ?1').bind(SNAPSHOT_LATEST_KEY),
+  const db = getDb(env);
+  const [, pointer] = await Promise.all([
+    db
+      .insert(meta)
+      .values({ key: SNAPSHOT_DIRTY_KEY, value: String(Date.now()) })
+      .onConflictDoUpdate({ target: meta.key, set: { value: sql`excluded.value` } }),
+    db.select({ value: meta.value }).from(meta).where(eq(meta.key, SNAPSHOT_LATEST_KEY)),
   ]);
-  if (!snapshotDirty || !leaderboardDirty || !pointer) {
-    // batch 结果缺项等于写未生效：走 getLatestSnapshotVersion 的兜底读路径
-    return getLatestSnapshotVersion(env);
-  }
-  const version = pointer.results?.[0]?.value ?? null;
-  return version ?? getLatestSnapshotVersion(env);
-}
-
-type AdminContext = Context<{
-  Bindings: Cloudflare.Env;
-  Variables: { maintainerEmail: string; agentIdentity: string };
-}>;
-
-/** 词库工作区变更后立即重发公开词库：保存即生效，维护者无需再手动发布。 */
-async function republishKeywords(
-  c: AdminContext,
-  extra: Record<string, unknown> = {},
-): Promise<Response> {
-  try {
-    const published = await publishAdminKeywords(c.env, c.get('maintainerEmail'));
-    return c.json({ ...extra, version: published.version });
-  } catch (error) {
-    const code = publicErrorCode(error, 'publish_failed');
-    // 移除全部分类时无法产出空词库：变更已生效，线上保持上一个版本。
-    if (code === 'no_active_packs') return c.json({ ...extra, version: null });
-    return c.json({ error: code }, 500);
-  }
+  return pointer[0]?.value ?? (await loadSnapshot()).getLatestSnapshotVersion(env);
 }
 
 export function createApp() {
@@ -151,7 +92,9 @@ export function createApp() {
 
   // 扩展 content script 会跨域 POST /v1/*，必须放行预检；管理（/api/admin，
   // 同源 ASSETS 服务）与 Agent（脚本直连）家族不开跨域。
-  app.use('/v1/*', cors());
+  // maxAge：不设时浏览器只缓存预检约 5 秒，扩展每 15 分钟一轮上报等于每轮都先发一次
+  // OPTIONS（实测这类端点约四成五的 invocation 是预检）。设成一天后同一客户端只预检一次。
+  app.use('/v1/*', cors({ maxAge: 86_400 }));
 
   // 管理 / Agent 接口的身份头（Cf-Access-Jwt-Assertion / X-Agent-Key）不属于标准
   // Authorization，Workers Cache 不会自动绕过——显式 no-store，防止管理/审计响应
@@ -175,7 +118,9 @@ export function createApp() {
     bodyLimit({ maxSize: 450_000, onError: (c) => c.json({ error: 'samples_too_large' }, 413) }),
     async (c) => {
       c.header('Cache-Control', 'no-store');
-      const result = await ingestTrainingSamples(
+      const result = await (
+        await loadTrainingSamples()
+      ).ingestTrainingSamples(
         c.env,
         await c.req.json().catch(() => null),
         c.req.header('cf-connecting-ip'),
@@ -184,6 +129,179 @@ export function createApp() {
     },
   );
 
+  // 众包全站热榜：扩展后台上报用户正常浏览时 X 已经加载的公开帖子指标（见 hot.ts）
+  app.post(
+    '/v1/observations',
+    bodyLimit({
+      maxSize: 200_000,
+      onError: (c) => c.json({ error: 'observations_too_large' }, 413),
+    }),
+    async (c) => {
+      c.header('Cache-Control', 'no-store');
+      const result = await ingestObservations(
+        c.env,
+        await c.req.json().catch(() => null),
+        c.req.header('cf-connecting-ip'),
+      );
+      return c.json(result.body, result.status);
+    },
+  );
+
+  // 规则命中众包：本地规则打了黄框就匿名报一条（不是票，只作佐证与误伤统计，见 rule-hits.ts）
+  app.post(
+    '/v1/rule-hits',
+    bodyLimit({
+      maxSize: 60_000,
+      onError: (c) => c.json({ error: 'rule_hits_too_large' }, 413),
+    }),
+    async (c) => {
+      c.header('Cache-Control', 'no-store');
+      const result = await ingestRuleHits(
+        c.env,
+        await c.req.json().catch(() => null),
+        c.req.header('cf-connecting-ip'),
+      );
+      return c.json(result.body, result.status);
+    },
+  );
+
+  // AI 号账号级判定：扩展只上报 handle；判一次全体共享（见 ai-accounts/check.ts）
+  app.post(
+    '/v1/ai-accounts/check',
+    bodyLimit({ maxSize: 2_000, onError: (c) => c.json({ error: 'request_too_large' }, 413) }),
+    async (c) => {
+      c.header('Cache-Control', 'no-store');
+      const result = await (
+        await loadAiCheck()
+      ).checkAiAccount(
+        c.env,
+        await c.req.json().catch(() => null),
+        c.req.header('cf-connecting-ip'),
+      );
+      return c.json(result.body, result.status);
+    },
+  );
+
+  // AI 号判定（证据直传）：扩展在本地从 with_replies 页抓回复后直接上报，服务端不经过 TikHub
+  // （见 ai-accounts/judge.ts）。判一次全体共享；进公共名单需投票共识（见 ai-accounts/vote.ts）。
+  app.post(
+    '/v1/ai-accounts/judge',
+    bodyLimit({ maxSize: 120_000, onError: (c) => c.json({ error: 'request_too_large' }, 413) }),
+    async (c) => {
+      c.header('Cache-Control', 'no-store');
+      const result = await (
+        await loadAiJudge()
+      ).judgeAiAccount(
+        c.env,
+        await c.req.json().catch(() => null),
+        c.req.header('cf-connecting-ip'),
+      );
+      return c.json(result.body, result.status);
+    },
+  );
+
+  // AI 号名单：可公开的 AI / 疑似账号，扩展同步到本机，在评论区标记 / 折叠（必须注册在 :handle 前面）
+  app.get('/v1/ai-accounts/list', async (c) => {
+    const body = JSON.stringify({ entries: await (await loadAiLookup()).listAiAccounts(c.env) });
+    const etag = `"${(await sha256Hex(body)).slice(0, 32)}"`;
+    c.header('Cache-Control', 'public, max-age=300, s-maxage=600');
+    c.header('ETag', etag);
+    if (c.req.header('if-none-match') === etag) return c.body(null, 304);
+    return c.body(body, 200, { 'content-type': 'application/json' });
+  });
+
+  // AI 味检测在扩展里失败的次数（证据不足 / 太集中 / 用户停止 / 页面没数据）：只计数
+  app.post(
+    '/v1/ai-accounts/outcome',
+    bodyLimit({ maxSize: 200, onError: (c) => c.json({ error: 'request_too_large' }, 413) }),
+    async (c) => {
+      c.header('Cache-Control', 'no-store');
+      const ok = await (
+        await loadAiReview()
+      ).recordClientOutcome(c.env, await c.req.json().catch(() => null));
+      return ok ? c.body(null, 204) : c.json({ error: 'invalid_outcome' }, 400);
+    },
+  );
+
+  // AI 号只读查询：主页「AI 味」Tab 直接显示已有结论和票数，不调第三方、不计额度
+  app.get('/v1/ai-accounts/:handle', async (c) => {
+    const result = await (await loadAiLookup()).lookupAiAccount(c.env, c.req.param('handle'));
+    if (!result) {
+      c.header('Cache-Control', 'no-store');
+      return c.json({ error: 'invalid_handle' }, 400);
+    }
+    c.header('Cache-Control', 'public, max-age=30, s-maxage=60');
+    return c.json(result);
+  });
+
+  // AI 号投票：是 AI / 是真人。≥3 独立安装 ai 票且过半才进公共名单（见 ai-accounts/vote.ts）。
+  app.post(
+    '/v1/ai-accounts/vote',
+    bodyLimit({ maxSize: 2_000, onError: (c) => c.json({ error: 'request_too_large' }, 413) }),
+    async (c) => {
+      c.header('Cache-Control', 'no-store');
+      const result = await (
+        await loadAiVote()
+      ).voteAiAccount(c.env, await c.req.json().catch(() => null));
+      return c.json(result.body, result.status);
+    },
+  );
+
+  // 全站热榜：存好的榜最多 5 分钟重算一次；带 ETag，扩展再来取时没变化回 304
+  app.get('/v1/hot', async (c) => {
+    const boards = await getHotBoards(c.env);
+    const etag = `"hot-${boards.generated_at}"`;
+    c.header('Cache-Control', 'public, max-age=60, s-maxage=60');
+    c.header('ETag', etag);
+    const match = c.req.header('if-none-match');
+    if (match && match.split(',').some((tag) => tag.trim().replace(/^W\//, '') === etag)) {
+      return c.body(null, 304);
+    }
+    return c.json(boards);
+  });
+
+  // 主页洞察众包：扩展上报博主公开帖子的数字，服务端去重合并（见 profiles.ts）
+  app.post(
+    '/v1/profile-observations',
+    bodyLimit({
+      maxSize: 300_000,
+      onError: (c) => c.json({ error: 'profile_observations_too_large' }, 413),
+    }),
+    async (c) => {
+      c.header('Cache-Control', 'no-store');
+      const result = await ingestProfileObservations(
+        c.env,
+        await c.req.json().catch(() => null),
+        c.req.header('cf-connecting-ip'),
+      );
+      return c.json(result.body, result.status);
+    },
+  );
+
+  // 增量拉取一个博主的帖子库：同一游标的请求走边缘缓存；
+  // 不提供批量下载，一次只给一个博主，未命中缓存时每 IP 每天最多 PROFILE_READ_IP_DAILY_LIMIT 次
+  app.get('/v1/profiles/:handle', async (c) => {
+    const ip = c.req.header('cf-connecting-ip');
+    if (!(await chargeProfileRead(c.env, ip))) {
+      c.header('Cache-Control', 'no-store');
+      return c.json({ error: 'rate_limited' }, 429);
+    }
+    const result = await getProfile(c.env, c.req.param('handle'), c.req.query('cursor'));
+    if (!result) {
+      c.header('Cache-Control', 'no-store');
+      return c.json({ error: 'invalid_profile_request' }, 400);
+    }
+    // 首次全量（不带游标）最贵、而且同一个博主被很多人打开：边缘缓存 5 分钟；
+    // 带游标的增量只缓存 1 分钟，一个人刚报上来的帖子，下一个人很快就能拿到
+    c.header(
+      'Cache-Control',
+      c.req.query('cursor')
+        ? 'public, max-age=30, s-maxage=60'
+        : 'public, max-age=60, s-maxage=300',
+    );
+    return c.json(result);
+  });
+
   app.post('/v1/reports', async (c) => {
     const body = await c.req.json().catch(() => undefined);
     const result = await processReportBatch(c.env, body, c.req.header('cf-connecting-ip'));
@@ -191,8 +309,8 @@ export function createApp() {
     if (!result.ok) {
       return c.json({ error: result.error }, result.httpStatus);
     }
-    // 快照异步化：只落库并置脏，由 cron 每小时合并生成（当日一版守卫，见 snapshot.ts
-    // day-once）；响应返回当前有效版本。置脏+读版本并成一次 batch（见 markDirtyAndReadSnapshotVersion）。
+    // 快照异步化：只落库并置脏，由 cron 每 30 分钟合并生成（两版至少隔 25 分钟，见 snapshot.ts
+    // SNAPSHOT_MIN_INTERVAL_S）；响应返回当前有效版本。置脏+读版本并成一次 batch（见 markDirtyAndReadSnapshotVersion）。
     const snapshotVersion = await markDirtyAndReadSnapshotVersion(c.env);
     return c.json({
       policy: {
@@ -205,374 +323,18 @@ export function createApp() {
     });
   });
 
-  // React 管理端使用 Cloudflare Access 身份；此路由永远不接受旧的 Bearer 凭据。
-  app.use('/api/admin/*', async (c, next) => {
-    if (!isAdminHost(c.req.raw, c.env)) return c.json({ error: 'not_found' }, 404);
-    // CSRF 防线：Access 身份是边缘按会话 Cookie 注入的，跨站简单请求
-    // （无预检的 text/plain body）会带着维护者的有效会话到达这里，而
-    // Hono 的 c.req.json() 不看 content-type。浏览器发起的写请求一定带
-    // Origin：Origin 存在但不等于管理域名 → 直接拒绝；无 Origin 的
-    // 非浏览器客户端（curl/脚本）必须声明 application/json。
-    // 写方法覆盖 POST/PUT/PATCH/DELETE：跨站 DELETE 预检可被放行、
-    // 副作用照发（浏览器只是不给读响应），不能只挡 POST。
-    const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
-    if (WRITE_METHODS.has(c.req.method)) {
-      // ADMIN_HOST 支持 CSV 多域名（迁移期旧新域并列，见 lib/hosts.ts），逐个比对。
-      const configuredHosts = (c.env.ADMIN_HOST ?? '')
-        .trim()
-        .toLowerCase()
-        .split(',')
-        .map((host) => host.trim())
-        .filter(Boolean);
-      const origin = c.req.header('origin');
-      if (origin) {
-        if (
-          configuredHosts.length === 0 ||
-          !configuredHosts.some((host) => origin.toLowerCase() === `https://${host}`)
-        ) {
-          return c.json({ error: 'cross_origin_admin_post' }, 403);
-        }
-      } else {
-        const contentType = (c.req.header('content-type') ?? '')
-          .split(';')[0]
-          ?.trim()
-          .toLowerCase();
-        if (contentType !== 'application/json') {
-          return c.json({ error: 'json_content_type_required' }, 415);
-        }
-      }
-    }
-    const identity = await verifyAccess(c.req.raw, c.env);
-    if (!identity) return c.json({ error: 'access_required' }, 401);
-    c.set('maintainerEmail', identity.email);
-    await next();
-  });
-
-  app.get('/api/admin/me', (c) => c.json({ email: c.get('maintainerEmail') }));
-
-  app.get('/api/admin/dashboard', async (c) => c.json(await getDashboardMetrics(c.env)));
-
-  // 社区候选池（只读复核视图 + 分页），与维护者草稿页（admin_account_drafts）分开。
-  app.get('/api/admin/community-accounts', async (c) => {
-    const limit = Number(c.req.query('limit') ?? 50);
-    return c.json(
-      await listCommunityCandidates(c.env, {
-        net: c.req.query('net') ?? 'all',
-        q: c.req.query('q') ?? undefined,
-        category: c.req.query('category') ?? undefined,
-        cursor: c.req.query('cursor') ?? undefined,
-        limit: Number.isFinite(limit) ? Math.trunc(limit) : 50,
-      }),
-    );
-  });
-
-  app.get('/api/admin/accounts', async (c) =>
-    c.json({
-      entries: await listAdminAccountDrafts(c.env, { q: c.req.query('q'), limit: 500 }),
-      categories: MAINTAINER_CATEGORIES,
-    }),
+  // 管理台（Cloudflare Access 身份）与 Agent 通道（X-Agent-Key）只有内部使用，
+  // 路由表与中间件都在 admin-routes.ts。这里按需加载：扩展上报的冷启动不必求值
+  // jose、后台业务模块与 dashboard——那是启动路径上最不值当的一部分。
+  let adminApp: Promise<AdminApp> | null = null;
+  const loadAdminApp = () =>
+    (adminApp ??= import('./admin-routes').then((mod) => mod.createAdminApp()));
+  app.all('/api/admin/*', async (c) =>
+    (await loadAdminApp()).fetch(c.req.raw, c.env, executionCtxOf(c)),
   );
-
-  // 社区白名单（verified，只读复核视图）：被验证为「误标正常」的账号。
-  app.get('/api/admin/verified', async (c) => {
-    const limit = Number(c.req.query('limit') ?? 500);
-    return c.json(
-      await listVerifiedAccounts(c.env, {
-        q: c.req.query('q') ?? undefined,
-        limit: Number.isFinite(limit) ? Math.trunc(limit) : 500,
-      }),
-    );
-  });
-  // 名单公示申请队列：邮箱已验证（verified）与未验证（pending）都可见，维护者裁决。
-  app.get('/api/admin/applications', async (c) => {
-    const limit = Number(c.req.query('limit') ?? 200);
-    return c.json(
-      await listApplications(c.env, {
-        status: c.req.query('status') || undefined,
-        limit: Number.isFinite(limit) ? Math.trunc(limit) : 200,
-      }),
-    );
-  });
-  app.post('/api/admin/applications/:id/decide', async (c) => {
-    const id = Number(c.req.param('id'));
-    if (!Number.isInteger(id)) return c.json({ error: 'invalid_application_id' }, 400);
-    const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
-    const decision = typeof body.decision === 'string' ? body.decision : '';
-    const note = typeof body.note === 'string' ? body.note : null;
-    const result = await decideApplication(c.env, id, decision, note, c.get('maintainerEmail'));
-    if (!result.ok) return c.json({ error: result.error }, 400);
-    await recordAdminAudit(
-      c.env,
-      c.get('maintainerEmail'),
-      'application_decision',
-      'application',
-      String(id),
-      {
-        decision,
-        handle: typeof body.handle === 'string' ? body.handle : undefined,
-        kind: typeof body.kind === 'string' ? body.kind : undefined,
-      },
-    );
-    return c.json({ changed: true });
-  });
-
-  app.post('/api/admin/accounts', async (c) => {
-    const result = await saveAdminAccountDraft(c.env, await c.req.json().catch(() => undefined));
-    if (!result.ok) return c.json({ error: result.error }, 400);
-    await recordAdminAudit(
-      c.env,
-      c.get('maintainerEmail'),
-      `${result.action}_draft`,
-      'account',
-      result.entry.handle,
-    );
-    // 保存即生效：草稿落库后立刻同步公开名单并生成快照，维护者无需再手动发布。
-    try {
-      const published = await publishAdminAccountDrafts(c.env, c.get('maintainerEmail'));
-      return c.json(
-        {
-          action: result.action,
-          entry: result.entry,
-          snapshot_version: published.snapshot_version,
-        },
-        201,
-      );
-    } catch (error) {
-      return c.json({ error: publicErrorCode(error, 'publish_failed') }, 500);
-    }
-  });
-  app.delete('/api/admin/accounts/:handle', async (c) => {
-    const result = await deactivateAdminAccountDraft(c.env, c.req.param('handle'));
-    if (!result.ok) return c.json({ error: result.error }, 400);
-    if (!result.changed) return c.json({ changed: false });
-    await recordAdminAudit(
-      c.env,
-      c.get('maintainerEmail'),
-      'remove_draft',
-      'account',
-      c.req.param('handle'),
-    );
-    try {
-      const published = await publishAdminAccountDrafts(c.env, c.get('maintainerEmail'));
-      return c.json({ changed: true, snapshot_version: published.snapshot_version });
-    } catch (error) {
-      return c.json({ error: publicErrorCode(error, 'publish_failed') }, 500);
-    }
-  });
-  app.post('/api/admin/accounts/publish', async (c) => {
-    try {
-      return c.json(await publishAdminAccountDrafts(c.env, c.get('maintainerEmail')));
-    } catch (error) {
-      return c.json({ error: publicErrorCode(error, 'publish_failed') }, 400);
-    }
-  });
-
-  app.get('/api/admin/keywords', async (c) =>
-    c.json(
-      await listAdminKeywords(c.env, {
-        q: c.req.query('q'),
-        packId: c.req.query('pack'),
-        limit: 1000,
-      }),
-    ),
+  app.all('/api/agent/*', async (c) =>
+    (await loadAdminApp()).fetch(c.req.raw, c.env, executionCtxOf(c)),
   );
-  // 用户主动贡献的关键词待审列表（0022 迁移）；审阅结果线下决定。
-  app.get('/api/admin/keywords/contributions', async (c) =>
-    c.json(await listKeywordContributions(c.env)),
-  );
-  // 审阅决定：按归一化词批量 admitted / rejected，只改待审状态，不动公共数据。
-  app.post('/api/admin/keywords/contributions/decide', async (c) => {
-    const body = await c.req.json().catch(() => undefined);
-    if (typeof body !== 'object' || body === null) {
-      return c.json({ error: 'invalid_json_body' }, 400);
-    }
-    const b = body as Record<string, unknown>;
-    const normPhrase = b.norm_phrase;
-    const decision = b.decision;
-    if (typeof normPhrase !== 'string' || normPhrase.length === 0) {
-      return c.json({ error: 'invalid_norm_phrase' }, 400);
-    }
-    if (decision !== 'admitted' && decision !== 'rejected') {
-      return c.json({ error: 'invalid_decision' }, 400);
-    }
-    const result = await decideKeywordContributions(
-      c.env,
-      normPhrase,
-      decision,
-      c.get('maintainerEmail') ?? '',
-    );
-    await recordAdminAudit(
-      c.env,
-      c.get('maintainerEmail'),
-      decision,
-      'keyword_contribution',
-      normPhrase,
-      {
-        changed: result.changed,
-      },
-    );
-    return c.json(result);
-  });
-  // 从 R2 公开词库导入维护者工作区是显式动作，不再挂在列表读取上。
-  app.post('/api/admin/keywords/import', async (c) => {
-    try {
-      const result = await importKeywordCatalog(c.env);
-      if (result.imported) {
-        await recordAdminAudit(
-          c.env,
-          c.get('maintainerEmail'),
-          'import',
-          'keyword_catalog',
-          String(result.rules),
-          {
-            packs: result.packs,
-            rules: result.rules,
-          },
-        );
-      }
-      return c.json(result);
-    } catch (error) {
-      return c.json({ error: publicErrorCode(error, 'import_failed') }, 400);
-    }
-  });
-  app.post('/api/admin/keywords/packs', async (c) => {
-    const item = await saveAdminKeywordPack(
-      c.env,
-      await c.req.json().catch(() => undefined),
-      c.get('maintainerEmail'),
-    );
-    if (!item) return c.json({ error: 'invalid_pack' }, 400);
-    return republishKeywords(c, { id: item.id });
-  });
-  app.post('/api/admin/keywords/rules', async (c) => {
-    const item = await saveAdminKeywordRule(
-      c.env,
-      await c.req.json().catch(() => undefined),
-      c.get('maintainerEmail'),
-    );
-    if (!item) return c.json({ error: 'invalid_rule' }, 400);
-    return republishKeywords(c, { id: item.id });
-  });
-  app.delete('/api/admin/keywords/packs/:id', async (c) => {
-    const changed = await disableAdminKeyword(
-      c.env,
-      'admin_keyword_packs',
-      c.req.param('id'),
-      c.get('maintainerEmail'),
-    );
-    if (!changed) return c.json({ changed: false });
-    return republishKeywords(c, { changed });
-  });
-  app.delete('/api/admin/keywords/rules/:id', async (c) => {
-    const changed = await disableAdminKeyword(
-      c.env,
-      'admin_keyword_rules',
-      c.req.param('id'),
-      c.get('maintainerEmail'),
-    );
-    if (!changed) return c.json({ changed: false });
-    return republishKeywords(c, { changed });
-  });
-  app.post('/api/admin/keywords/publish', async (c) => {
-    try {
-      return c.json(await publishAdminKeywords(c.env, c.get('maintainerEmail')));
-    } catch (error) {
-      return c.json({ error: publicErrorCode(error, 'publish_failed') }, 400);
-    }
-  });
-
-  // 天级判定参数（乱码/词沙拉/组合门槛）：随词库发布链下发到扩展。
-  // 保存后立即重发布（带新参数生成新版本），与词库「保存即发布」同节奏。
-  // 请求体：{ detector_config: <对象> | null }，null = 清除（回退内置兜底）。
-  app.get('/api/admin/keywords/detector-config', async (c) => {
-    return c.json({ detector_config: await getKeywordDetectorConfig(c.env) });
-  });
-  app.post('/api/admin/keywords/detector-config', async (c) => {
-    const body = (await c.req.json().catch(() => undefined)) as
-      { detector_config?: unknown } | undefined;
-    const value = body?.detector_config;
-    if (
-      !body ||
-      !('detector_config' in body) ||
-      (value !== null && (typeof value !== 'object' || Array.isArray(value)))
-    ) {
-      return c.json({ error: 'invalid_detector_config' }, 400);
-    }
-    const accepted = await setKeywordDetectorConfig(c.env, value);
-    if (!accepted) return c.json({ error: 'invalid_detector_config' }, 400);
-    await recordAdminAudit(
-      c.env,
-      c.get('maintainerEmail'),
-      'update',
-      'keyword_detector_config',
-      'keyword-detector-config',
-      {},
-    );
-    return republishKeywords(c, { saved: value === null ? null : true });
-  });
-
-  // 只展示去标识化的规则级反馈；维护者不能读取安装 ID 或原始浏览内容。
-  app.get('/api/admin/samples', async (c) => {
-    const after = Number(c.req.query('after') ?? 0);
-    if (!Number.isSafeInteger(after) || after < 0) return c.json({ error: 'invalid_cursor' }, 400);
-    const until = c.req.query('until') === undefined ? undefined : Number(c.req.query('until'));
-    const reviewUntil =
-      c.req.query('review_until') === undefined ? undefined : Number(c.req.query('review_until'));
-    if ([until, reviewUntil].some((v) => v !== undefined && (!Number.isSafeInteger(v) || v < 0)))
-      return c.json({ error: 'invalid_cursor' }, 400);
-    return c.json(await listTrainingSamples(c.env, after, 100, until, reviewUntil));
-  });
-  app.post('/api/admin/samples/:id/review', async (c) => {
-    const id = Number(c.req.param('id'));
-    const changed = await reviewTrainingSample(
-      c.env,
-      id,
-      await c.req.json().catch(() => null),
-      c.get('maintainerEmail'),
-    );
-    if (!changed) return c.json({ error: 'invalid_sample_review' }, 400);
-    return c.json({ changed: true });
-  });
-
-  app.get('/api/admin/feedback', async (c) => {
-    const [summary, feedback] = await Promise.all([
-      c.env.DB.prepare(
-        `SELECT COALESCE(detection_source, 'unknown') AS detection_source,
-                COALESCE(rule_id, 'unknown') AS rule_id,
-                COUNT(*) AS count
-         FROM rescues
-         GROUP BY detection_source, rule_id
-         ORDER BY count DESC, detection_source, rule_id`,
-      ).all(),
-      c.env.DB.prepare(
-        `SELECT r.handle, r.detection_source, r.rule_id, r.detection_reason,
-                r.client_version, r.created_at, a.category, a.status,
-                a.report_count, a.rescue_count
-         FROM rescues r
-         LEFT JOIN accounts a ON a.handle = r.handle
-         ORDER BY r.created_at DESC, r.id DESC
-         LIMIT 200`,
-      ).all(),
-    ]);
-    return c.json({ summary: summary.results, feedback: feedback.results });
-  });
-
-  app.get('/api/admin/releases', async (c) => c.json({ releases: await listAdminReleases(c.env) }));
-  app.post('/api/admin/releases/:id/rollback', async (c) => {
-    const id = Number(c.req.param('id'));
-    // 按主键直查，历史发布记录（不在最近 100 条内）同样可以回退。
-    const release = Number.isInteger(id) ? await getAdminRelease(c.env, id) : null;
-    if (!release) return c.json({ error: 'release_not_found' }, 404);
-    try {
-      return c.json(
-        release.kind === 'accounts'
-          ? await rollbackAdminAccountRelease(c.env, id, c.get('maintainerEmail'))
-          : await rollbackAdminKeywordRelease(c.env, release.version, c.get('maintainerEmail')),
-      );
-    } catch (error) {
-      return c.json({ error: publicErrorCode(error, 'rollback_failed') }, 400);
-    }
-  });
 
   // 旧的拼接 HTML 维护页已废弃；新的后台只通过受 Access 保护的独立域名提供。
   app.get('/maintainer', (c) => c.json({ error: 'admin_moved_to_access' }, 410));
@@ -581,7 +343,7 @@ export function createApp() {
 
   // 快照消费端点：manifest 短缓存，版本化文件按不可变缓存
   app.get('/v1/snapshots/latest', async (c) => {
-    const latest = await getLatestSnapshot(c.env);
+    const latest = await (await loadSnapshot()).getLatestSnapshot(c.env);
     if (!latest) return c.json({ error: 'no_snapshot' }, 404);
     c.header('Cache-Control', 'public, max-age=300');
     return c.body(latest.manifest, 200, { 'content-type': 'application/json' });
@@ -589,157 +351,51 @@ export function createApp() {
 
   // 官方暂停开关实时状态：不经快照日更节流，扩展在破坏性操作执行前实时查询。
   // 只读、无数据库访问；no-store 保证边缘缓存不摊薄应急时效。
-  app.get('/v1/kill-switch', (c) => {
-    const killSwitch = buildKillSwitch(c.env.DESTRUCTIVE_KILL_SWITCH, new Date().toISOString());
+  app.get('/v1/kill-switch', async (c) => {
+    const killSwitch = (await loadSnapshot()).buildKillSwitch(
+      c.env.DESTRUCTIVE_KILL_SWITCH,
+      new Date().toISOString(),
+    );
     c.header('Cache-Control', 'no-store');
     return c.json(killSwitch ?? { destructive_actions_disabled: false });
   });
 
-  // Agent 维护通道：X-Agent-Key 鉴权（AGENT_API_KEYS，见 agent-admin.ts）。
-  // 覆盖线上全部可管理数据：维护者名单 / 词库分类与规则 / 发布与回滚 / 审计 / 资产清单。
-  // 不暴露社区票原始数据、安装数据或人工后台会话。
-  // 统一中间件守卫：新增路由时不再依赖逐个手挂 guard，防漏防护。
-  app.use('/api/agent/*', async (c, next) => {
-    const identity = await agentKeyIdentity(c.env, c.req.header('x-agent-key'));
-    if (!identity) return c.json({ error: 'invalid_agent_key' }, 401);
-    c.set('agentIdentity', identity);
-    await next();
-  });
-
-  app.get('/api/agent/entries', async (c) => {
-    return c.json({ entries: await listAgentMaintainerEntries(c.env) });
-  });
-
-  app.put('/api/agent/entries/:handle', async (c) => {
-    const guard = c.get('agentIdentity');
-    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
-    if (!body || typeof body !== 'object') {
-      return c.json({ error: 'invalid_body' }, 400);
+  // 增量：两版不可变快照之间的差异，边缘缓存一年（每个机房每对版本只算一次）
+  app.get('/v1/snapshots/delta/:from/:to', async (c) => {
+    const cache = (globalThis as { caches?: { default?: Cache } }).caches?.default;
+    // 缓存键只用路径：带查询串绕不过缓存
+    const url = new URL(c.req.url);
+    const key = new Request(`${url.origin}${url.pathname}`, { method: 'GET' });
+    const cached = await cache?.match(key).catch(() => undefined);
+    if (cached) return cached;
+    const body = await (
+      await loadSnapshot()
+    ).getSnapshotDelta(c.env, c.req.param('from'), c.req.param('to'));
+    const response = body
+      ? new Response(body, {
+          headers: {
+            'content-type': 'application/json',
+            'cache-control': 'public, max-age=31536000, immutable',
+          },
+        })
+      : new Response(JSON.stringify({ error: 'delta_unavailable' }), {
+          status: 404,
+          headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=3600' },
+        });
+    if (cache) {
+      const write = cache.put(key, response.clone()).catch(() => undefined);
+      try {
+        c.executionCtx.waitUntil(write);
+      } catch {
+        await write;
+      }
     }
-    // 路径 handle 与 body.handle 必须一致，防止传错账号
-    const pathHandle = (c.req.param('handle') ?? '').trim().toLowerCase();
-    if (body.handle !== pathHandle) {
-      return c.json({ error: 'handle_mismatch' }, 400);
-    }
-    const result = await upsertAgentMaintainerEntry(c.env, `agent:${guard}`, body);
-    return result.ok ? c.json(result) : c.json({ error: result.error }, 400);
-  });
-
-  app.delete('/api/agent/entries/:handle', async (c) => {
-    const guard = c.get('agentIdentity');
-    const result = await removeAgentMaintainerEntry(c.env, `agent:${guard}`, c.req.param('handle'));
-    return result.ok ? c.json(result) : c.json({ error: result.error }, 400);
-  });
-
-  // 全量重算 accounts 计票与分类（admin/候选池与快照推理口径对齐；幂等维护操作）
-  app.post('/api/agent/recompute-categories', async (c) => {
-    const guard = c.get('agentIdentity');
-    return c.json(await recomputeAllAccountCategories(c.env, `agent:${guard}`));
-  });
-
-  // 维护者数据（名单草稿 / 白名单）经脚本或后台改动后触发快照即时发布：
-  // 走人工发布通道（bypassDailyOnce），不落当日一版守卫，运营零额外步骤。
-  app.post('/api/agent/accounts/publish', async (c) => {
-    const guard = c.get('agentIdentity');
-    try {
-      return c.json(await publishAdminAccountDrafts(c.env, `agent:${guard}`));
-    } catch (error) {
-      return c.json({ error: publicErrorCode(error, 'publish_failed') }, 400);
-    }
-  });
-
-  // --- 词库（关键词名单）---
-  app.get('/api/agent/keywords', async (c) => {
-    return c.json(await listAgentKeywords(c.env));
-  });
-
-  app.put('/api/agent/keywords/packs/:id', async (c) => {
-    const guard = c.get('agentIdentity');
-    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
-    if (!body || typeof body !== 'object') return c.json({ error: 'invalid_body' }, 400);
-    if (body.id !== c.req.param('id')) return c.json({ error: 'handle_mismatch' }, 400);
-    const result = await upsertAgentKeywordPack(c.env, `agent:${guard}`, body);
-    return result.ok ? c.json(result) : c.json({ error: result.error }, 400);
-  });
-
-  app.delete('/api/agent/keywords/packs/:id', async (c) => {
-    const guard = c.get('agentIdentity');
-    const result = await removeAgentKeyword(c.env, `agent:${guard}`, 'packs', c.req.param('id'));
-    return result.ok ? c.json(result) : c.json({ error: result.error }, 400);
-  });
-
-  app.put('/api/agent/keywords/rules/:id', async (c) => {
-    const guard = c.get('agentIdentity');
-    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
-    if (!body || typeof body !== 'object') return c.json({ error: 'invalid_body' }, 400);
-    if (body.id !== c.req.param('id')) return c.json({ error: 'handle_mismatch' }, 400);
-    const result = await upsertAgentKeywordRule(c.env, `agent:${guard}`, body);
-    return result.ok ? c.json(result) : c.json({ error: result.error }, 400);
-  });
-
-  app.delete('/api/agent/keywords/rules/:id', async (c) => {
-    const guard = c.get('agentIdentity');
-    const result = await removeAgentKeyword(c.env, `agent:${guard}`, 'rules', c.req.param('id'));
-    return result.ok ? c.json(result) : c.json({ error: result.error }, 400);
-  });
-
-  app.post('/api/agent/keywords/publish', async (c) => {
-    const guard = c.get('agentIdentity');
-    try {
-      return c.json(await publishAgentKeywords(c.env, `agent:${guard}`));
-    } catch (error) {
-      return c.json({ error: publicErrorCode(error, 'publish_failed') }, 400);
-    }
-  });
-
-  // 天级判定参数读写（与后台 POST 语义一致：PUT body 直接是配置本体或 null）
-  app.get('/api/agent/keywords/detector-config', async (c) => {
-    return c.json(await readAgentKeywordDetectorConfig(c.env));
-  });
-  app.put('/api/agent/keywords/detector-config', async (c) => {
-    const guard = c.get('agentIdentity');
-    // 畸形 body 直接拒绝：静默等价清除会让一次手滑把参数打回内置
-    const result = await c.req.json().then(
-      (raw: unknown) => writeAgentKeywordDetectorConfig(c.env, raw ?? null, `agent:${guard}`),
-      () => ({ ok: false as const, error: 'invalid_body' }),
-    );
-    return result.ok ? c.json(result) : c.json({ error: result.error }, 400);
-  });
-
-  app.post('/api/agent/keywords/import', async (c) => {
-    return c.json(await importAgentKeywordCatalog(c.env));
-  });
-
-  // --- 发布记录 / 回滚 / 审计 / 状态 / 资产 ---
-  app.get('/api/agent/releases', async (c) => {
-    return c.json({ releases: await listAgentReleases(c.env) });
-  });
-
-  app.post('/api/agent/releases/:id/rollback', async (c) => {
-    const guard = c.get('agentIdentity');
-    const id = Number(c.req.param('id'));
-    if (!Number.isInteger(id)) return c.json({ error: 'invalid_release_id' }, 400);
-    const result = await rollbackAgentRelease(c.env, `agent:${guard}`, id);
-    return result.ok ? c.json(result) : c.json({ error: result.error }, 400);
-  });
-
-  app.get('/api/agent/audit', async (c) => {
-    const limit = Number(c.req.query('limit') ?? 50);
-    return c.json({ audit: await listAgentAudit(c.env, Number.isFinite(limit) ? limit : 50) });
-  });
-
-  app.get('/api/agent/status', async (c) => {
-    return c.json(await agentStatus(c.env));
-  });
-
-  app.get('/api/agent/assets', async (c) => {
-    const prefix = c.req.query('prefix') || null;
-    return c.json(await listAgentAssets(c.env, prefix));
+    return response;
   });
 
   app.get('/v1/snapshots/:version/:path', async (c) => {
     const path = c.req.param('path');
-    const body = await getSnapshotFile(c.env, c.req.param('version'), path);
+    const body = await (await loadSnapshot()).getSnapshotFile(c.env, c.req.param('version'), path);
     if (!body) return c.json({ error: 'not_found' }, 404);
     c.header('Cache-Control', 'public, max-age=31536000, immutable');
     return c.body(body, 200, {
@@ -749,14 +405,14 @@ export function createApp() {
   });
 
   app.get('/v1/blocklist/latest.yaml', async (c) => {
-    const body = await getLatestSnapshotFile(c.env, PUBLIC_BLOCKLIST_PACK);
+    const body = await (await loadSnapshot()).getLatestSnapshotFile(c.env, PUBLIC_BLOCKLIST_PACK);
     if (!body) return c.json({ error: 'no_snapshot' }, 404);
     c.header('Cache-Control', 'public, max-age=300');
     return c.body(body, 200, { 'content-type': 'text/yaml; charset=utf-8' });
   });
 
   app.get('/v1/blocklist/latest.json', async (c) => {
-    const body = await getLatestSnapshotFile(c.env, SNAPSHOT_PACK);
+    const body = await (await loadSnapshot()).getLatestSnapshotFile(c.env, SNAPSHOT_PACK);
     if (!body) return c.json({ error: 'no_snapshot' }, 404);
     c.header('Cache-Control', 'public, max-age=300');
     return c.body(body, 200, { 'content-type': 'application/json' });
@@ -765,10 +421,26 @@ export function createApp() {
   // 官网名单公示数据：与扩展执行的名单同源（最新快照），只保留公示字段，
   // 不含指纹 / 域名 / 证据帖等对抗敏感细节。短缓存与快照端点对齐。
   app.get('/v1/roster/latest', async (c) => {
-    const roster = await getPublicRoster(c.env);
+    const roster = await (await loadRoster()).getPublicRoster(c.env);
     if (!roster) return c.json({ error: 'no_snapshot' }, 404);
     c.header('Cache-Control', 'public, max-age=300');
     return c.json(roster);
+  });
+
+  // 白名单 handle 精简版：福滤娃周刊（feedsieve.win/weekly）给被推荐的 X 作者打「福滤娃白名单」徽章用。
+  // 只含维护者白名单与社区认证的 handle（小写），不含黑名单与任何证据字段。
+  app.get('/v1/whitelist/handles', async (c) => {
+    const roster = await (await loadRoster()).getPublicRoster(c.env);
+    if (!roster) return c.json({ error: 'no_snapshot' }, 404);
+    const handles = [
+      ...new Set(
+        [...roster.whitelist.maintained, ...roster.whitelist.verified].map((e) =>
+          e.handle.toLowerCase(),
+        ),
+      ),
+    ].sort();
+    c.header('Cache-Control', 'public, max-age=300');
+    return c.json({ snapshot_version: roster.snapshot_version, handles });
   });
 
   // 关键词包和账号社区名单分开：前者是公开、可订阅的“黄标规则”，
@@ -809,6 +481,9 @@ export function createApp() {
   // 短语主动挑选；不进快照，只出现在运营待审列表。
   app.post('/v1/keyword-contributions', async (c) => {
     const body = await c.req.json().catch(() => undefined);
+    // 按需加载：keyword-contributions 经 labels 拉进共识/评级/分类推断，是启动路径上的大头，
+    // 而这个端点只有用户显式提交短语时才会命中。
+    const { processKeywordContributions } = await import('./keyword-contributions');
     const result = await processKeywordContributions(c.env, {
       body,
       ip: c.req.header('cf-connecting-ip') ?? null,
@@ -822,7 +497,7 @@ export function createApp() {
 
   app.post('/v1/labels/retract', async (c) => {
     const body = await c.req.json().catch(() => undefined);
-    const result = await processRetractionBatch(c.env, body);
+    const result = await (await loadLabels()).processRetractionBatch(c.env, body);
     c.header('Cache-Control', 'no-store');
     if (!result.ok) {
       return c.json({ error: result.error }, result.httpStatus);
@@ -840,100 +515,11 @@ export function createApp() {
     return c.json(publicPolicy());
   });
 
-  // 公开榜单（GET）：边缘缓存挡读——榜单数据本身有 90 秒新鲜容忍，边缘各
-  // PoP 缓存 60 秒，热点访客请求零 D1 查询。个人化字段（me）只在 POST 端点：
-  // POST 不进 CDN 缓存，避免按 body 维度分片缓存。
-  app.get('/v1/leaderboard', async (c) => {
-    const scope = c.req.query('scope') === 'all' ? 'all' : 'week';
-    const data = await getLeaderboard(c.env, scope);
-    c.header('Cache-Control', 'public, max-age=0, s-maxage=60');
-    return c.json({
-      season: data.season,
-      updated_at: data.computed_at,
-      server_time: Math.floor(Date.now() / 1000),
-      total: data.rows.length,
-      rows: data.rows
-        .slice(0, LEADERBOARD.topSize)
-        .map((row, index) => toPublicHunterRow({ ...row, rank: index + 1 })),
-      me: null,
-      last_season: data.last_season ?? null,
-    });
-  });
-
-  // 打野排位赛榜单（脏标记懒重算，读这条就是实时口径）。
-  // 隐私：installation_id / me 前缀都走 POST body，不进 URL 与边缘访问日志；
-  // me 是加盐哈希前缀（不可逆），只用于定位高亮，无任何敏感操作。
-  app.post('/v1/leaderboard', async (c) => {
-    const body: unknown = await c.req.json().catch(() => undefined);
-    let mePrefix: string | null = null;
-    let scope: 'week' | 'all' = 'week';
-    if (typeof body === 'object' && body !== null) {
-      const b = body as Record<string, unknown>;
-      if (b.scope === 'all') scope = 'all';
-      if (
-        typeof b.installation_id === 'string' &&
-        b.installation_id.length >= 8 &&
-        b.installation_id.length <= 128
-      ) {
-        mePrefix = (await hashInstallationId(c.env.INSTALLATION_SALT, b.installation_id)).slice(
-          0,
-          12,
-        );
-      } else if (typeof b.me === 'string' && /^[0-9a-f]{12}$/.test(b.me)) {
-        mePrefix = b.me;
-      }
-    }
-    const data = await getLeaderboard(c.env, scope);
-    let me: (Record<string, unknown> & { rank: number }) | null = null;
-    if (mePrefix) {
-      const rank = data.rows.findIndex((row) => row.id.startsWith(mePrefix));
-      if (rank >= 0) me = { ...data.rows[rank], rank: rank + 1 };
-    }
-    c.header('Cache-Control', 'no-store');
-    // 公开面只暴露加盐哈希前 12 位（me 匹配粒度），完整哈希不出网
-    return c.json({
-      season: data.season,
-      updated_at: data.computed_at,
-      server_time: Math.floor(Date.now() / 1000),
-      /** 榜上总人数（缓存保存全量）；百分位 = 前端用 me.rank/total 换算 */
-      total: data.rows.length,
-      rows: data.rows
-        .slice(0, LEADERBOARD.topSize)
-        .map((row, index) => toPublicHunterRow({ ...row, rank: index + 1 })),
-      me: me ? toPublicHunterRow(me) : null,
-      last_season: data.last_season ?? null,
-    });
-  });
-
-  // 猎手档案：邮箱验证码解锁昵称 / 一句话介绍（无密码无会话）
-  app.post('/v1/player/bind-email', async (c) => {
-    const result = await bindEmail(c.env, await c.req.json().catch(() => undefined));
-    if (!result.ok) return c.json({ error: result.error }, result.httpStatus);
-    c.header('Cache-Control', 'no-store');
-    return c.json(result.value);
-  });
-  app.post('/v1/player/verify', async (c) => {
-    const result = await verifyEmail(c.env, await c.req.json().catch(() => undefined));
-    if (!result.ok) return c.json({ error: result.error }, result.httpStatus);
-    c.header('Cache-Control', 'no-store');
-    return c.json(result.value);
-  });
-  app.post('/v1/player/profile', async (c) => {
-    const result = await updateProfile(c.env, await c.req.json().catch(() => undefined));
-    if (!result.ok) return c.json({ error: result.error }, result.httpStatus);
-    c.header('Cache-Control', 'no-store');
-    return c.json(result.value);
-  });
-  app.post('/v1/player/me', async (c) => {
-    const result = await getProfile(c.env, await c.req.json().catch(() => undefined));
-    if (!result.ok) return c.json({ error: result.error }, result.httpStatus);
-    c.header('Cache-Control', 'no-store');
-    return c.json(result.value);
-  });
-
   // 名单公示申请：提交（发邮箱验证码）→ 验证 → 进维护者队列。无安装语义。
   app.post('/v1/applications', async (c) => {
-    const result = await submitApplication(
+    const result = await (
+      await loadApplications()
+    ).submitApplication(
       c.env,
       await c.req.json().catch(() => undefined),
       c.req.header('cf-connecting-ip'),
@@ -943,7 +529,9 @@ export function createApp() {
     return c.json(result.value);
   });
   app.post('/v1/applications/verify', async (c) => {
-    const result = await verifyApplication(c.env, await c.req.json().catch(() => undefined));
+    const result = await (
+      await loadApplications()
+    ).verifyApplication(c.env, await c.req.json().catch(() => undefined));
     if (!result.ok) return c.json({ error: result.error }, result.httpStatus);
     c.header('Cache-Control', 'no-store');
     return c.json(result.value);
@@ -967,34 +555,35 @@ export function createApp() {
       return c.json({ error: 'invalid_installation_id' }, 400);
     }
     const installHash = await hashInstallationId(c.env.INSTALLATION_SALT, installationId);
-    const [reports, rescues, adopted] = await Promise.all([
-      c.env.DB.prepare(
-        `SELECT COUNT(*) AS n FROM active_labels
-         WHERE installation_id = ?1 AND label = 'blocked'`,
-      )
-        .bind(installHash)
-        .first<{ n: number }>(),
-      c.env.DB.prepare(
-        `SELECT COUNT(*) AS n FROM active_labels
-         WHERE installation_id = ?1 AND label = 'allowed'`,
-      )
-        .bind(installHash)
-        .first<{ n: number }>(),
-      // 被采纳：该安装当前投了拉黑票，且账号社区净票数已达到公开门槛。
-      c.env.DB.prepare(
-        `SELECT COUNT(DISTINCT l.handle) AS n
-         FROM active_labels l
-         JOIN accounts a ON a.handle = l.handle
-         WHERE l.installation_id = ?1
-           AND l.label = 'blocked'
-           AND a.report_count - a.rescue_count >= ?2`,
-      )
-        .bind(installHash, POLICY.communityNetThreshold)
-        .first<{ n: number }>(),
+    const db = getDb(c.env);
+    const [[labels], [adopted]] = await Promise.all([
+      db
+        .select({
+          reports: sql<number>`count(*) filter (where ${activeLabels.label} = 'blocked')`.mapWith(
+            Number,
+          ),
+          rescues: sql<number>`count(*) filter (where ${activeLabels.label} = 'allowed')`.mapWith(
+            Number,
+          ),
+        })
+        .from(activeLabels)
+        .where(eq(activeLabels.installationId, installHash)),
+      // 被采纳：该安装当前投了拉黑票，且账号在当前公开名单里（accounts.listed，与扩展下载的名单同一口径）。
+      db
+        .select({ n: countDistinct(activeLabels.handle) })
+        .from(activeLabels)
+        .innerJoin(accounts, eq(accounts.handle, activeLabels.handle))
+        .where(
+          and(
+            eq(activeLabels.installationId, installHash),
+            eq(activeLabels.label, 'blocked'),
+            eq(accounts.listed, 1),
+          ),
+        ),
     ]);
     return c.json({
-      reports: reports?.n ?? 0,
-      rescues: rescues?.n ?? 0,
+      reports: labels?.reports ?? 0,
+      rescues: labels?.rescues ?? 0,
       adopted: adopted?.n ?? 0,
     });
   });
@@ -1012,9 +601,9 @@ export function createApp() {
   app.notFound((c) => c.json({ error: 'not_found' }, 404));
 
   app.onError((error, c) => {
-    // 不打整个 error 对象：D1/nodemailer 错误消息可能嵌入绑定值（邮箱等敏感数据）
+    // 不打整个 error 对象：Drizzle/nodemailer 错误消息可能嵌入绑定值（邮箱等敏感数据）
     const name = error instanceof Error ? error.name : 'Error';
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeDbError(error);
     console.error(`[community-api] ${c.req.method} ${c.req.path} -> 500 ${name}: ${message}`);
     return c.json({ error: 'internal_error' }, 500);
   });
@@ -1034,10 +623,16 @@ let app: ReturnType<typeof createApp> | null = null;
 export default {
   fetch(request: unknown, env) {
     app ??= createApp();
-    return app.fetch(request as Request, env);
+    const current = app;
+    return withDb(async () => current.fetch(request as Request, env));
   },
-  async scheduled(_controller, env) {
-    // 与 server.ts 生产入口共用同一编排函数，探活等新增消费端不再漂移
-    await runScheduledCron(env);
+  async scheduled(controller, env) {
+    // 与 server.ts 生产入口共用同一编排函数，探活等新增消费端不再漂移。
+    // 动态 import：本模块被 api.ts 引去建路由表，静态引入会把整条 cron 依赖
+    // （snapshot / prober / 各清理任务）拉进每一次 /v1/* 冷启动的求值路径。
+    await withDb(async () => {
+      const { runScheduledCron } = await import('./scheduled');
+      await runScheduledCron(env, controller?.cron);
+    });
   },
 } satisfies ExportedHandler<Cloudflare.Env>;

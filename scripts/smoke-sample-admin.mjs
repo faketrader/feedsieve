@@ -55,6 +55,7 @@ try {
     let body = {};
     if (url.pathname.endsWith('/me')) body = { email: 'fixture@example.com' };
     else if (url.pathname.endsWith('/feedback')) body = { summary: [], feedback: [] };
+    else if (url.pathname.endsWith('/rule-feedback')) body = { rules: [], policy: {} };
     else if (url.pathname.endsWith('/review')) {
       saved = route.request().postDataJSON();
       Object.assign(entry, saved, { review_id: 1, reviewed_at: 1789266010 });

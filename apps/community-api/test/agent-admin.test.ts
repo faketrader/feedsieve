@@ -1,6 +1,9 @@
 import { env } from 'cloudflare:workers';
+import { desc, eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
+import { getDb } from '../src/db/client';
+import { accounts, adminAuditLog } from '../src/db/schema';
 import { getSnapshotFile, SNAPSHOT_PACK } from '../src/snapshot';
 
 const ORIGIN = 'https://api.example.com';
@@ -32,9 +35,9 @@ async function latestVersion(envLike: typeof env): Promise<string> {
 }
 
 async function snapshotHandles(version: string): Promise<string[]> {
-  const body = JSON.parse(
-    (await getSnapshotFile(env, version, SNAPSHOT_PACK)) ?? '{}',
-  ) as { entries: Array<{ handle: string }> };
+  const body = JSON.parse((await getSnapshotFile(env, version, SNAPSHOT_PACK)) ?? '{}') as {
+    entries: Array<{ handle: string }>;
+  };
   return body.entries.map((entry) => entry.handle);
 }
 
@@ -72,20 +75,25 @@ describe('agent maintenance API', () => {
     const handles = await snapshotHandles(await latestVersion(KEYED_ENV));
     expect(handles).toContain('agent_new_user');
 
-    const audit = await env.DB.prepare(
-      `SELECT actor_email, action FROM admin_audit_log WHERE target_id = ?1`,
-    )
-      .bind('agent_new_user')
-      .all<{ actor_email: string; action: string }>();
-    expect(audit.results.length).toBeGreaterThan(0);
-    expect(audit.results[0]!.actor_email).toBe('agent:ops');
+    const audit = await getDb(env)
+      .select({ actor_email: adminAuditLog.actorEmail, action: adminAuditLog.action })
+      .from(adminAuditLog)
+      .where(eq(adminAuditLog.targetId, 'agent_new_user'));
+    expect(audit.length).toBeGreaterThan(0);
+    expect(audit[0]!.actor_email).toBe('agent:ops');
   });
 
   it('路径 handle 与 body.handle 不一致 → 400，不落库', async () => {
+    // 每个测试前库会被清空：先发布一次，保证有快照可比对
+    await putEntry('agent_seed_usr');
     const res = await agentRequest('/api/agent/entries/path_handle', {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ handle: 'other_handle', category: 'bot_spam', note: 'Agent 测试条目' }),
+      body: JSON.stringify({
+        handle: 'other_handle',
+        category: 'bot_spam',
+        note: 'Agent 测试条目',
+      }),
     });
     expect(res.status).toBe(400);
     const handles = await snapshotHandles(await latestVersion(KEYED_ENV));
@@ -158,11 +166,12 @@ describe('agent maintenance API', () => {
     };
     expect(manifest.pack_version).toBe(body.version);
 
-    const audit = await env.DB.prepare(
-      `SELECT actor_email, action FROM admin_audit_log WHERE target_type = ?1 ORDER BY id DESC LIMIT 1`,
-    )
-      .bind('keyword_pack')
-      .first<{ actor_email: string; action: string }>();
+    const [audit] = await getDb(env)
+      .select({ actor_email: adminAuditLog.actorEmail, action: adminAuditLog.action })
+      .from(adminAuditLog)
+      .where(eq(adminAuditLog.targetType, 'keyword_pack'))
+      .orderBy(desc(adminAuditLog.id))
+      .limit(1);
     expect(audit?.actor_email).toBe('agent:ops');
   });
 
@@ -186,6 +195,27 @@ describe('agent maintenance API', () => {
   });
 
   it('status / releases / assets / audit 巡检端点齐全', async () => {
+    // 每个测试前库会被清空：先发布一份快照和一份词库，status 才有版本可报
+    await putEntry('agent_stat_usr');
+    await agentRequest('/api/agent/keywords/packs/agent_status_pack', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        id: 'agent_status_pack',
+        name_zh: '巡检分类',
+        description_zh: '巡检分类描述',
+      }),
+    });
+    await agentRequest('/api/agent/keywords/rules/agent-status-rule', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        id: 'agent-status-rule',
+        pack_id: 'agent_status_pack',
+        phrase: '巡检词组',
+      }),
+    });
+    await agentRequest('/api/agent/keywords/publish', { method: 'POST' });
     const statusRes = await agentRequest('/api/agent/status');
     expect(statusRes.status).toBe(200);
     const status = (await statusRes.json()) as {
@@ -209,24 +239,28 @@ describe('agent maintenance API', () => {
     const assets = await agentRequest('/api/agent/assets?prefix=keyword-packs/');
     const assetsBody = (await assets.json()) as { assets: Array<{ key: string }> };
     expect(assetsBody.assets.length).toBeGreaterThan(0);
-    expect(assetsBody.assets.some((asset) => asset.key === 'keyword-packs/latest.json')).toBe(
-      true,
-    );
+    expect(assetsBody.assets.some((asset) => asset.key === 'keyword-packs/latest.json')).toBe(true);
   });
 
   it('recompute-categories：存量行按推理口径重算并记审计', async () => {
     // 直接播种一行旧口径数据（票面多数时代的历史行）：无票无证据，旧分类是 scam_phishing
-    await env.DB.prepare(
-      `INSERT INTO accounts (handle, x_user_id, category, status, report_count, rescue_count,
-         first_report_at, updated_at)
-       VALUES ('rc_stale_user', NULL, 'scam_phishing', 'new', 0, 0, 1758000000, 1758000000)`,
-    ).run();
+    await getDb(env).insert(accounts).values({
+      handle: 'rc_stale_user',
+      xUserId: null,
+      category: 'scam_phishing',
+      status: 'new',
+      reportCount: 0,
+      rescueCount: 0,
+      firstReportAt: 1758000000,
+      updatedAt: 1758000000,
+    });
     const response = await agentRequest('/api/agent/recompute-categories', { method: 'POST' });
     expect(response.status).toBe(200);
     expect(await response.json()).toHaveProperty('accounts');
-    const row = await env.DB.prepare('SELECT category FROM accounts WHERE handle = ?1')
-      .bind('rc_stale_user')
-      .first<{ category: string }>();
+    const [row] = await getDb(env)
+      .select({ category: accounts.category })
+      .from(accounts)
+      .where(eq(accounts.handle, 'rc_stale_user'));
     expect(row?.category).toBe('other');
 
     const audit = await agentRequest('/api/agent/audit?limit=10');

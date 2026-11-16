@@ -154,7 +154,11 @@ function parseKillSwitch(raw: unknown): SnapshotBody['kill_switch'] {
     }
     disabled_since = k.disabled_since;
   }
-  return { destructive_actions_disabled: true, ...(reason ? { reason } : {}), ...(disabled_since ? { disabled_since } : {}) };
+  return {
+    destructive_actions_disabled: true,
+    ...(reason ? { reason } : {}),
+    ...(disabled_since ? { disabled_since } : {}),
+  };
 }
 
 /**
@@ -364,6 +368,9 @@ export function parseSnapshotBody(text: string): ParseResult<SnapshotBody> {
     }
   }
 
+  // 静音规则（可选）：只是让扩展少标黄框，畸形时忽略这一段而不拒绝整份快照
+  const muted_rules = parseMutedRules(s.muted_rules);
+
   return {
     ok: true,
     value: {
@@ -374,8 +381,20 @@ export function parseSnapshotBody(text: string): ParseResult<SnapshotBody> {
       ...(verified ? { verified } : {}),
       ...(whitelist ? { whitelist } : {}),
       ...(kill_switch ? { kill_switch } : {}),
+      ...(muted_rules ? { muted_rules } : {}),
     },
   };
+}
+
+const MUTED_RULE_RE = /^[a-z0-9][a-z0-9:_-]{0,159}$/;
+const MAX_MUTED_RULES = 1_000;
+
+function parseMutedRules(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_MUTED_RULES) return undefined;
+  const rules = value.filter(
+    (item): item is string => typeof item === 'string' && MUTED_RULE_RE.test(item),
+  );
+  return rules.length > 0 ? rules : undefined;
 }
 
 function validateEntry(item: unknown): import('./types').CommunityEntry | null {

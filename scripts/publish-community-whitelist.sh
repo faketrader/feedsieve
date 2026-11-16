@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# 把 community/lists/whitelist.yaml（GitHub 公开维护的白名单源文件）发布到线上 D1。
+# 把 community/lists/whitelist.yaml（GitHub 公开维护的白名单源文件）发布到线上 PostgreSQL。
 #
 # 这是「PR 提交 → 维护者审核合并 → 生效」链路里唯一需要运营亲手执行的一步：
 # 合并 whitelist.yaml 的 PR 后运行本脚本，内容以「文件为唯一事实」整体同步
@@ -10,16 +10,15 @@
 #   scripts/publish-community-whitelist.sh --check    # 只校验+预览，不写库
 #
 # 前置:
-#   - 已在 apps/community-api/wrangler.local.jsonc 配置好真实的 D1 database_id
-#     （该文件已被 gitignore，不入库；与部署共用同一份配置）
-#   - 本机 wrangler 已登录（与部署同账号）
+#   - 线上库的连接串：环境变量 FEEDSIEVE_DATABASE_URL，或写在 ~/.config/feedsieve/database-url（600）。
+#     线上库不开公网端口，维护者需自行准备到数据库的通道（SSH 隧道或等价方案），
+#     主机别名与端口不写进仓库。连接串形如
+#       postgresql://<用户>:<密码>@127.0.0.1:<本地端口>/<库名>?sslmode=require
+#   - 本机装有 psql
 set -eu
 cd "$(dirname "$0")/.."
 
 source_file="community/lists/whitelist.yaml"
-config_dir="apps/community-api"
-config="wrangler.local.jsonc"
-database="feedsieve-community"
 
 mode="${1:-}"
 if [ "$mode" != "" ] && [ "$mode" != "--check" ]; then
@@ -35,11 +34,17 @@ trap 'rm -f "$sql_file"' EXIT
 node scripts/publish-whitelist-sql.mjs "$source_file" "$mode" "$sql_file"
 
 if [ -z "$mode" ]; then
-  echo "publishing to D1 ($database)…"
-  (cd "$config_dir" && pnpm exec wrangler d1 execute "$database" --remote --config "$config" --file "$sql_file")
+  database_url="${FEEDSIEVE_DATABASE_URL:-$(cat "$HOME/.config/feedsieve/database-url" 2>/dev/null || true)}"
+  if [ -z "$database_url" ]; then
+    echo "error: 缺少 FEEDSIEVE_DATABASE_URL（或 ~/.config/feedsieve/database-url），见脚本头部说明" >&2
+    exit 1
+  fi
+  echo "publishing to PostgreSQL…"
+  # 整份文件在一个事务里执行，任何一条失败都整体回滚
+  psql "$database_url" -X -q -v ON_ERROR_STOP=1 --single-transaction -f "$sql_file"
 
-  # D1 同步完成后立即触发快照发布（人工发布通道，绕开当日一版节流）。
-  # 这是唯一的生效入口：脚本直写 D1 不会置快照脏标记，cron 不感知，必须在这里显式收尾。
+  # 入库后立即触发快照发布（人工发布通道，绕开当日一版节流）。
+  # 这是唯一的生效入口：脚本直写数据库不会置快照脏标记，cron 不感知，必须在这里显式收尾。
   . "$(dirname "$0")/lib/api-base.sh"
   resolve_feedsieve_api_base
   base="$FEEDSIEVE_API_BASE"

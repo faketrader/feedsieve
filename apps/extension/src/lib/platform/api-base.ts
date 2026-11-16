@@ -6,8 +6,7 @@
  */
 declare const __FEEDSIEVE_API_BASE__: string | undefined;
 
-const OVERRIDE =
-  typeof __FEEDSIEVE_API_BASE__ === 'string' ? __FEEDSIEVE_API_BASE__.trim() : '';
+const OVERRIDE = typeof __FEEDSIEVE_API_BASE__ === 'string' ? __FEEDSIEVE_API_BASE__.trim() : '';
 const NORMALIZED = OVERRIDE.replace(/\/+$/, '');
 
 export const API_BASE = NORMALIZED || 'https://api.feedsieve.win';

@@ -133,7 +133,8 @@ describe('block-safety 安全账本', () => {
   });
 
   /** 本地正午时刻（避免凌晨边界跨日的时区抖动） */
-  const dayMs = (y: number, m: number, d: number): number => new Date(y, m - 1, d, 12, 0, 0).getTime();
+  const dayMs = (y: number, m: number, d: number): number =>
+    new Date(y, m - 1, d, 12, 0, 0).getTime();
 
   it('响应式预算：429 风暴砍半、认证失效清零，连续无信号逐日回补', async () => {
     let ledger = await loadSafetyLedger('acc-1');
@@ -192,7 +193,9 @@ describe('block-safety 安全账本', () => {
     expect(rolloverBudget(adaptive, dayMs(2026, 9, 2)).budget).toBe(830);
     expect(rolloverBudget({ ...adaptive, dailyLimit: 400 }, dayMs(2026, 9, 2)).budget).toBe(830);
     // 没保险丝的用户预算再低也不回填 dailyLimit 的短板
-    expect(rolloverBudget({ ...adaptive, dailyLimit: 600, budget: 1500 }, dayMs(2026, 9, 2)).budget).toBe(1550);
+    expect(
+      rolloverBudget({ ...adaptive, dailyLimit: 600, budget: 1500 }, dayMs(2026, 9, 2)).budget,
+    ).toBe(1550);
 
     // 信号后 redo streak：信号日从 0 重新计
     const signaled = applySignal(fuse, 'rate_limit_storm', dayMs(2026, 9, 2));

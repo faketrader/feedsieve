@@ -1,8 +1,8 @@
-// Worker 运行时绑定。测试环境会额外注入 TEST_MIGRATIONS（见 vitest.config.ts），
-// 仅 test/apply-migrations.ts 使用。
+// Worker 运行时绑定。
 declare namespace Cloudflare {
   interface Env {
-    DB: D1Database;
+    /** PostgreSQL 经 Hyperdrive 接入；用 src/db/client.ts 的 getDb(env) 访问 */
+    HYPERDRIVE: Hyperdrive;
     /** 公开、版本化的关键词词库生成物；源文件仍提交在 community/keyword-packs/。 */
     KEYWORD_PACKS?: R2Bucket;
     ASSETS: Fetcher;
@@ -28,9 +28,17 @@ declare namespace Cloudflare {
     DESTRUCTIVE_KILL_SWITCH?: string;
     /** Agent 维护通道密钥（`id:secret` 逗号分隔，secret ≥16 位）；缺省 = 该通道不可用 */
     AGENT_API_KEYS?: string;
-    /** 部署环境标记；置 "production" 后 bind-email 未配置邮件通道时绝不返回 dev_code */
+    /** 部署环境标记；置 "production" 后发邮箱验证码时若未配置邮件通道，绝不返回 dev_code */
     WORKER_ENV?: string;
-    /** 出站邮件 webhook（POST {to, subject, text}）；缺省 = bind-email 降级返回 dev_code（仅限开发） */
+    /** 仅测试："1" 时允许在 withDb 作用域外调用 getDb（vitest.config.ts 注入） */
+    FEEDSIEVE_TEST?: string;
+    /** 全站热榜的独立加盐（≥16 位，线上用 wrangler secret put 设置）；缺省回落 INSTALLATION_SALT */
+    HOT_SALT?: string;
+    /** 全站热榜上榜所需的最少不同会话数（1–20）；不设时按最近 2 小时的活跃上报人数自动定（1 → 2 → 3） */
+    HOT_MIN_REPORTERS?: string;
+    /** 扩展上报全站热榜观测的间隔（分钟，5–60，默认 15）；随上报响应下发，调长即可降写入量 */
+    HOT_UPLOAD_INTERVAL_MIN?: string;
+    /** 出站邮件 webhook（POST {to, subject, text}）；缺省 = 发邮箱验证码时降级返回 dev_code（仅限开发） */
     MAIL_WEBHOOK_URL?: string;
     /** Email Service 发件地址（如 no-reply@chendahuang.com）；EMAIL 绑定发信必配 */
     MAIL_FROM?: string;
@@ -40,6 +48,27 @@ declare namespace Cloudflare {
     SMTP_USER?: string;
     SMTP_PASS?: string;
     SMTP_FROM?: string;
-    TEST_MIGRATIONS: import('cloudflare:test').D1Migration[];
+    /** TikHub API key（拉账号最近回复，AI 号判定用；线上 wrangler secret put）；缺省 = /v1/ai-accounts/check 返回 503 */
+    TIKHUB_API_KEY?: string;
+    /** TypeSafe 直连 key（旧判定通道，只有 AI_JUDGE_PROVIDERS 里写了 typesafe-direct 才用；默认不走） */
+    TYPESAFE_API_KEY?: string;
+    /** Cloudflare Workers AI / AI Gateway 绑定（AI 号判定模型网关的默认通道）；缺省 = workers-ai provider 不可用 */
+    AI?: Ai;
+    /** AI 号判定的模型 provider 顺序（逗号分隔）：workers-ai、workers-ai:<model id>、typesafe-direct；默认 workers-ai */
+    AI_JUDGE_PROVIDERS?: string;
+    /** OpenAI 兼容 HTTP 判定服务（DeepSeek / 中转）的 base URL，如 https://host/v1；缺省 = 该 provider 不可用 */
+    AI_JUDGE_HTTP_BASE_URL?: string;
+    /** 上述判定服务的 API key（线上 wrangler secret put，绝不入库） */
+    AI_JUDGE_HTTP_API_KEY?: string;
+    /** 上述判定服务的模型名（默认 deepseek-v4.1-flash） */
+    AI_JUDGE_HTTP_MODEL?: string;
+    /** workers-ai provider 的默认模型 id（默认 @cf/cloudflare/clef；换模型不用改代码） */
+    AI_JUDGE_MODEL?: string;
+    /** AI Gateway id（只有第三方模型如 typesafe/jev 才走网关；默认 default，首次认证请求自动创建） */
+    AI_GATEWAY_ID?: string;
+    /** 全站每天新判定 AI 号的「兜底闸」（默认 200000，纯防余额烧穿；单用户限额才是业务闸）；0 = 暂停新判定，只返缓存 */
+    AI_CHECK_DAILY_BUDGET?: string;
+    /** 福滤娃周刊 Worker（fsw-web）的 service binding：首页「本周 X 精选」读它的公开热帖；缺省 = 不显示该模块 */
+    WEEKLY?: Fetcher;
   }
 }

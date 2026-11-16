@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// 清理清单两按钮回归：误标=加白名单且整行即离清单；剔除=整行移除不碰名单。
+// 清理清单两按钮回归：误标=加白名单且整行即离清单；移除=整行移除不碰名单。
 // 兜底旧坑：白名单删除曾走内容脚本储库回调链路，条目残留直到全量重置。
 import React, { act } from 'react';
 import ReactDOM from 'react-dom/client';
@@ -8,6 +8,7 @@ import CleanView from './CleanView';
 import type { PageMarkedItem } from './shared';
 
 let storageSet: ReturnType<typeof vi.fn>;
+let sessionStored: Record<string, unknown>;
 const mountedRoots: Array<{ unmount: () => void }> = [];
 
 beforeEach(() => {
@@ -15,6 +16,7 @@ beforeEach(() => {
   for (const root of mountedRoots.splice(0)) root.unmount();
   document.body.replaceChildren();
   storageSet = vi.fn().mockResolvedValue(undefined);
+  sessionStored = {};
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{}')));
   vi.stubGlobal('browser', {
     runtime: {
@@ -22,6 +24,10 @@ beforeEach(() => {
       sendMessage: vi.fn().mockResolvedValue(undefined),
     },
     storage: {
+      session: {
+        get: vi.fn(async () => ({ ...sessionStored })),
+        set: vi.fn(async (items: Record<string, unknown>) => Object.assign(sessionStored, items)),
+      },
       local: {
         get: vi.fn().mockResolvedValue({ uiLanguage: 'zh' }),
         set: storageSet,
@@ -50,6 +56,9 @@ function renderCleanView(
         refreshPageMarked,
         pauseDestructive: false,
         killSwitchActive: false,
+        communityEligible: [],
+        communityLoading: false,
+        onOpenSettings: vi.fn(),
       }),
     );
   });
@@ -64,8 +73,14 @@ function buttonInRow(row: HTMLElement, label: string): HTMLButtonElement {
   return button;
 }
 
+function removeButton(row: HTMLElement): HTMLButtonElement {
+  const button = row.querySelector<HTMLButtonElement>('button[aria-label^="移除"]');
+  if (!button) throw new Error('remove button not found');
+  return button;
+}
+
 function rowOf(rootEl: HTMLElement, handle: string): HTMLElement {
-  const row = [...rootEl.querySelectorAll<HTMLElement>('.review-item')].find((el) =>
+  const row = [...rootEl.querySelectorAll<HTMLElement>('.marked-list li')].find((el) =>
     el.textContent?.includes(handle),
   );
   if (!row) throw new Error(`row not found: ${handle}`);
@@ -73,7 +88,7 @@ function rowOf(rootEl: HTMLElement, handle: string): HTMLElement {
 }
 
 function hasRow(rootEl: HTMLElement, handle: string): boolean {
-  return [...rootEl.querySelectorAll('.review-item .account-handle')].some((el) =>
+  return [...rootEl.querySelectorAll('.marked-handle')].some((el) =>
     el.textContent?.includes(handle),
   );
 }
@@ -111,25 +126,25 @@ describe('CleanView 误标', () => {
     expect(hasRow(rootEl, 'spampeye')).toBe(true);
   });
 
-  it('剩全部剔除后列表归零且批量拉黑按钮禁用', async () => {
+  it('剩全部移除后列表归零且批量拉黑按钮禁用', async () => {
     const rootEl = renderCleanView(ITEMS);
     await act(async () => {
       buttonInRow(rowOf(rootEl, 'misfavored'), '误标').click();
       await new Promise((r) => setTimeout(r, 0));
-      buttonInRow(rowOf(rootEl, 'spampeye'), '剔除').click();
+      removeButton(rowOf(rootEl, 'spampeye')).click();
       await new Promise((r) => setTimeout(r, 0));
     });
-    expect(rootEl.textContent).toContain('已全部剔除');
-    expect(rootEl.querySelector<HTMLButtonElement>('.primary-action')?.disabled).toBe(true);
+    expect(rootEl.textContent).toContain('已全部移除');
+    expect(rootEl.querySelector<HTMLButtonElement>('.primary-button')).toBeNull();
   });
 });
 
-describe('CleanView 剔除', () => {
+describe('CleanView 移除', () => {
   it('整行移除、不写白名单、不触发刷新', async () => {
     const refreshPageMarked = vi.fn().mockResolvedValue(undefined);
     const rootEl = renderCleanView(ITEMS, refreshPageMarked);
     expect(hasRow(rootEl, 'spampeye')).toBe(true);
-    await act(async () => buttonInRow(rowOf(rootEl, 'spampeye'), '剔除').click());
+    await act(async () => removeButton(rowOf(rootEl, 'spampeye')).click());
     expect(hasRow(rootEl, 'spampeye')).toBe(false);
     expect(refreshPageMarked).not.toHaveBeenCalled();
     expect(storageSet).not.toHaveBeenCalledWith(
@@ -137,22 +152,22 @@ describe('CleanView 剔除', () => {
     );
   });
 
-  it('全部剔除后批量拉黑按钮禁用', async () => {
+  it('全部移除后批量拉黑按钮禁用', async () => {
     const rootEl = renderCleanView(ITEMS, vi.fn().mockResolvedValue(undefined));
     await act(async () => {
-      buttonInRow(rowOf(rootEl, 'misfavored'), '剔除').click();
+      removeButton(rowOf(rootEl, 'misfavored')).click();
       await new Promise((r) => setTimeout(r, 0));
-      buttonInRow(rowOf(rootEl, 'spampeye'), '剔除').click();
+      removeButton(rowOf(rootEl, 'spampeye')).click();
       await new Promise((r) => setTimeout(r, 0));
     });
-    expect(rootEl.querySelector<HTMLButtonElement>('.primary-action')?.disabled).toBe(true);
+    expect(rootEl.querySelector<HTMLButtonElement>('.primary-button')).toBeNull();
   });
 
-  it('剔除后批量拉黑只发剩下列表中的账号', async () => {
+  it('移除后批量拉黑只发剩下列表中的账号', async () => {
     const sendToXPage = vi.fn().mockResolvedValue({ status: 'started', count: 1 });
     const rootEl = renderCleanView(ITEMS, vi.fn().mockResolvedValue(undefined), sendToXPage);
-    await act(async () => buttonInRow(rowOf(rootEl, 'spampeye'), '剔除').click());
-    const primary = rootEl.querySelector<HTMLButtonElement>('.primary-action');
+    await act(async () => removeButton(rowOf(rootEl, 'spampeye')).click());
+    const primary = rootEl.querySelector<HTMLButtonElement>('.primary-button');
     await act(async () => primary?.click());
     const msg = sendToXPage.mock.calls
       .map((call) => call[0])
@@ -163,5 +178,55 @@ describe('CleanView 剔除', () => {
           (m as { type?: string }).type === 'feedsieve:run-page-block',
       ) as { handles?: string[] } | undefined;
     expect(msg?.handles).toEqual(['misfavored']);
+  });
+});
+
+describe('CleanView 滚动位置', () => {
+  it('切走再回来回到列表原来的位置', async () => {
+    const many: PageMarkedItem[] = Array.from({ length: 40 }, (_, i) => ({
+      handle: `spam_${i}`,
+      category: 'bot_spam',
+      reason: '关键词命中',
+      snippet: '推文正文',
+    }));
+    async function mount(): Promise<{ host: HTMLDivElement; root: ReactDOM.Root }> {
+      const host = document.createElement('div');
+      host.className = 'popup-content';
+      document.body.append(host);
+      const root = ReactDOM.createRoot(host);
+      mountedRoots.push(root);
+      await act(async () => {
+        root.render(
+          React.createElement(CleanView, {
+            language: 'zh' as const,
+            notify: vi.fn(),
+            sendToXPage: vi.fn().mockResolvedValue({}),
+            pageMarked: many,
+            refreshPageMarked: vi.fn().mockResolvedValue(undefined),
+            pauseDestructive: false,
+            killSwitchActive: false,
+            communityEligible: [],
+            communityLoading: false,
+        onOpenSettings: vi.fn(),
+          }),
+        );
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      return { host, root };
+    }
+
+    const first = await mount();
+    first.host.scrollTop = 640;
+    await act(async () => {
+      first.host.dispatchEvent(new Event('scroll'));
+    });
+    // 立刻切走：此时 DOM 已经换掉、scrollTop 归零，保存要靠滚动时记下的值
+    await act(async () => first.root.unmount());
+    first.host.remove();
+
+    const second = await mount();
+    expect(second.host.scrollTop).toBe(640);
   });
 });

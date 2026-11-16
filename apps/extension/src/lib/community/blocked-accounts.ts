@@ -28,7 +28,7 @@ export interface BlockedAccount {
   ruleId?: string;
   signalIds?: string[];
   evidencePostId?: string;
-  /** 击杀时刻探活（#2）：本次拉黑伴随的 UserByScreenName 现场解析结果；缓存命中或未解析时缺省。
+  /** 拉黑时刻探活（#2）：本次拉黑伴随的 UserByScreenName 现场解析结果；缓存命中或未解析时缺省。
    * 只表达观测，不做清理决策；官方名单失效口径在服务端 account_health。 */
   liveness?: 'alive' | 'dead';
   /** 拉黑目标当时那条推文的原文（判定材料，供用户回查误拉黑 + 随票上报后台分析）。
@@ -41,7 +41,12 @@ export interface BlockedAccount {
 }
 
 export type BlockOrigin =
-  'manual-spam' | 'manual-personal' | 'single-detection' | 'page-batch' | 'community-batch';
+  | 'manual-spam'
+  | 'manual-personal'
+  | 'single-detection'
+  | 'page-batch'
+  | 'community-batch'
+  | 'ai-batch';
 
 export interface BlockedAccountEvidence {
   /** 注意：不在这里带推文原文/简介/昵称 —— evidence 会被展开进多个通道，

@@ -10,10 +10,264 @@ import {
 } from '../src/lib/community/community-store';
 import { flushContributions } from '../src/lib/community/contribute';
 import { syncKeywordPackCatalog } from '../src/lib/detection/keyword-packs';
-import { getSidePanel } from '../src/lib/platform/sidepanel';
+import { getChromeSidePanel } from '../src/lib/platform/sidepanel';
+import { openProfilePanel, profileHandleFromUrl } from '../src/lib/platform/profile-panel';
+import {
+  createSharedInsight,
+  INSIGHT_OBSERVE_MESSAGE,
+  INSIGHT_UPDATED_MESSAGE,
+} from '../src/lib/insight/shared-insight';
+import { createHotUplink } from '../src/lib/insight/hot-uplink';
+import { createRuleHitUplink, RULE_HIT_MESSAGE } from '../src/lib/community/rule-hit-uplink';
+import { createProfileSync } from '../src/lib/insight/profile-sync';
+import { isHotSort } from '../src/lib/insight/tweet-stats';
+import { createProfileCatalog, PROFILE_UPDATED_MESSAGE } from '../src/lib/insight/profile-catalog';
+import { summarizeProfile } from '../src/lib/insight/profile-summary';
+import { PANEL_VIEW_REQUEST_KEY } from '../src/lib/platform/panel-route';
+import { INSIGHT_READ_MESSAGE, INSIGHT_SEEN_MESSAGE } from '../src/lib/insight/read-tracker';
+import { getSelfHandle } from '../src/lib/community/following-allowlist';
+import { getCommunitySettings } from '../src/lib/community/community-store';
+import {
+  DEFAULT_MODULE_SETTINGS,
+  getModuleSettings,
+  subscribeModuleSettings,
+  type ModuleSettings,
+} from '../src/lib/settings/module-settings';
+import { handleAiCheckMessage } from '../src/lib/ai-check/client';
 
 export default defineBackground(() => {
   registerRuntimeDataWorker();
+
+  // 模块总开关：后台只做防御性兜底（正常路径上内容脚本已经不再发对应消息）。
+  // SW 随时可能被回收，这里在每次启动时读一次并订阅变化。
+  let modules: ModuleSettings = DEFAULT_MODULE_SETTINGS;
+  void getModuleSettings()
+    .then((value) => {
+      modules = value;
+    })
+    .catch(() => undefined);
+  subscribeModuleSettings((value) => {
+    modules = value;
+  });
+
+  // 热帖：所有 X 标签页的观测在这里合并，存在 storage.session（浏览器关闭即清空、不上传）。
+  // 有新数据时广播一次，开着的弹窗 / 侧边栏自己重新取，不需要用户手动刷新。
+  const sharedInsight = createSharedInsight({
+    storage: {
+      get: (key) => browser.storage.session.get(key),
+      set: (items) => browser.storage.session.set(items),
+    },
+    broadcast: () => {
+      void browser.runtime.sendMessage({ type: INSIGHT_UPDATED_MESSAGE }).catch(() => {
+        // 没有打开的弹窗 / 侧边栏：没人接收是正常的
+      });
+    },
+  });
+  // 主页洞察：打开过的博主主页各建一份本地帖子库（storage.local），和服务端的众包帖子库双向增量同步
+  const profileCatalog = createProfileCatalog({
+    storage: {
+      get: (keys) => browser.storage.local.get(keys),
+      set: (items) => browser.storage.local.set(items),
+      remove: (keys) => browser.storage.local.remove(keys),
+    },
+    broadcast: (handles) => {
+      void browser.runtime.sendMessage({ type: PROFILE_UPDATED_MESSAGE, handles }).catch(() => {
+        // 没有打开的弹窗 / 侧边栏
+      });
+    },
+  });
+
+  // 全站热榜上报：只用 X 已经返回的数据，直接从后台发往福滤娃服务器，不经过 x.com 页面
+  const hotUplink = createHotUplink({
+    isAllowed: async () => {
+      const settings = await getCommunitySettings();
+      return settings.autoContribute && settings.hotContribute;
+    },
+    getSelfHandle: () => getSelfHandle(),
+    velocityOf: (postId) => sharedInsight.velocityOf(postId),
+    post: (body) =>
+      fetch(`${COMMUNITY_API_BASE}/v1/observations`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        credentials: 'omit',
+        signal: AbortSignal.timeout(15_000),
+      }),
+    storage: {
+      get: (key) => browser.storage.local.get(key),
+      set: (items) => browser.storage.local.set(items),
+    },
+    stateStorage: {
+      get: (key) => browser.storage.session.get(key),
+      set: (items) => browser.storage.session.set(items),
+    },
+  });
+  // 规则命中：所有标签页的黄框命中在这里合并，按节奏匿名上报（不是票，见 rule-hit-uplink.ts）
+  const ruleHitUplink = createRuleHitUplink({
+    isAllowed: async () => {
+      const settings = await getCommunitySettings();
+      return settings.autoContribute && settings.hitContribute;
+    },
+    post: (body) =>
+      fetch(`${COMMUNITY_API_BASE}/v1/rule-hits`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        credentials: 'omit',
+        signal: AbortSignal.timeout(15_000),
+      }),
+    storage: {
+      get: (key) => browser.storage.local.get(key),
+      set: (items) => browser.storage.local.set(items),
+    },
+    stateStorage: {
+      get: (key) => browser.storage.session.get(key),
+      set: (items) => browser.storage.session.set(items),
+    },
+  });
+  // 主页洞察众包：一个人看过的博主帖子，其他人打开同一个主页直接拿到（见 profile-sync.ts）。
+  // 「仅本地运行」时不拉也不报
+  const profileSync = createProfileSync({
+    catalog: profileCatalog,
+    isAllowed: async () => (await getCommunitySettings()).autoContribute,
+    getSelfHandle: () => getSelfHandle(),
+    post: (body) =>
+      fetch(`${COMMUNITY_API_BASE}/v1/profile-observations`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        credentials: 'omit',
+        signal: AbortSignal.timeout(15_000),
+      }),
+    fetchProfile: (handle, cursor) =>
+      fetch(
+        `${COMMUNITY_API_BASE}/v1/profiles/${encodeURIComponent(handle)}${
+          cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+        }`,
+        { credentials: 'omit', signal: AbortSignal.timeout(15_000) },
+      ),
+    storage: {
+      get: (key) => browser.storage.local.get(key),
+      set: (items) => browser.storage.local.set(items),
+    },
+    stateStorage: {
+      get: (key) => browser.storage.session.get(key),
+      set: (items) => browser.storage.session.set(items),
+    },
+  });
+  browser.runtime.onMessage.addListener((message: unknown, sender) => {
+    // 只接收本扩展自己的内容脚本和页面
+    if (sender.id !== browser.runtime.id) return undefined;
+    const msg = message as { type?: string; observations?: unknown; sort?: unknown } | null;
+    if (msg?.type === RULE_HIT_MESSAGE) {
+      if (!modules.filter) return Promise.resolve({ ok: true });
+      return ruleHitUplink.observe((msg as { hits?: unknown }).hits).then(() => ({ ok: true }));
+    }
+    if (msg?.type === INSIGHT_OBSERVE_MESSAGE) {
+      // 热帖 / 主页都关掉时不再收观测；只剩其中一个时只跑对应的链路
+      if (!modules.hot && !modules.profile) return Promise.resolve({ recorded: 0 });
+      const recorded = modules.hot
+        ? sharedInsight.ingest(msg.observations)
+        : Promise.resolve(0);
+      return recorded.then((count) => {
+        if (modules.hot) {
+          void hotUplink.observe(msg.observations).catch(() => undefined);
+          // 用户在刷 X：顺手看看规则命中是不是到了该上报的时候
+          if (modules.filter) void ruleHitUplink.observe([]).catch(() => undefined);
+        }
+        if (modules.profile) {
+          // 先进本机帖子库（打开主页时在这里建档），再拉服务端的、报新的
+          void profileCatalog
+            .ingest(msg.observations)
+            .then(() => profileSync.observe(msg.observations))
+            .catch(() => undefined);
+        }
+        return { recorded: count };
+      });
+    }
+    const handle = (message as { handle?: unknown }).handle;
+    if (msg?.type === 'feedsieve:profile-get') {
+      if (!modules.profile || typeof handle !== 'string') return null;
+      // 侧边栏打开时也拉一次（10 分钟内拉过的不重复拉），拉到后经 PROFILE_UPDATED 刷新
+      void profileSync.pull(handle.toLowerCase());
+      return profileCatalog.get(handle.toLowerCase());
+    }
+    if (msg?.type === 'feedsieve:profile-summary') {
+      if (!modules.profile || typeof handle !== 'string') return null;
+      return profileCatalog
+        .get(handle.toLowerCase())
+        .then((entry) => (entry ? summarizeProfile(entry, Date.now()) : null));
+    }
+    if (msg?.type === 'feedsieve:profile-clear') {
+      return profileCatalog.clear().then(() => ({ cleared: true }));
+    }
+    if (msg?.type === 'feedsieve:profile-count') {
+      return profileCatalog.size();
+    }
+    if (msg?.type === 'feedsieve:open-profile-panel') {
+      if (!modules.profile) return { opened: false, via: null };
+      // 主页资料卡下的那一行被点击：打开侧边栏并落到「主页」视图。
+      // 先发起写入、不等它：await 之后再 open 会丢掉用户手势。侧边栏启动时读它，已开着的侧边栏监听变化
+      void browser.storage.session
+        .set({ [PANEL_VIEW_REQUEST_KEY]: { view: 'profile', at: Date.now() } })
+        .catch(() => undefined);
+      // sidePanel.open 要求用户手势；内容脚本转发过来时部分浏览器不认。
+      // 打不开就退回独立小窗口；手机上连 windows API 都没有，最后退回标签页，
+      // 不能静默失败（见 profile-panel.ts）
+      const handle = profileHandleFromUrl(sender.tab?.url);
+      return openProfilePanel({
+        sidePanel: getChromeSidePanel(),
+        windowId: sender.tab?.windowId,
+        popupUrl: browser.runtime.getURL(
+          `/popup.html?view=profile&panel=1${handle ? `&handle=${encodeURIComponent(handle)}` : ''}`,
+        ),
+        openWindow: (url) =>
+          browser.windows.create({ url, type: 'popup', width: 420, height: 680 }),
+        openTab: (url) => browser.tabs.create({ url }),
+      });
+    }
+    if (msg?.type === 'feedsieve:open-tab') {
+      // 内容脚本请求新开标签（例如 AI 味检测去回复页，不跳走当前页）。
+      // 只允许 x.com 的回复页，避免变成任意 URL 跳板。
+      const url = (msg as { url?: unknown }).url;
+      if (
+        typeof url !== 'string' ||
+        !/^https:\/\/x\.com\/[a-z0-9_]+\/with_replies(?:\?[^#]*)?$/i.test(url)
+      ) {
+        return Promise.resolve({ ok: false });
+      }
+      return browser.tabs.create({ url, active: true }).then(
+        () => ({ ok: true }),
+        () => ({ ok: false }),
+      );
+    }
+    if (msg?.type === 'feedsieve:hot-posts') {
+      if (!modules.hot) return Promise.resolve([]);
+      return sharedInsight.hotList(isHotSort(msg.sort) ? msg.sort : 'heat');
+    }
+    if (msg?.type === 'feedsieve:hot-brief') {
+      if (!modules.hot) return Promise.resolve(null);
+      return sharedInsight.brief();
+    }
+    if (msg?.type === INSIGHT_READ_MESSAGE) {
+      if (!modules.hot) return Promise.resolve({ added: 0 });
+      return sharedInsight
+        .markRead((message as { postIds?: unknown }).postIds)
+        .then((added) => ({ added }));
+    }
+    if (msg?.type === INSIGHT_SEEN_MESSAGE) {
+      if (!modules.hot) return Promise.resolve({ recorded: 0 });
+      return sharedInsight
+        .markSeen((message as { posts?: unknown }).posts)
+        .then((recorded) => ({ recorded }));
+    }
+    if (msg?.type === 'feedsieve:hot-read-ids') {
+      if (!modules.hot) return Promise.resolve([]);
+      return sharedInsight.readIds();
+    }
+    // AI 味检测：判定 / 投票转发到福滤娃服务器（见 ai-check/client.ts）
+    return handleAiCheckMessage(message);
+  });
   // MV3 service worker 随时可能被回收：这里只做事件入口。
   // 名单/词库同步不做定时 alarm：数据只在 X 页面打开时才被消费，
   // content script 启动、每 15 分钟、回到前台与 popup 打开都会触发同步，
@@ -86,7 +340,7 @@ export default defineBackground(() => {
     void flushContributions();
     void flushTrainingSamples();
     // 默认点击图标打开浮层（popup），支持用户在浮层内一键切换为侧边栏
-    const sidePanel = getSidePanel();
+    const sidePanel = getChromeSidePanel();
     if (sidePanel?.setPanelBehavior) {
       sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
     }

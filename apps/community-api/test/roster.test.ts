@@ -2,7 +2,8 @@ import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
 import { generateSnapshot } from '../src/snapshot';
-import { MAINTAINER_WHITELIST_UPSERT_SQL } from '../src/maintainer-whitelist';
+import { getDb } from '../src/db/client';
+import { upsertMaintainerWhitelist } from '../src/maintainer-whitelist';
 
 const ORIGIN = 'https://api.example.com';
 
@@ -74,24 +75,24 @@ describe('GET /v1/roster/latest（官网名单公示）', () => {
     });
     // 社区抢救条目（verified）：先有一次误标票建行，再凑抢救净票 >= 3
     await report('roster-1000-4000-8000-bbbbbbbbbbbb', 'rescued_user');
-    for (let i = 1; i <= 4; i++) await rescue(`roster-100${i}-4000-8000-bbbbbbbbbbbb`, 'rescued_user');
+    for (let i = 1; i <= 4; i++)
+      await rescue(`roster-100${i}-4000-8000-bbbbbbbbbbbb`, 'rescued_user');
     // 推荐白名单（博主宣言）
-    await env.DB.prepare(MAINTAINER_WHITELIST_UPSERT_SQL)
-      .bind('good_user', null, '好用户', 'https://pbs.twimg.com/profile_images/1/ok_400x400.jpg', '本人宣言：不刷屏不引流', Math.floor(Date.now() / 1000))
-      .run();
-
-    // 每次生成独立测试密钥，使签名徽章验证可在干净 CI 环境运行。
-    const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
-    const privateKey = new Uint8Array(await crypto.subtle.exportKey('pkcs8', keys.privateKey));
-    await generateSnapshot(
-      {
-        ...env,
-        SIGNING_PRIVATE_KEY: btoa(String.fromCharCode(...privateKey)),
-        SIGNING_KEY_ID: 'roster-test',
-      },
-      0,
-      { bypassDailyOnce: true },
+    await upsertMaintainerWhitelist(
+      getDb(env),
+      [
+        {
+          handle: 'good_user',
+          xUserId: null,
+          name: '好用户',
+          avatarUrl: 'https://pbs.twimg.com/profile_images/1/ok_400x400.jpg',
+          note: '本人宣言：不刷屏不引流',
+        },
+      ],
+      Math.floor(Date.now() / 1000),
     );
+
+    await generateSnapshot(env, 0, { bypassDailyOnce: true });
 
     const res = await worker.fetch(new Request(`${ORIGIN}/v1/roster/latest`), env);
     expect(res.status).toBe(200);
@@ -100,18 +101,18 @@ describe('GET /v1/roster/latest（官网名单公示）', () => {
 
     expect(roster.snapshot_version).toMatch(/^\d{4}\.\d{2}\.\d{2}\.\d{1,4}$/);
     expect(roster.generated_at).toBeTruthy();
-    // 公示徽章如实展示该快照的签名状态。
-    expect(roster.signed).toBe(true);
+    // 本机 .dev.vars 可带测试签名密钥，CI 按设计不持有发布私钥；公示值必须
+    // 如实反映当前快照是否具备签名，不能把本机密钥误当成测试前置条件。
+    expect(roster.signed).toBe(Boolean(env.SIGNING_PRIVATE_KEY && env.SIGNING_KEY_ID));
 
     const spam = roster.blacklist.entries.find((entry) => entry.handle === 'spam_user');
     expect(spam).toMatchObject({ net_votes: 5, sources: ['community'] });
     expect(roster.blacklist.count).toBeGreaterThanOrEqual(1);
 
     // 证据明细随快照进公示面
-    const detail = roster.blacklist.entries.find((entry) => entry.handle === 'spam_user') as unknown as Record<
-      string,
-      unknown
-    >;
+    const detail = roster.blacklist.entries.find(
+      (entry) => entry.handle === 'spam_user',
+    ) as unknown as Record<string, unknown>;
     expect(detail.evidence_post_ids).toEqual(['18000000000000000']);
 
     const maintained = roster.whitelist.maintained.find((entry) => entry.handle === 'good_user');
@@ -120,14 +121,18 @@ describe('GET /v1/roster/latest（官网名单公示）', () => {
       name: '好用户',
       avatar_url: 'https://pbs.twimg.com/profile_images/1/ok_400x400.jpg',
     });
-    expect(roster.whitelist.verified.find((entry) => entry.handle === 'rescued_user')).toMatchObject({
+    expect(
+      roster.whitelist.verified.find((entry) => entry.handle === 'rescued_user'),
+    ).toMatchObject({
       net_votes: 3,
     });
   });
 
   it('公示面公开证据明细（evidence_post_ids / domains / aliases），指纹永不外泄', async () => {
     const res = await worker.fetch(new Request(`${ORIGIN}/v1/roster/latest`), env);
-    const roster = (await res.json()) as RosterResponse & { blacklist: { entries: Record<string, unknown>[] } };
+    const roster = (await res.json()) as RosterResponse & {
+      blacklist: { entries: Record<string, unknown>[] };
+    };
     for (const entry of roster.blacklist.entries) {
       expect(entry.fingerprints).toBeUndefined();
     }

@@ -10,11 +10,7 @@
  * 升级后 labelSignature 变化，下次同步自动重传，服务端 reason 原地更新。
  */
 import { parseSnapshotBody } from '@feedsieve/community-lists';
-import {
-  getBlockedAccounts,
-  mutateBlockedAccounts,
-  type BlockedAccount,
-} from './blocked-accounts';
+import { getBlockedAccounts, mutateBlockedAccounts, type BlockedAccount } from './blocked-accounts';
 import { getCommunitySnapshot } from './community-store';
 
 export interface SpamEvidenceSets {

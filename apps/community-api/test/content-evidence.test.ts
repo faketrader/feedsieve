@@ -2,6 +2,9 @@ import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
 import { generateSnapshot, SNAPSHOT_PACK } from '../src/snapshot';
+import { sql } from 'drizzle-orm';
+import { getDb } from '../src/db/client';
+import { spreadLatestReport } from './vote-days';
 
 const ORIGIN = 'https://api.example.com';
 
@@ -25,6 +28,7 @@ async function report(
     env,
   );
   expect(res.status).toBe(200);
+  await spreadLatestReport();
   const body = (await res.json()) as {
     results: { status: string; error?: string }[];
   };
@@ -32,10 +36,7 @@ async function report(
 }
 
 /** 3 个独立安装上报同一 handle → 自动升 candidate，进快照 */
-async function promoteToCandidate(
-  handle: string,
-  extra: Record<string, unknown> = {},
-) {
+async function promoteToCandidate(handle: string, extra: Record<string, unknown> = {}) {
   for (let i = 1; i <= 3; i++) {
     await report(`ev${i}-${handle}-install-0001-ffffff`, handle, extra);
   }
@@ -54,9 +55,7 @@ async function publishAndGetEntry(handle: string): Promise<Entry | undefined> {
     await worker.fetch(new Request(`${ORIGIN}/v1/snapshots/latest`), env)
   ).json()) as { snapshot_version: string };
   const file = await worker.fetch(
-    new Request(
-      `${ORIGIN}/v1/snapshots/${latest.snapshot_version}/${SNAPSHOT_PACK}`,
-    ),
+    new Request(`${ORIGIN}/v1/snapshots/${latest.snapshot_version}/${SNAPSHOT_PACK}`),
     env,
   );
   const body = (await file.json()) as { entries: Entry[] };
@@ -75,58 +74,35 @@ describe('report content evidence storage (v0.4)', () => {
         'sub.trusted.example', // 合法保留
       ],
     });
-    const row = await env.DB.prepare(
-      'SELECT content_fingerprint, link_domains FROM reports WHERE handle = ?1',
-    )
-      .bind('store_user')
-      .first<{ content_fingerprint: string; link_domains: string }>();
+    const [row] = await getDb(env).execute<{ content_fingerprint: string; link_domains: string }>(
+      sql`SELECT content_fingerprint, link_domains FROM reports WHERE handle = ${'store_user'}`,
+    );
     expect(row?.content_fingerprint).toBe(FP_A);
-    expect(JSON.parse(row?.link_domains ?? '[]')).toEqual([
-      'ok.example',
-      'sub.trusted.example',
-    ]);
+    expect(JSON.parse(row?.link_domains ?? '[]')).toEqual(['ok.example', 'sub.trusted.example']);
   });
 
   it('rejects malformed fingerprint payloads without losing the vote', async () => {
-    const badFp = await report(
-      'st1-badfp-0000-4000-8000-000000000002',
-      'bad_fp_user',
-      { content_fingerprint: 'NOT-A-FP' },
-    );
+    const badFp = await report('st1-badfp-0000-4000-8000-000000000002', 'bad_fp_user', {
+      content_fingerprint: 'NOT-A-FP',
+    });
     expect(badFp.status).toBe('rejected');
     expect(badFp.error).toBe('invalid_content_fingerprint');
 
-    const badDomains = await report(
-      'st1-baddm-0000-4000-8000-000000000003',
-      'bad_dm_user',
-      { link_domains: 'scam.example' },
-    );
+    const badDomains = await report('st1-baddm-0000-4000-8000-000000000003', 'bad_dm_user', {
+      link_domains: 'scam.example',
+    });
     expect(badDomains.status).toBe('rejected');
     expect(badDomains.error).toBe('invalid_link_domains');
 
-    const tooMany = await report(
-      'st1-many-0000-4000-8000-000000000004',
-      'many_dm_user',
-      {
-        link_domains: [
-          'a.example',
-          'b.example',
-          'c.example',
-          'd.example',
-          'e.example',
-          'f.example',
-        ],
-      },
-    );
+    const tooMany = await report('st1-many-0000-4000-8000-000000000004', 'many_dm_user', {
+      link_domains: ['a.example', 'b.example', 'c.example', 'd.example', 'e.example', 'f.example'],
+    });
     expect(tooMany.status).toBe('rejected');
     expect(tooMany.error).toBe('invalid_link_domains');
   });
 
   it('accepts reports without evidence fields (older clients)', async () => {
-    const result = await report(
-      'st1-plain-0000-4000-8000-000000000005',
-      'plain_user',
-    );
+    const result = await report('st1-plain-0000-4000-8000-000000000005', 'plain_user');
     expect(result.status).toBe('recorded');
   });
 });
@@ -185,5 +161,5 @@ describe('snapshot content evidence aggregation (v0.4)', () => {
     expect(entry?.fingerprints).toHaveLength(5);
     expect(entry?.fingerprints).toEqual([...(entry?.fingerprints ?? [])].sort());
     expect(entry?.domains).toBeUndefined();
-  }, 15_000);
+  });
 });

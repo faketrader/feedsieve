@@ -10,7 +10,6 @@ const TABS = [
   { key: 'whitelist', label: '白名单', to: '/lists/whitelist' },
   { key: 'rescue', label: '抢救', to: '/lists/rescue' },
   { key: 'keywords', label: '词库', to: '/lists/keywords' },
-  { key: 'ranked', label: '排位赛', to: '/lists/ranked' },
 ] as const;
 
 export function ListsTabs() {
@@ -47,26 +46,26 @@ export function ListPageHeader({
 }: {
   title: string;
   meta?: string;
-  /** 公示分区子导航（左对齐独立行，五页恒定不动） */
+  /** 可选子导航（全站已统一至顶栏单层导航，此项默认留空） */
   tabs?: ReactNode;
   /** 页面专属工具（右侧，宽度可变）：HelpIcon、申请入册外链等 */
   aside?: ReactNode;
 }) {
   return (
-    <>
-      <div className="flex flex-wrap items-end justify-between gap-3">
+    <div className="border-b border-line/60 pb-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">{title}</h1>
+          <h1 className="text-2xl font-bold tracking-tight text-ink">{title}</h1>
           {meta && <p className="mt-1 text-sm text-mist">{meta}</p>}
         </div>
+        {aside != null && <div className="flex flex-wrap items-center gap-3">{aside}</div>}
       </div>
       {tabs != null && (
-        <div className="mt-5 flex flex-wrap items-center gap-3">
+        <div className="mt-4 flex flex-wrap items-center gap-3">
           {tabs}
-          {aside != null && <div className="ml-auto flex flex-wrap items-center gap-3">{aside}</div>}
         </div>
       )}
-    </>
+    </div>
   );
 }
 

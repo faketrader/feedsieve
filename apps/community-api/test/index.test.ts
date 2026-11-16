@@ -1,6 +1,9 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+import { eq } from 'drizzle-orm';
 import worker from '../src/index';
+import { getDb } from '../src/db/client';
+import { accounts } from '../src/db/schema';
 
 const ORIGIN = 'https://api.example.com';
 
@@ -28,23 +31,27 @@ describe('unknown routes', () => {
   });
 });
 
-describe('D1 storage', () => {
+describe('PostgreSQL storage', () => {
   it('migrations applied — accounts table roundtrip', async () => {
     const now = Math.floor(Date.now() / 1000);
-    await env.DB.prepare(
-      `INSERT INTO accounts
-         (handle, x_user_id, category, status, report_count, first_report_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
-       ON CONFLICT(handle) DO NOTHING`,
-    )
-      .bind('roundtrip_user', '123', 'bot_spam', 'candidate', 1, now)
-      .run();
+    const db = getDb(env);
+    await db
+      .insert(accounts)
+      .values({
+        handle: 'roundtrip_user',
+        xUserId: '123',
+        category: 'bot_spam',
+        status: 'candidate',
+        reportCount: 1,
+        firstReportAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoNothing();
 
-    const row = await env.DB.prepare(
-      'SELECT handle, status FROM accounts WHERE handle = ?1',
-    )
-      .bind('roundtrip_user')
-      .first<{ handle: string; status: string }>();
+    const [row] = await db
+      .select({ handle: accounts.handle, status: accounts.status })
+      .from(accounts)
+      .where(eq(accounts.handle, 'roundtrip_user'));
     expect(row?.handle).toBe('roundtrip_user');
     expect(row?.status).toBe('candidate');
   });

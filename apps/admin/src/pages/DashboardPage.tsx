@@ -81,14 +81,14 @@ export function DashboardPage() {
     {
       label: '社区名单',
       value: dashboard.data?.community_listed ?? null,
-      hint: '社区净票 ≥3，已进入公开名单',
+      hint: '当前公开名单里的社区账号（政策 v4：净票 ≥3 加独立性，或 2 票加规则命中佐证；已注销不算）',
       icon: ShieldCheck,
       color: 'amber',
     },
     {
       label: '社区候选',
       value: dashboard.data?.community_candidates ?? null,
-      hint: '未达 3 票门槛的候选账号',
+      hint: '有票但不在公开名单里的账号',
       icon: UserSearch,
       color: 'blue',
     },

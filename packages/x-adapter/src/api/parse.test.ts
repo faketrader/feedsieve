@@ -96,6 +96,78 @@ describe('parseXApiResponse', () => {
     expect(parsed.tweets[1]?.author.handle).toBe('replier01');
   });
 
+  it('reads the avatar and the first media thumbnail', () => {
+    const body = {
+      data: {
+        home: {
+          home_timeline_urt: {
+            instructions: [
+              {
+                entries: [
+                  entry(
+                    'tweet-1',
+                    tweetResult({
+                      legacy: {
+                        full_text: 'look',
+                        extended_entities: {
+                          media: [
+                            { type: 'photo', media_url_https: 'https://pbs.twimg.com/media/A.jpg' },
+                          ],
+                        },
+                      },
+                      core: {
+                        user_results: {
+                          result: {
+                            __typename: 'User',
+                            rest_id: '1',
+                            core: { screen_name: 'alice', name: 'Alice' },
+                            avatar: {
+                              image_url: 'https://pbs.twimg.com/profile_images/1/a_normal.jpg',
+                            },
+                          },
+                        },
+                      },
+                    }),
+                  ),
+                ],
+              },
+            ],
+          },
+        },
+      },
+    };
+    const tweet = parseXApiResponse('https://x.com/i/api/graphql/xxx/HomeTimeline', body).tweets[0];
+    expect(tweet?.author.avatarUrl).toBe('https://pbs.twimg.com/profile_images/1/a_normal.jpg');
+    expect(tweet?.mediaUrl).toBe('https://pbs.twimg.com/media/A.jpg');
+    expect(tweet?.media).toBe('photo');
+  });
+
+  it('uses the full note_tweet text for long posts', () => {
+    const body = {
+      data: {
+        home: {
+          home_timeline_urt: {
+            instructions: [
+              {
+                entries: [
+                  entry(
+                    'tweet-1',
+                    tweetResult({
+                      legacy: { full_text: '前 280 字… https://t.co/abc', lang: 'zh' },
+                      note_tweet: { note_tweet_results: { result: { text: '完整的长帖正文' } } },
+                    }),
+                  ),
+                ],
+              },
+            ],
+          },
+        },
+      },
+    };
+    const parsed = parseXApiResponse('https://x.com/i/api/graphql/xxx/HomeTimeline', body);
+    expect(parsed.tweets[0]?.text).toBe('完整的长帖正文');
+  });
+
   it('unwraps retweets and TweetWithVisibilityResults', () => {
     const body = {
       data: {

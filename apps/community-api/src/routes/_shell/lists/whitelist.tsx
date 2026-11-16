@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { getWhitelistData } from '@/site/data.functions';
 import { pageHead } from '@/site/seo';
-import { ListsTabs, ListPageHeader, HelpIcon } from '@/site/pages/lists/lists-common';
+import { ListPageHeader, HelpIcon } from '@/site/pages/lists/lists-common';
 import { WhitelistPanel } from '@/site/pages/lists/WhitelistPanel';
 import { WHITELIST_ISSUE_URL } from '@/site/site';
 
@@ -26,9 +26,8 @@ function WhitelistRoute() {
   return (
     <main className="mx-auto max-w-5xl px-[clamp(18px,2.2vw,34px)] pb-16 pt-8">
       <ListPageHeader
-        title="白名单"
+        title="推荐白名单"
         meta={roster ? `快照 ${roster.snapshot_version}` : undefined}
-        tabs={<ListsTabs />}
         aside={
           <>
             <a

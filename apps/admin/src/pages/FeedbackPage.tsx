@@ -1,4 +1,5 @@
 import { SamplesPanel } from './SamplesPanel';
+import { RuleFeedbackPanel } from './RuleFeedbackPanel';
 import { useQuery } from '@tanstack/react-query';
 import {
   Table,
@@ -17,6 +18,7 @@ export function FeedbackPage() {
     <section>
       <PageHeader title="用户反馈" />
       <SamplesPanel />
+      <RuleFeedbackPanel />
       {feedback.isPending ? (
         <Loading />
       ) : feedback.isError ? (

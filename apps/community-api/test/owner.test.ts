@@ -2,6 +2,8 @@ import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
 import { deriveStatus } from '../src/rating';
+import { sql, type SQL } from 'drizzle-orm';
+import { getDb } from '../src/db/client';
 
 const ORIGIN = 'https://api.example.com';
 const LEGACY_OWNER_INSTALL = 'owner-test-install-0001';
@@ -33,17 +35,20 @@ async function rescue(installationId: string, handle: string) {
   expect(response.status).toBe(200);
 }
 
+async function first<T extends Record<string, unknown>>(query: SQL): Promise<T | null> {
+  const [row] = await getDb(env).execute<T>(query);
+  return (row ?? null) as T | null;
+}
+
 async function account(handle: string) {
-  return env.DB.prepare(
-    'SELECT status, report_count, rescue_count, owner_votes FROM accounts WHERE handle = ?1',
-  )
-    .bind(handle)
-    .first<{
-      status: string;
-      report_count: number;
-      rescue_count: number;
-      owner_votes: number;
-    }>();
+  return first<{
+    status: string;
+    report_count: number;
+    rescue_count: number;
+    owner_votes: number;
+  }>(
+    sql`SELECT status, report_count, rescue_count, owner_votes FROM accounts WHERE handle = ${handle}`,
+  );
 }
 
 describe('没有隐藏的 owner 票权', () => {

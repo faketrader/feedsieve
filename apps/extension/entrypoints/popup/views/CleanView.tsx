@@ -1,6 +1,7 @@
 import { createTrainingSample } from '../../../src/lib/community/training-samples';
 import { syncLocalLabels } from '../../../src/lib/community/contribute';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CommunityEntry } from '@feedsieve/community-lists';
 import {
   blockQueueProgress,
   getPersistentBlockQueue,
@@ -17,7 +18,18 @@ import {
 } from '../../../src/lib/queue/block-safety';
 import { addAllowlist } from '../../../src/lib/community/allowlist';
 import { categoryLabel, UI_COPY, type UiLanguage } from '../../../src/lib/platform/i18n';
-import { AppIcon, FAILURE_LABELS, HelpIcon, type PageMarkedItem } from './shared';
+import {
+  AppIcon,
+  EmptyState,
+  FAILURE_LABELS,
+  HelpIcon,
+  OfficialLinkIcon,
+  SkeletonList,
+  TipText,
+  useArmedConfirm,
+  type PageMarkedItem,
+} from './shared';
+import { useListPosition } from './use-list-position';
 import QueuePanel from './QueuePanel';
 
 interface PageBlockResult {
@@ -42,6 +54,32 @@ interface CleanViewProps {
   pauseDestructive: boolean;
   killSwitchActive: boolean;
   killSwitchReason?: string;
+  /** 社区黑名单里还没被拉黑、也不在白名单 / 关注里的账号，按净票数排好序 */
+  communityEligible: CommunityEntry[];
+  communityLoading: boolean;
+  onOpenSettings: () => void;
+}
+
+function FailedList({
+  items,
+  language,
+}: {
+  items: Array<{ handle: string; code?: string }>;
+  language: UiLanguage;
+}) {
+  const t = UI_COPY[language];
+  if (items.length === 0) return null;
+  // 失败明细进滚动容器，长失败串不把主操作顶出可视区
+  return (
+    <ul className="failed-list" role="status">
+      {items.map((item) => (
+        <li key={item.handle}>
+          <span>@{item.handle}</span>
+          <span>{FAILURE_LABELS[language][item.code ?? ''] ?? item.code ?? t.unknown}</span>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export default function CleanView({
@@ -53,25 +91,30 @@ export default function CleanView({
   pauseDestructive,
   killSwitchActive,
   killSwitchReason,
+  communityEligible,
+  communityLoading,
+  onOpenSettings,
 }: CleanViewProps) {
   const t = UI_COPY[language];
   const [running, setRunning] = useState(false);
+  /** 「全部拉黑」是唯一一次点击影响上百个账号的操作，要求二次确认。 */
+  const { isArmed, arm, reset } = useArmedConfirm();
   const [blockResult, setBlockResult] = useState<PageBlockResult | null>(null);
   const [operatingHandles, setOperatingHandles] = useState<Set<string>>(new Set());
   const [refreshing, setRefreshing] = useState(false);
   const [queue, setQueue] = useState<PersistentBlockQueueState | null>(null);
   /**
-   * 行勾选 = 只控制是否参与本次批量拉黑（行本身保留在列表里）；
-   * 「剔除」按钮 = 本会话内把整行从清单移除（dismissedHandles 跨刷新保留，
-   * 直到刷新后重新扫描出新的命中）。
+   * 勾选只决定是否参与这次批量拉黑（行保留）；
+   * 「移除」把整行移出本次清单（直到重新扫描出新的命中）。
    */
   const [deselectedHandles, setDeselectedHandles] = useState<Set<string>>(() => new Set());
   const [dismissedHandles, setDismissedHandles] = useState<Set<string>>(() => new Set());
-  /** 追踪上一个队列状态：page-batch 收尾时据此判断是否该刷新页面黄框。 */
+  /** 上一个队列状态：page-batch 收尾时据此刷新页面黄框。 */
   const pageBatchQueueRef = useRef<PersistentBlockQueueState | null>(null);
-  // 安全额度条：滚动 24h 已用数（账本事件驱动更新，渲染期不调 Date.now）
+  // 安全额度：滚动 24h 已用数（账本事件驱动更新，渲染期不调 Date.now）
   const [safety, setSafety] = useState<SafetyLedger | null>(null);
   const [safetyUsed, setSafetyUsed] = useState(0);
+  const rootRef = useRef<HTMLDivElement | null>(null);
 
   /** 瞬时成功反馈 4 秒后自动消失，遵守 AGENTS 约定 */
   useEffect(() => {
@@ -81,9 +124,8 @@ export default function CleanView({
   }, [blockResult]);
 
   /**
-   * 队列状态回调：page-batch 批量拉黑收尾（completed/cancelled）时，
-   * 页面黄框已被逐个移除，重新拉一次让「一键拉黑」按钮随真实剩余禁用，
-   * 而不是停留在这个会话开始时的旧计数。
+   * page-batch 批量拉黑收尾（completed/cancelled）时，页面黄框已被逐个移除，
+   * 重新拉一次让主按钮随真实剩余禁用。
    */
   const handleQueueChange = useCallback(
     (next: PersistentBlockQueueState | null): void => {
@@ -122,32 +164,34 @@ export default function CleanView({
 
   const pageCount = pageMarked?.length ?? null;
 
-  const displayedItems = useMemo(() => {
-    if (!pageMarked) return [];
-    return pageMarked.filter((item) => !dismissedHandles.has(item.handle));
-  }, [pageMarked, dismissedHandles]);
-
-  const pendingItems = useMemo(() => {
-    return displayedItems.filter((item) => !deselectedHandles.has(item.handle));
-  }, [displayedItems, deselectedHandles]);
-
+  const displayedItems = useMemo(
+    () => (pageMarked ?? []).filter((item) => !dismissedHandles.has(item.handle)),
+    [pageMarked, dismissedHandles],
+  );
+  const pendingItems = useMemo(
+    () => displayedItems.filter((item) => !deselectedHandles.has(item.handle)),
+    [displayedItems, deselectedHandles],
+  );
   const pendingCount = pendingItems.length;
-  const deselectedCount = displayedItems.length - pendingCount;
+
+  // 切走再回来：回到上次看的位置
+  useListPosition({
+    storageKey: 'cleanPositionV1',
+    pageKey: 'clean',
+    rootRef,
+    ready: displayedItems.length > 0,
+  });
 
   function toggleSelect(handle: string): void {
     setDeselectedHandles((prev) => {
       const next = new Set(prev);
-      if (next.has(handle)) {
-        next.delete(handle);
-      } else {
-        next.add(handle);
-      }
+      if (next.has(handle)) next.delete(handle);
+      else next.add(handle);
       return next;
     });
   }
 
-  /** 「剔除」：整行移出清单；同时清掉勾选态，防止重建后残留。 */
-  function dismissItem(handle: string): void {
+  function forget(handle: string): void {
     setDismissedHandles((prev) => new Set(prev).add(handle));
     setDeselectedHandles((prev) => {
       const next = new Set(prev);
@@ -158,11 +202,9 @@ export default function CleanView({
 
   function toggleSelectAll(): void {
     if (displayedItems.length === 0) return;
-    if (deselectedHandles.size > 0) {
-      setDeselectedHandles(new Set());
-    } else {
-      setDeselectedHandles(new Set(displayedItems.map((item) => item.handle)));
-    }
+    setDeselectedHandles(
+      deselectedHandles.size > 0 ? new Set() : new Set(displayedItems.map((item) => item.handle)),
+    );
   }
 
   async function handleRefresh(): Promise<void> {
@@ -180,33 +222,49 @@ export default function CleanView({
     notify(null);
     setBlockResult(null);
     try {
-      const handles = pendingItems.map((item) => item.handle);
       const result = (await sendToXPage({
         type: 'feedsieve:run-page-block',
-        handles,
-      })) as {
-        status?: string;
-        id?: string;
-        count?: number;
-        error?: string;
-      };
+        handles: pendingItems.map((item) => item.handle),
+      })) as { status?: string; count?: number; error?: string };
       if (result?.status === 'error' && result.error === 'kill_switch') {
         notify(t.killSwitchActive(killSwitchReason));
       } else if (result?.status === 'started') {
-        setBlockResult(null);
         setQueue(await getPersistentBlockQueue());
-        // 队列启动的即时反馈由下方的进度面板承担，不做额外瞬时提示
-        // 全部被过滤（已拉黑/白名单/关注，无实际可拉黑对象）时立即刷新，
-        // 「一键拉黑」按钮即刻回到禁用态，而不是停留在这个会话的旧计数。
-        if ((result.count ?? 0) === 0) {
-          await refreshPageMarked();
-        }
-      } else if (Array.isArray((result as PageBlockResult)?.blocked)) {
-        setBlockResult(result as PageBlockResult);
+        // 全部被过滤（已拉黑/白名单/关注）时立即刷新，主按钮即刻回到禁用态
+        if ((result.count ?? 0) === 0) await refreshPageMarked();
+      } else if (Array.isArray((result as unknown as PageBlockResult)?.blocked)) {
+        const done = result as unknown as PageBlockResult;
+        setBlockResult(done);
+        // 和「误标」「词库」等操作一致：结果走弹窗顶层的瞬时吐司，列表底部不再留一行常驻文字
+        notify(
+          done.failed.length > 0
+            ? `${t.blockedResult(done.blocked.length)} · ${t.failedResult(done.failed.length)}`
+            : t.blockedResult(done.blocked.length),
+        );
         await refreshPageMarked();
       } else {
         throw new Error('page_queue_not_started');
       }
+    } catch {
+      notify(t.openXNotice);
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  async function startCommunityQueue(): Promise<void> {
+    if (communityEligible.length === 0) return;
+    setRunning(true);
+    notify(null);
+    try {
+      await sendToXPage({
+        type: 'feedsieve:community-block-start',
+        items: communityEligible.map((entry) => ({
+          handle: entry.handle,
+          ...(entry.x_user_id ? { xUserId: entry.x_user_id } : {}),
+          category: entry.category,
+        })),
+      });
     } catch {
       notify(t.openXNotice);
     } finally {
@@ -236,13 +294,8 @@ export default function CleanView({
       );
       void syncLocalLabels();
       notify(t.allowlistAdded(item.handle));
-      // 本地立即移除，不等 content script 储库回调链路广播回来的刷新
-      setDismissedHandles((prev) => new Set(prev).add(item.handle));
-      setDeselectedHandles((prev) => {
-        const next = new Set(prev);
-        next.delete(item.handle);
-        return next;
-      });
+      // 本地立即移除，不等 content script 广播回来的刷新
+      forget(item.handle);
       await refreshPageMarked();
     } catch {
       notify(t.openXNotice);
@@ -265,13 +318,15 @@ export default function CleanView({
 
   const queueSummary = blockQueueProgress(queue);
   const queueDone = queueSummary.success + queueSummary.failed;
-  const queueActive =
-    queue && queueSummary.total > 0 && (queue.status === 'running' || queue.status === 'paused');
-  // 页面批量收尾后的失败项：失败账号仍留在黄框清单里，原因如实展示在
-  // 「当前页面」卡片（账号已消失 vs 可重试的解析失败），避免无声的死循环。
-  const pageQueueFailedTasks =
-    queue && queue.source === 'page-batch' && !queueActive
-      ? queue.tasks.filter((task) => task.status === 'failed')
+  const queueActive = Boolean(
+    queue && queueSummary.total > 0 && (queue.status === 'running' || queue.status === 'paused'),
+  );
+  // 队列收尾后的失败项留在触发它的区块里，原因如实展示，避免无声的死循环
+  const failedTasks = (source: PersistentBlockQueueState['source']) =>
+    queue && queue.source === source && !queueActive
+      ? queue.tasks
+          .filter((task) => task.status === 'failed')
+          .map((task) => ({ handle: task.handle, code: task.failureCode }))
       : [];
   const queueStatusLabel = queue
     ? {
@@ -281,234 +336,193 @@ export default function CleanView({
         cancelled: t.queueCancelled,
       }[queue.status]
     : '';
-  // 暂停原因专属说明：仅额度用尽 / 短窗限流两种需要解释，其余用通用「已暂停」
+  // 只有额度用尽 / 短窗限流两种暂停需要解释
   const queuePauseNote =
     queue?.status === 'paused' && queue.pauseReason === 'quota_exhausted'
       ? t.queuePausedQuota(safety?.budget ?? SAFETY_PRESETS[DEFAULT_PRESET].dailyLimit)
       : queue?.status === 'paused' && queue.pauseReason === 'rate_limit_storm'
         ? t.queuePausedRateLimit
         : null;
-  return (
-    <div className="view-stack clean-view">
-      <section className={`review-card${pageCount === 0 ? ' is-clean' : ''}`}>
-        <div className="section-heading">
-          <div className="heading-title-group">
-            <h2>{t.pageMarked}</h2>
-            <span className="count-badge" aria-label={`${t.pageMarked}: ${pageCount ?? 0}`}>
-              {pageCount === null ? '…' : pageCount}
-            </span>
-          </div>
+  const queuePanel = (source: PersistentBlockQueueState['source']) =>
+    queueActive && queue!.source === source ? (
+      <QueuePanel
+        language={language}
+        queue={queue!}
+        done={queueDone}
+        total={queueSummary.total}
+        statusLabel={queueStatusLabel}
+        pauseNote={queuePauseNote}
+        onControl={(action) => void controlQueue(action)}
+      />
+    ) : null;
 
-          <div className="heading-toolbar">
-            {safety && safetyUsed > 0 ? (
-              <span
-                className="safety-quota-chip"
-                role="status"
-                title={t.safetyQuota(safetyUsed, safety.budget)}
-              >
-                <span className="quota-dot" aria-hidden="true" />
-                <span>{t.safetyQuota(safetyUsed, safety.budget)}</span>
-              </span>
-            ) : null}
-            <HelpIcon text={t.manualBlockHint} />
-          </div>
+  const busy = running || queueActive || pauseDestructive;
+
+  return (
+    <div className="view clean-view" ref={rootRef}>
+      {pauseDestructive ? (
+        <p className="alert" role="status">
+          {killSwitchActive ? t.killSwitchActive(killSwitchReason) : t.blockUnavailable}
+        </p>
+      ) : null}
+
+      <section className="block" aria-label={t.pageMarked}>
+        <div className="block-head">
+          <h2>{t.pageMarked}</h2>
+          {pageCount ? <span className="count">{pageCount}</span> : null}
+          <HelpIcon text={t.manualBlockHint} />
+          {safety && safetyUsed > 0 ? (
+            <span className="quota" role="status">
+              {t.safetyQuota(safetyUsed, safety.budget)}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className={`icon-button toolbar-end${refreshing ? ' is-spinning' : ''}`}
+            aria-label={t.refreshPage}
+            title={t.refreshPage}
+            disabled={running || refreshing}
+            onClick={() => void handleRefresh()}
+          >
+            <AppIcon name="refresh" size={15} />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label={t.filterSettings}
+            title={t.filterSettings}
+            onClick={onOpenSettings}
+          >
+            <AppIcon name="settings" size={15} />
+          </button>
         </div>
 
         {pageCount === null ? (
-          <div className="loading-list" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-          </div>
-        ) : pageCount === 0 ? (
-          <div className="clean-state">
-            {/* 两态大图标：页面清爽 = 绿盾勾；有黄框后点它重新扫一遍清单 */}
-            <button
-              type="button"
-              className={`clean-state-icon${refreshing ? ' is-spinning' : ''}`}
-              aria-label={t.refreshPage}
-              title={t.refreshPage}
-              disabled={refreshing}
-              onClick={() => void handleRefresh()}
-            >
-              <AppIcon name="clean" size={24} />
-            </button>
-            <p>{running ? t.processing : t.pageClean}</p>
-            {!running ? <HelpIcon text={t.pageCleanHint} /> : null}
-          </div>
+          <SkeletonList />
         ) : displayedItems.length === 0 ? (
-          <div className="clean-state">
-            <p>{t.allDismissed}</p>
-            <HelpIcon text={t.pageCleanHint} />
-          </div>
+          <EmptyState icon="clean" className="is-clean" hint={t.pageCleanHint}>
+            {pageCount === 0 ? t.pageClean : t.allDismissed}
+          </EmptyState>
         ) : (
           <>
-            <div className="selection-toolbar">
-              <span className="selection-summary">
-                {t.selectedCount(pendingCount, displayedItems.length)}
-              </span>
-              <button type="button" className="toolbar-text-btn" onClick={toggleSelectAll}>
-                {deselectedHandles.size > 0 ? t.selectAll : t.deselectAll}
-              </button>
-            </div>
-
-            <ul className="review-list" aria-label={t.pageMarked}>
+            <ul className="marked-list" aria-label={t.pageMarked}>
               {displayedItems.map((item) => {
                 const isOperating = operatingHandles.has(item.handle);
                 const isDeselected = deselectedHandles.has(item.handle);
+                const category = categoryLabel(item.category, language);
+                // 理由里常带着和类别标签重复的一段（「6 人标记 · 色情引流」），去掉重复的那段
+                const reason = item.reason
+                  .split(' · ')
+                  .filter((part) => part.trim() !== category)
+                  .join(' · ');
                 return (
-                  <li
-                    key={item.handle}
-                    className={`review-item${isDeselected ? ' is-deselected' : ''}`}
-                  >
-                    <div className="review-item-header">
-                      <div className="review-meta-group">
-                        <label className="checkbox-control" title={t.excludeItemHint}>
-                          <input
-                            type="checkbox"
-                            checked={!isDeselected}
-                            onChange={() => toggleSelect(item.handle)}
-                            aria-label={`${t.excludeItem}: @${item.handle}`}
-                          />
-                          <span className="checkbox-box" aria-hidden="true">
-                            {!isDeselected ? <AppIcon name="check" size={13} /> : null}
-                          </span>
-                        </label>
-
-                        <span className="category-chip" data-category={item.category}>
-                          {categoryLabel(item.category, language)}
-                        </span>
-
-                        {item.reason ? (
-                          <span className="account-reason" title={item.reason}>
-                            {item.reason}
-                          </span>
-                        ) : null}
-
-                        <span className="account-handle" title={`@${item.handle}`}>
-                          @{item.handle}
-                        </span>
-
+                  <li key={item.handle} className={isDeselected ? 'is-deselected' : ''}>
+                    <label className="check" title={t.selectForBlock}>
+                      <input
+                        type="checkbox"
+                        checked={!isDeselected}
+                        onChange={() => toggleSelect(item.handle)}
+                        aria-label={`${t.selectForBlock}: @${item.handle}`}
+                      />
+                      <span aria-hidden="true">
+                        {!isDeselected ? <AppIcon name="check" size={12} /> : null}
+                      </span>
+                    </label>
+                    <div className="marked-body">
+                      <div className="marked-line">
+                        <span className="marked-handle">@{item.handle}</span>
                         {item.displayName ? (
-                          <span className="account-name" title={item.displayName}>
-                            {item.displayName}
-                          </span>
+                          <span className="marked-name">{item.displayName}</span>
+                        ) : null}
+                        <div className="row-actions">
+                          <button
+                            type="button"
+                            className="text-button"
+                            title={t.falsePositiveHint}
+                            aria-label={`${t.falsePositive}: @${item.handle}`}
+                            disabled={isOperating || running}
+                            onClick={() => void markFalsePositive(item)}
+                          >
+                            {isOperating ? '…' : t.falsePositive}
+                          </button>
+                          <button
+                            type="button"
+                            className="icon-button"
+                            title={t.excludeItemHint}
+                            aria-label={`${t.excludeItem}: @${item.handle}`}
+                            onClick={() => forget(item.handle)}
+                          >
+                            <AppIcon name="x" size={14} />
+                          </button>
+                        </div>
+                      </div>
+                      <div className="marked-reason">
+                        <span className="category-tag" data-category={item.category}>
+                          {category}
+                        </span>
+                        {reason ? (
+                          <TipText className="reason-text" text={item.reason}>
+                            {reason}
+                          </TipText>
                         ) : null}
                       </div>
-
-                      <div className="review-item-actions">
-                        <button
-                          type="button"
-                          className="item-btn item-btn-exclude"
-                          title={t.excludeItemHint}
-                          onClick={() => dismissItem(item.handle)}
-                        >
-                          {t.excludeItem}
-                        </button>
-                        <button
-                          type="button"
-                          className="item-btn item-btn-safe"
-                          title={t.falsePositiveHint}
-                          aria-label={`${t.falsePositive}: @${item.handle}`}
-                          disabled={isOperating || running}
-                          onClick={() => void markFalsePositive(item)}
-                        >
-                          {isOperating ? '…' : t.falsePositive}
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* 帖子正文：信息架构的核心第一视觉重心 */}
-                    <div className="review-snippet">
-                      <p className="snippet-text">{item.snippet || t.noPostContent}</p>
+                      <p className="marked-snippet">{item.snippet || t.noPostContent}</p>
                     </div>
                   </li>
                 );
               })}
             </ul>
+            <div className="action-bar">
+              <button type="button" className="text-button" onClick={toggleSelectAll}>
+                {deselectedHandles.size > 0 ? t.selectAll : t.deselectAll}
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={pendingCount === 0 || busy}
+                onClick={() => void runBatch()}
+              >
+                {running ? t.processing : t.blockCount(pendingCount)}
+              </button>
+            </div>
           </>
         )}
 
-        {blockResult ? (
+        <FailedList items={blockResult?.failed ?? failedTasks('page-batch')} language={language} />
+        {queuePanel('page-batch')}
+      </section>
+
+      <section className="block" aria-label={t.communityBlocklist}>
+        <div className="row community-row">
+          <div className="row-label">
+            <strong>{t.communityBlocklist}</strong>
+            <span className="row-meta">
+              {communityLoading ? '…' : t.communityRemaining(communityEligible.length)}
+            </span>
+          </div>
+          <OfficialLinkIcon target="blacklist" label={t.siteBlacklist} />
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={busy || communityLoading || communityEligible.length === 0}
+            onClick={() => {
+              if (!arm('community')) return;
+              reset();
+              void startCommunityQueue();
+            }}
+          >
+            {isArmed('community') ? t.confirmBlockAll(communityEligible.length) : t.blockAll}
+          </button>
+        </div>
+        {queuePanel('community-batch')}
+        {failedTasks('community-batch').length > 0 ? (
           <>
-            <p className="result-message" role="status">
-              {t.blockedResult(blockResult.blocked.length)}
-              {blockResult.failed.length > 0
-                ? ` · ${t.failedResult(blockResult.failed.length)}`
-                : null}
+            <p className="result">
+              {t.queueProgress(queueDone, queueSummary.total)} · {queueStatusLabel}
             </p>
-            {blockResult.failed.length > 0 ? (
-              // 失败明细进滚动容器，长失败串不把底部主操作顶出可视区
-              <ul className="queue-failed-list" role="status">
-                {blockResult.failed.map((failure) => (
-                  <li key={failure.handle}>
-                    @{failure.handle}（{FAILURE_LABELS[language][failure.code] ?? failure.code}）
-                  </li>
-                ))}
-              </ul>
-            ) : null}
+            <FailedList items={failedTasks('community-batch')} language={language} />
           </>
         ) : null}
-
-        {pageQueueFailedTasks.length > 0 ? (
-          <ul className="queue-failed-list" role="status">
-            {pageQueueFailedTasks.map((task) => (
-              <li key={task.handle}>
-                @{task.handle}（
-                {FAILURE_LABELS[language][task.failureCode ?? ''] ?? task.failureCode ?? t.unknown}
-                ）
-              </li>
-            ))}
-          </ul>
-        ) : null}
-
-        {queueActive ? (
-          <QueuePanel
-            language={language}
-            queue={queue!}
-            done={queueDone}
-            total={queueSummary.total}
-            statusLabel={queueStatusLabel}
-            pauseNote={queuePauseNote}
-            onControl={(action) => void controlQueue(action)}
-          />
-        ) : null}
-
-        <div className="clean-bottom-bar">
-          {pauseDestructive ? (
-            <p className="controls-warning" role="status">
-              {killSwitchActive ? t.killSwitchActive(killSwitchReason) : t.blockUnavailable}
-            </p>
-          ) : null}
-          <div className="primary-actions">
-            <button
-              className="primary-action"
-              disabled={
-                !pageCount || pendingCount === 0 || running || queueActive || pauseDestructive
-              }
-              onClick={() => void runBatch()}
-            >
-              {running
-                ? t.processing
-                : !pageCount || pendingCount === 0
-                  ? t.blockPage
-                  : deselectedCount > 0
-                    ? t.batchBlockSelected(pendingCount)
-                    : `${t.blockPage} · ${displayedItems.length}`}
-            </button>
-            {/* 右下角刷新：列表在手时重新拉取当前页面黄框清单 */}
-            <button
-              type="button"
-              className={`square-action${refreshing ? ' is-spinning' : ''}`}
-              aria-label={t.refreshPage}
-              title={t.refreshPage}
-              disabled={running || refreshing}
-              onClick={() => void handleRefresh()}
-            >
-              <AppIcon name="refresh" />
-            </button>
-          </div>
-        </div>
       </section>
     </div>
   );

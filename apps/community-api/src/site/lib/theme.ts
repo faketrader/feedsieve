@@ -46,4 +46,6 @@ export function applyTheme(mode: ThemeMode, systemDark: boolean): ResolvedTheme 
   return resolved;
 }
 
-export const THEME_BOOT_SCRIPT = `(function(){try{var m="system";try{m=localStorage.getItem("feedsieve:theme")||"system"}catch(e){}var d=m==="dark"||(m!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);var r=document.documentElement;r.classList.toggle("dark",d);r.dataset.themeMode=m;var t=document.querySelector('meta[name="theme-color"]');if(t)t.setAttribute("content",d?"#14171a":"#f5f6f7");}catch(e){}})();`;
+/** 顶部「小筛子周刊」推广条：关掉后记住，首帧脚本给 html 加 .weekly-bar-off，不闪 */
+export const WEEKLY_BAR_STORAGE_KEY = 'feedsieve:weekly-bar';
+export const THEME_BOOT_SCRIPT = `(function(){try{var m="system";try{m=localStorage.getItem("feedsieve:theme")||"system"}catch(e){}var d=m==="dark"||(m!=="light"&&window.matchMedia("(prefers-color-scheme: dark)").matches);var r=document.documentElement;r.classList.toggle("dark",d);r.dataset.themeMode=m;try{if(localStorage.getItem("feedsieve:weekly-bar")==="off")r.classList.add("weekly-bar-off")}catch(e){}var t=document.querySelector('meta[name="theme-color"]');if(t)t.setAttribute("content",d?"#14171a":"#f5f6f7");}catch(e){}})();`;

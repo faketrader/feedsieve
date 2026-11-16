@@ -4,6 +4,8 @@ import worker from '../src/index';
 import { refreshAccountsFromLabels } from '../src/labels';
 import { hashInstallationId } from '../src/lib/hash';
 import { computeConsensusV2, voteWeight, CONSENSUS_V2_POLICY } from '../src/lib/consensus-v2';
+import { sql, type SQL } from 'drizzle-orm';
+import { getDb } from '../src/db/client';
 
 const ORIGIN = 'https://api.example.com';
 
@@ -29,17 +31,21 @@ async function postRescues(body: unknown): Promise<Response> {
   );
 }
 
+async function first<T extends Record<string, unknown>>(query: SQL): Promise<T | null> {
+  const [row] = await getDb(env).execute<T>(query);
+  return (row ?? null) as T | null;
+}
+
 async function account(handle: string) {
-  return env.DB
-    .prepare('SELECT status, status_v2, consensus_v2, report_count, rescue_count FROM accounts WHERE handle = ?1')
-    .bind(handle)
-    .first<{
-      status: string;
-      status_v2: string;
-      consensus_v2: number;
-      report_count: number;
-      rescue_count: number;
-    }>();
+  return first<{
+    status: string;
+    status_v2: string;
+    consensus_v2: number;
+    report_count: number;
+    rescue_count: number;
+  }>(
+    sql`SELECT status, status_v2, consensus_v2, report_count, rescue_count FROM accounts WHERE handle = ${handle}`,
+  );
 }
 
 describe('voteWeight（安装成熟度 × trust）', () => {
@@ -111,7 +117,10 @@ describe('consensus v2 影子接入（集成）', () => {
       'vvvvvvvv-0003-4003-8000-vvvvvvvvvvvv',
     ];
     for (const id of installs) {
-      const res = await post({ installation_id: id, reports: [{ handle: 'fresh_burst', reason: 'bot_spam' }] });
+      const res = await post({
+        installation_id: id,
+        reports: [{ handle: 'fresh_burst', reason: 'bot_spam' }],
+      });
       expect(res.status).toBe(200);
     }
     const row = await account('fresh_burst');
@@ -126,24 +135,25 @@ describe('consensus v2 影子接入（集成）', () => {
       'wwwwwwww-1003-4003-8000-wwwwwwwwwwww',
     ];
     for (const id of installs) {
-      const res = await post({ installation_id: id, reports: [{ handle: 'established', reason: 'bot_spam' }] });
+      const res = await post({
+        installation_id: id,
+        reports: [{ handle: 'established', reason: 'bot_spam' }],
+      });
       expect(res.status).toBe(200);
     }
     // 把这些安装伪装成「已存在 10 天」，并把其中一票挪到 3 天前 —— 模拟跨周、跨日观察者
     const tenDaysAgo = Math.floor(Date.now() / 1000) - 10 * 86400;
     for (const id of installs) {
       const hashed = (await hashInstallationId(env.INSTALLATION_SALT, id)).toString();
-      await env.DB.prepare('UPDATE installations SET first_seen_at = ?2 WHERE id = ?1')
-        .bind(hashed, tenDaysAgo)
-        .run();
+      await getDb(env).execute(
+        sql`UPDATE installations SET first_seen_at = ${tenDaysAgo} WHERE id = ${hashed}`,
+      );
     }
     const firstHash = (await hashInstallationId(env.INSTALLATION_SALT, installs[0]!)).toString();
-    await env.DB.prepare(
-      `UPDATE reports SET created_at = ?2
-       WHERE installation_id = ?1 AND handle = 'established'`,
-    )
-      .bind(firstHash, tenDaysAgo)
-      .run();
+    await getDb(env).execute(
+      sql`UPDATE reports SET created_at = ${tenDaysAgo}
+          WHERE installation_id = ${firstHash} AND handle = 'established'`,
+    );
     // 手工改时间后重算（正常路径下 refresh 在各次投票时自动执行）
     await refreshAccountsFromLabels(env, ['established']);
 
@@ -160,14 +170,17 @@ describe('consensus v2 影子接入（集成）', () => {
       'xxxxxxxx-2004-4004-8000-xxxxxxxxxxxx',
     ];
     for (const id of freshInstalls) {
-      const res = await post({ installation_id: id, reports: [{ handle: 'mixed_votes', reason: 'bot_spam' }] });
+      const res = await post({
+        installation_id: id,
+        reports: [{ handle: 'mixed_votes', reason: 'bot_spam' }],
+      });
       expect(res.status).toBe(200);
     }
     // 老安装的抢救票：先有历史（first_seen_at 提前），再投抢救
     const rescueInstall = 'xxxxxxxx-2005-4005-8000-xxxxxxxxxxxx';
-    await env.DB.prepare('UPDATE installations SET first_seen_at = ?2 WHERE id = ?1')
-      .bind(rescueInstall, Math.floor(Date.now() / 1000) - 30 * 86400)
-      .run();
+    await getDb(env).execute(
+      sql`UPDATE installations SET first_seen_at = ${Math.floor(Date.now() / 1000) - 30 * 86400} WHERE id = ${rescueInstall}`,
+    );
     const rescueRes = await postRescues({
       installation_id: rescueInstall,
       rescues: [{ handle: '@mixed_votes' }],
@@ -175,6 +188,11 @@ describe('consensus v2 影子接入（集成）', () => {
     expect(rescueRes.status).toBe(200);
 
     const row = await account('mixed_votes');
-    expect(row).toMatchObject({ status: 'strong', status_v2: 'new', report_count: 4, rescue_count: 1 });
+    expect(row).toMatchObject({
+      status: 'strong',
+      status_v2: 'new',
+      report_count: 4,
+      rescue_count: 1,
+    });
   });
 });

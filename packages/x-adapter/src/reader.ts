@@ -1,17 +1,29 @@
 import type { FeedContext, FeedItem } from './types';
 import { extractHandleFromPath } from './handle';
-import { tweetSelectors } from './selectors/selectors';
+import { QUOTE_CARD_SELECTOR, tweetSelectors } from './selectors/selectors';
 
 const POST_ID_RE = /\/status\/(\d+)/;
 
+function statusId(anchor: Element): string | undefined {
+  return POST_ID_RE.exec(anchor.getAttribute('href') ?? '')?.[1];
+}
+
+/**
+ * 本推文 id。优先级：
+ * 1. 包着 <time> 的时间戳链接，且不在引用卡片里（X 每条推文的固定结构）；
+ * 2. 引用卡片之外的第一个 /status/ 链接；
+ * 3. 任意第一个 /status/ 链接（旧行为兜底）。
+ *
+ * 不能直接取第一个链接：详情页主推文引用了带图帖子时，DOM 里最先出现的是
+ * 被引用帖子的图片链接（/other/status/<引用帖>/photo/1），2026-10-30 真机发现。
+ */
 function extractPostId(article: Element): string | undefined {
-  // 推文正文/时间戳里第一个 /status/<id> 链接即本推文 id
-  for (const anchor of article.querySelectorAll('a[href*="/status/"]')) {
-    const match = POST_ID_RE.exec(anchor.getAttribute('href') ?? '');
-    const id = match?.[1];
-    if (id) {
-      return id;
-    }
+  const anchors = [...article.querySelectorAll('a[href*="/status/"]')];
+  const outsideQuote = anchors.filter((anchor) => !anchor.closest(QUOTE_CARD_SELECTOR));
+  const timestamp = outsideQuote.find((anchor) => anchor.querySelector('time'));
+  for (const anchor of [timestamp, ...outsideQuote, ...anchors]) {
+    const id = anchor ? statusId(anchor) : undefined;
+    if (id) return id;
   }
   return undefined;
 }
@@ -140,6 +152,30 @@ function extractExternalLinks(article: Element, postId?: string): FeedItem['link
  * - handle 缺失（DOM 不符合预期）时返回 null，调用方安全跳过
  * - 输出是纯数据：Detector 与 UI 永远不直接读 article 内部结构
  */
+/**
+ * 只读推文身份（postId + 作者 handle），不提取正文和链接。
+ * 用于高频刷新（例如流速徽标）：比 extractFeedItem 少两次整棵子树遍历。
+ */
+export function extractTweetIdentity(
+  article: Element,
+): { postId?: string; author: { handle: string } } | null {
+  const authorAnchor = article.querySelector<HTMLAnchorElement>(tweetSelectors.authorLink);
+  const handle = authorAnchor ? extractHandleFromPath(authorAnchor.pathname) : null;
+  if (!handle) return null;
+  const postId = extractPostId(article);
+  return { ...(postId ? { postId } : {}), author: { handle } };
+}
+
+/** 本推文的发布时间（Unix 毫秒）：取引用卡片之外的 <time datetime>。 */
+export function extractTweetTime(article: Element): number | undefined {
+  for (const time of article.querySelectorAll('time[datetime]')) {
+    if (time.closest(QUOTE_CARD_SELECTOR)) continue;
+    const ms = Date.parse(time.getAttribute('datetime') ?? '');
+    if (Number.isFinite(ms)) return ms;
+  }
+  return undefined;
+}
+
 export function extractFeedItem(article: Element, context: FeedContext = 'other'): FeedItem | null {
   const authorAnchor = article.querySelector<HTMLAnchorElement>(tweetSelectors.authorLink);
   const handle = authorAnchor ? extractHandleFromPath(authorAnchor.pathname) : null;

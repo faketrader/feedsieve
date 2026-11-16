@@ -4,8 +4,7 @@
  *   页面内容断言迁移到 test/site-components.test.tsx（组件级 renderToString）；
  * - Hono 侧只保留机器路由：/lists.html 301 归一、未知路径 404（绝不落入
  *   管理端 SPA 兜底）。
- * API 侧 /leaderboard HTML 观看页已彻底下线（引流统一走官网 /lists/ranked），
- * 仅保留 /v1/leaderboard 数据端点。
+ * 排行榜功能已整体移除：/leaderboard 观看页与 /v1/leaderboard 数据端点均返回 404。
  */
 
 import { env } from 'cloudflare:workers';
@@ -44,8 +43,22 @@ describe('API host 不变', () => {
     expect(res.status).toBe(404);
   });
 
-  it('/v1/leaderboard 数据端点仍在', async () => {
+  it('/v1/leaderboard 数据端点已移除', async () => {
     const res = await worker.fetch(new Request(API_ORIGIN + '/v1/leaderboard?scope=week'), env);
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(404);
+    const posted = await worker.fetch(
+      new Request(API_ORIGIN + '/v1/leaderboard', { method: 'POST', body: '{}' }),
+      env,
+    );
+    expect(posted.status).toBe(404);
+  });
+  it('/v1/player/* 接口已移除', async () => {
+    for (const path of ['bind-email', 'verify', 'profile', 'me']) {
+      const res = await worker.fetch(
+        new Request(`${API_ORIGIN}/v1/player/${path}`, { method: 'POST', body: '{}' }),
+        env,
+      );
+      expect(res.status).toBe(404);
+    }
   });
 });

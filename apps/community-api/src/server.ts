@@ -4,20 +4,34 @@
  *   （handleWorkerRoutes），其余路径交给 TanStack Start 的 Nitro handler 做 SSR。
  *   所有 Worker 响应统一注入安全响应头；页面 HTML 再加一层短边缘缓存
  *   （名单数据端点自身带 5 分钟缓存，HTML 60s 窗口内的延迟可接受）。
- * - scheduled：整点 cron 快照自动发布 + 赛季结算（沿用 index.ts 原逻辑）。
+ * - scheduled：整点 cron 全量编排（清理、规则静音、快照、死账号探活），半点只发快照。
  */
-import handler from '@tanstack/react-start/server-entry';
 import { handleWorkerRoutes } from './api';
 import { isAdminHost, isSiteHost } from './lib/hosts';
-import { runScheduledCron } from './scheduled';
+import { withDb } from './db/client';
 
 // Nitro 入口的 fetch 在 Cloudflare 上接收 (request, env, ctx)，
 // 其自带类型按通用平台声明为 (request, opts)，这里做一次桥接
-const ssrFetch = handler.fetch as unknown as (
-  request: Request,
-  env: Cloudflare.Env,
-  ctx: ExecutionContext,
-) => Promise<Response>;
+type SsrFetch = (request: Request, env: Cloudflare.Env, ctx: ExecutionContext) => Promise<Response>;
+
+/**
+ * TanStack Start 的 Nitro handler 是整台 Worker 最重的一块，却只有页面 HTML 用得到。
+ * 顶层 import 会让 `/v1/*`（扩展上报，占全部流量的九成以上）的每次冷启动都先求值
+ * 整个 SSR 运行时，而冷启动正是这台 Worker 的主要 CPU 开销。
+ */
+let ssrFetchPromise: Promise<SsrFetch> | null = null;
+
+function loadSsrFetch(): Promise<SsrFetch> {
+  // 失败不缓存 rejected promise：否则一次瞬时错误会把整台 isolate 永久钉死。
+  ssrFetchPromise ??= import('@tanstack/react-start/server-entry').then(
+    (mod) => mod.default.fetch as unknown as SsrFetch,
+    (error) => {
+      ssrFetchPromise = null;
+      throw error;
+    },
+  );
+  return ssrFetchPromise;
+}
 
 /** 基线安全响应头：站点有表单 POST 与大量外链，全响应统一注入 */
 const SECURITY_HEADERS: Record<string, string> = {
@@ -30,9 +44,9 @@ const SECURITY_HEADERS: Record<string, string> = {
   // 'unsafe-inline'（nonce 需要改 Nitro 渲染管线，收益不成比例）；其余
   // 面向（object/frame/base/form）全部收死。页面 fetch 全部同源相对路径。
   'Content-Security-Policy':
-    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
-    + "img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; "
-    + "frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; " +
+    "img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; " +
+    "frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'",
 };
 
 /** 包一层新 Response 注入安全头（不动缓存里已存的副本） */
@@ -79,9 +93,7 @@ async function cachedHtml(
       'public, s-maxage=300, stale-while-revalidate=14400, max-age=0',
     );
     // 写缓存走 waitUntil，不阻塞响应回边缘
-    ctx.waitUntil(
-      htmlCache.put(key, new Response(bodyBuf.slice(0), cached)),
-    );
+    ctx.waitUntil(htmlCache.put(key, new Response(bodyBuf.slice(0), cached)));
     const served = new Response(bodyBuf.slice(0), res);
     served.headers.set('Cache-Control', 'private, max-age=0, must-revalidate');
     return served;
@@ -101,31 +113,50 @@ function jsonNotFound(): Response {
 }
 
 export default {
-  async fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext): Promise<Response> {
-    const workerRes = await handleWorkerRoutes(request, env);
-    if (workerRes) return withSecurityHeaders(workerRes);
-
-    // host 门控与原来 index.ts catch-all 完全一致：
-    // - 官网 host：先接住静态资产（assets run_worker_first 会把 /assets /fonts 也送进
-    //   Worker，直接转 ASSETS；漏了这一步 SSR 会把 CSS/字体吞成 404），再 SSR 其余路径
-    //   （TanStack SSR 路由树）
-    // - 管理 host：ASSETS 绑定（admin SPA 单页兜底）
-    // - 未配置 host / API host：JSON 404，不暴露管理 SPA
-    if (isSiteHost(request, env)) {
-      const { pathname } = new URL(request.url);
-      if ((pathname.startsWith('/assets/') || pathname.startsWith('/fonts/')) && env.ASSETS) {
-        return withSecurityHeaders(await env.ASSETS.fetch(request));
-      }
-      return cachedHtml(request, ctx, async () =>
-        withSecurityHeaders(await ssrFetch(request, env, ctx)),
-      );
-    }
-    if (isAdminHost(request, env) && env.ASSETS) {
-      return withSecurityHeaders(await env.ASSETS.fetch(request));
-    }
-    return withSecurityHeaders(jsonNotFound());
+  fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext): Promise<Response> {
+    // 整个请求（API、SSR 与其中的 server function）共用一个数据库作用域，响应后关闭连接
+    return withDb(
+      () => handleFetch(request, env, ctx),
+      (p) => ctx.waitUntil(p),
+    );
   },
-  async scheduled(_event: ScheduledController, env: Cloudflare.Env) {
-    await runScheduledCron(env);
+  async scheduled(event: ScheduledController, env: Cloudflare.Env, ctx: ExecutionContext) {
+    await withDb(
+      async () => {
+        // 一天只跑 48 次，没必要让它进 `/v1/*` 的启动路径。
+        const { runScheduledCron } = await import('./scheduled');
+        await runScheduledCron(env, event.cron);
+      },
+      (p) => ctx.waitUntil(p),
+    );
   },
 } satisfies ExportedHandler<Cloudflare.Env>;
+
+async function handleFetch(
+  request: Request,
+  env: Cloudflare.Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const workerRes = await handleWorkerRoutes(request, env, ctx);
+  if (workerRes) return withSecurityHeaders(workerRes);
+
+  // host 门控与原来 index.ts catch-all 完全一致：
+  // - 官网 host：先接住静态资产（assets run_worker_first 会把 /assets /fonts 也送进
+  //   Worker，直接转 ASSETS；漏了这一步 SSR 会把 CSS/字体吞成 404），再 SSR 其余路径
+  //   （TanStack SSR 路由树）
+  // - 管理 host：ASSETS 绑定（admin SPA 单页兜底）
+  // - 未配置 host / API host：JSON 404，不暴露管理 SPA
+  if (isSiteHost(request, env)) {
+    const { pathname } = new URL(request.url);
+    if ((pathname.startsWith('/assets/') || pathname.startsWith('/fonts/')) && env.ASSETS) {
+      return withSecurityHeaders(await env.ASSETS.fetch(request));
+    }
+    return cachedHtml(request, ctx, async () =>
+      withSecurityHeaders(await (await loadSsrFetch())(request, env, ctx)),
+    );
+  }
+  if (isAdminHost(request, env) && env.ASSETS) {
+    return withSecurityHeaders(await env.ASSETS.fetch(request));
+  }
+  return withSecurityHeaders(jsonNotFound());
+}

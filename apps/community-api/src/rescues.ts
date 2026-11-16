@@ -1,13 +1,11 @@
 import { validateRescue } from './lib/validate';
 import { POLICY } from './reports';
 import { nowSeconds, utcToday } from './lib/time';
-import {
-  installationHash,
-  refreshAccountsFromLabels,
-  batchStatements,
-  batchReads,
-  type AccountLabel,
-} from './labels';
+import { collateC, compareText, stripNul } from './lib/sql';
+import { installationHash, refreshAccountsFromLabels, type AccountLabel } from './labels';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { getDb, retryOnConflict } from './db/client';
+import { accounts, activeLabels, installations, rescues } from './db/schema';
 
 interface ValidRescue {
   handle: string;
@@ -49,7 +47,8 @@ export async function processRescueBatch(
   ) {
     return { ok: false, httpStatus: 400, error: 'invalid_installation_id' };
   }
-  const clientVersion = typeof b.client_version === 'string' ? b.client_version.slice(0, 20) : null;
+  const clientVersion =
+    typeof b.client_version === 'string' ? stripNul(b.client_version).slice(0, 20) : null;
 
   if (!Array.isArray(b.rescues) || b.rescues.length === 0) {
     return { ok: false, httpStatus: 400, error: 'rescues_must_be_non_empty_array' };
@@ -90,59 +89,17 @@ export async function processRescueBatch(
     return { ok: true, results };
   }
 
+  const db = getDb(env);
   const identity = await installationHash(env, installationId);
   const installHash = identity.hash;
   const today = utcToday();
   const now = nowSeconds();
 
-  // 客户端在网络超时后可能重试整个批次：只有还未生效当前 allowed 标签的 handle
-  // 才消耗每日抢救额度；重试保持幂等，不会把瞬时失败变成额度锁死。
+  // 一次并发读出本请求需要的全部现状：
+  //   1) 本安装在这些 handle 上的当前标签（既是配额口径，也是标签变化推演的起点）；
+  //   2) 换号追踪的正主：同 x_user_id 的已知账号，每个 x_user_id 一行。
+  // 同一 x_user_id 若有多个账号（正常不会出现），取最早建档的，保证结果确定。
   const uniqueHandles = [...new Set(valid.map(({ rescue }) => rescue.handle))];
-  const existingAllowed = await env.DB.prepare(
-    `SELECT handle FROM active_labels
-     WHERE installation_id = ?1
-       AND label = 'allowed'
-       AND handle IN (${uniqueHandles.map((_, index) => `?${index + 2}`).join(', ')})`,
-  )
-    .bind(installHash, ...uniqueHandles)
-    .all<{ handle: string }>();
-  const existingAllowedHandles = new Set(existingAllowed.results.map((row) => row.handle));
-  const quotaUnits = uniqueHandles.filter((handle) => !existingAllowedHandles.has(handle)).length;
-
-  // 原子预留本批额度：条件 UPSERT 本身即门禁，杜绝并发请求同时通过限额检查。
-  if (quotaUnits > 0) {
-    const reserved = await env.DB.prepare(
-      `INSERT INTO installations (id, first_seen_at, last_seen_at, rescues_day, rescues_today)
-       VALUES (?1, ?2, ?2, ?3, ?4)
-       ON CONFLICT(id) DO UPDATE SET
-         last_seen_at = excluded.last_seen_at,
-         rescues_day = excluded.rescues_day,
-         rescues_today = CASE
-           WHEN installations.rescues_day = excluded.rescues_day
-             THEN installations.rescues_today + excluded.rescues_today
-           ELSE excluded.rescues_today
-         END
-       WHERE (
-         CASE
-           WHEN installations.rescues_day = excluded.rescues_day THEN installations.rescues_today
-           ELSE 0
-         END
-         + excluded.rescues_today
-       ) <= MAX(?5, ROUND(?6 * installations.trust))`,
-    )
-      .bind(installHash, now, today, quotaUnits, POLICY.minDailyLimit, POLICY.rescueDailyLimit)
-      .run();
-    if ((reserved.meta.changes ?? 0) === 0) {
-      return { ok: false, httpStatus: 429, error: 'rate_limited' };
-    }
-  }
-
-  // 批处理（与逐条执行行为一致，仅合并 D1 往返；语句在 batch 内按原顺序执行）：
-  //   1) 换号追踪的正主读取一次 batch 完成，同 x_user_id 共享一次读取 + 内存镜像；
-  //   2) 当前标签读取一次 batch 完成，是否变化按条目顺序内存推演 —— 批内同
-  //      canonical 的后续条目与逐条执行一样得到 duplicate；
-  //   3) rescues 落库与 active_labels 写入合并为两个 batch（两表互不相干）；
-  //   4) 别名写入路径保持逐条：直接追加（无配额），且频率低，属冷路径。
   interface KnownAccount {
     handle: string;
     aliases: string;
@@ -150,59 +107,113 @@ export async function processRescueBatch(
   const xUserIds = [
     ...new Set(valid.map(({ rescue }) => rescue.xUserId).filter((id): id is string => id !== null)),
   ];
-  const knownByXUserId = new Map<string, KnownAccount>();
-  if (xUserIds.length > 0) {
-    const knownRows = await batchReads<KnownAccount>(
-      env,
-      xUserIds.map((id) =>
-        env.DB.prepare('SELECT handle, aliases FROM accounts WHERE x_user_id = ?1 LIMIT 1').bind(id),
+  const [currentLabels, knownRows] = await Promise.all([
+    db
+      .select({ handle: activeLabels.handle, label: activeLabels.label })
+      .from(activeLabels)
+      .where(
+        and(
+          eq(activeLabels.installationId, installHash),
+          inArray(activeLabels.handle, uniqueHandles),
+        ),
       ),
-    );
-    xUserIds.forEach((id, index) => {
-      const row = knownRows[index]!.results[0];
-      if (row) {
-        knownByXUserId.set(id, row);
-      }
-    });
+    xUserIds.length > 0
+      ? db
+          .selectDistinctOn([accounts.xUserId], {
+            xUserId: accounts.xUserId,
+            handle: accounts.handle,
+            aliases: accounts.aliases,
+          })
+          .from(accounts)
+          .where(inArray(accounts.xUserId, xUserIds))
+          .orderBy(accounts.xUserId, asc(accounts.firstReportAt), asc(collateC(accounts.handle)))
+      : Promise.resolve([]),
+  ]);
+  const knownByXUserId = new Map<string, KnownAccount>();
+  for (const row of knownRows) {
+    if (row.xUserId !== null) {
+      knownByXUserId.set(row.xUserId, row);
+    }
   }
+  const labelState = new Map<string, AccountLabel>(
+    currentLabels.map((row) => [row.handle, row.label] as const),
+  );
+
+  // 客户端在网络超时后可能重试整个批次：只有还未生效当前 allowed 标签的 handle
+  // 才消耗每日抢救额度；重试保持幂等，不会把瞬时失败变成额度锁死。
+  const quotaUnits = uniqueHandles.filter((handle) => labelState.get(handle) !== 'allowed').length;
+
+  // 原子预留本批额度：条件 UPSERT 本身即门禁，杜绝并发请求同时通过限额检查。
+  if (quotaUnits > 0) {
+    // 限额 = max(下限, round(基数 × trust))；按 numeric 取整（四舍五入，与原 SQLite ROUND 一致）。
+    const usedToday = sql`(CASE WHEN ${installations.rescuesDay} = excluded.rescues_day THEN ${installations.rescuesToday} ELSE 0 END)`;
+    const reserved = await db
+      .insert(installations)
+      .values({
+        id: installHash,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        rescuesDay: today,
+        rescuesToday: quotaUnits,
+      })
+      .onConflictDoUpdate({
+        target: installations.id,
+        set: {
+          lastSeenAt: sql`excluded.last_seen_at`,
+          rescuesDay: sql`excluded.rescues_day`,
+          rescuesToday: sql`${usedToday} + excluded.rescues_today`,
+        },
+        setWhere: sql`${usedToday} + excluded.rescues_today <= GREATEST(${POLICY.minDailyLimit}::numeric, ROUND((${POLICY.rescueDailyLimit}::int * ${installations.trust})::numeric))`,
+      })
+      .returning({ id: installations.id });
+    if (reserved.length === 0) {
+      return { ok: false, httpStatus: 429, error: 'rate_limited' };
+    }
+  }
+
+  // 批处理（与逐条执行行为一致，仅合并数据库往返）：
+  //   1) 换号追踪的正主、当前标签已在上面并发读出，同 x_user_id 共享内存镜像；
+  //   2) 是否变化按条目顺序内存推演 —— 批内同 canonical 的后续条目与逐条执行一样得到 duplicate；
+  //   3) rescues 与 active_labels 的写入合成一条 CTE 语句，一次往返、整体原子；
+  //      批内同 canonical 的 rescues 行先在内存里折叠成最终值（与逐条 UPSERT 的
+  //      COALESCE 叠加结果一致），避免一条语句里同一行被更新两次；
+  //   4) 别名写入路径保持逐条：直接追加（无配额），且频率低，属冷路径。
 
   // 正主归一（纯内存计算，不依赖任何写入）。
   const canonicalByResultIndex = new Map<number, string>();
   for (const item of valid) {
     let canonical = item.rescue.handle;
-    const known = item.rescue.xUserId
-      ? (knownByXUserId.get(item.rescue.xUserId) ?? null)
-      : null;
+    const known = item.rescue.xUserId ? (knownByXUserId.get(item.rescue.xUserId) ?? null) : null;
     if (known && known.handle !== item.rescue.handle) {
       canonical = known.handle;
     }
     canonicalByResultIndex.set(item.resultIndex, canonical);
   }
 
-  // 当前标签读取（每个 distinct canonical 一次；首次出现前无本请求写入会改动 active_labels）。
-  const distinctCanonicals = [...new Set(canonicalByResultIndex.values())];
-  const labelState = new Map<string, AccountLabel>();
-  if (distinctCanonicals.length > 0) {
-    const labelRows = await batchReads<{ label: AccountLabel }>(
-      env,
-      distinctCanonicals.map((handle) =>
-        env.DB.prepare(
-          'SELECT label FROM active_labels WHERE installation_id = ?1 AND handle = ?2',
-        ).bind(installHash, handle),
-      ),
-    );
-    distinctCanonicals.forEach((handle, index) => {
-      const row = labelRows[index]!.results[0];
-      if (row) {
-        labelState.set(handle, row.label);
-      }
-    });
+  // 换号后正主不在本批原始 handle 里时，补读本安装在这些正主上的当前标签（冷路径）。
+  const unreadCanonicals = [...new Set(canonicalByResultIndex.values())].filter(
+    (handle) => !uniqueHandles.includes(handle),
+  );
+  if (unreadCanonicals.length > 0) {
+    const extra = await db
+      .select({ handle: activeLabels.handle, label: activeLabels.label })
+      .from(activeLabels)
+      .where(
+        and(
+          eq(activeLabels.installationId, installHash),
+          inArray(activeLabels.handle, unreadCanonicals),
+        ),
+      );
+    for (const row of extra) {
+      labelState.set(row.handle, row.label);
+    }
   }
 
-  const writeStatements: D1PreparedStatement[] = [];
+  const rescueRows = new Map<string, typeof rescues.$inferInsert>();
+  const labelRows: (typeof activeLabels.$inferInsert)[] = [];
   // 别名镜像：同 x_user_id 的后续条目要与逐条执行一样看到前面已追加的别名。
   const aliasMirror = new Map<string, string[]>();
-  // 先记下需要刷新计数的账号，批量收敛（逐账号刷新会把 D1 调用放大 N×10 倍）。
+  // 先记下需要刷新计数的账号，批量收敛（逐账号刷新会把往返放大 N×10 倍）。
   const refreshingHandles: string[] = [];
   const existsCheckIndexes = new Map<number, string>();
   for (const item of valid) {
@@ -219,52 +230,49 @@ export async function processRescueBatch(
       }
       if (!aliases.includes(r.handle)) {
         aliases.push(r.handle);
-        await env.DB.prepare('UPDATE accounts SET aliases = ?2 WHERE handle = ?1')
-          .bind(known.handle, JSON.stringify(aliases))
-          .run();
+        await db
+          .update(accounts)
+          .set({ aliases: JSON.stringify(aliases) })
+          .where(eq(accounts.handle, known.handle));
       }
     }
 
-    writeStatements.push(
-      env.DB.prepare(
-        `INSERT INTO rescues
-           (handle, x_user_id, evidence_post_id, installation_id, client_version, created_at,
-            detection_source, rule_id, detection_reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-         ON CONFLICT(installation_id, handle) DO UPDATE SET
-           x_user_id = COALESCE(excluded.x_user_id, rescues.x_user_id),
-           evidence_post_id = COALESCE(excluded.evidence_post_id, rescues.evidence_post_id),
-           client_version = excluded.client_version,
-           created_at = excluded.created_at,
-           detection_source = COALESCE(excluded.detection_source, rescues.detection_source),
-           rule_id = COALESCE(excluded.rule_id, rescues.rule_id),
-           detection_reason = COALESCE(excluded.detection_reason, rescues.detection_reason)`,
-      )
-        .bind(
-          canonical,
-          r.xUserId,
-          r.evidencePostId,
-          installHash,
-          clientVersion,
-          now,
-          r.detectionSource,
-          r.ruleId,
-          r.detectionReason,
-        ),
+    // 同一 (installation_id, handle) 的后续条目叠加在前一条之上：
+    // client_version / created_at 取后者，其余字段 COALESCE(后者, 前者)。
+    const incoming: typeof rescues.$inferInsert = {
+      handle: canonical,
+      xUserId: r.xUserId,
+      evidencePostId: r.evidencePostId,
+      installationId: installHash,
+      clientVersion,
+      createdAt: now,
+      detectionSource: r.detectionSource,
+      ruleId: r.ruleId,
+      detectionReason: r.detectionReason,
+    };
+    const previous = rescueRows.get(canonical);
+    rescueRows.set(
+      canonical,
+      previous
+        ? {
+            ...incoming,
+            xUserId: incoming.xUserId ?? previous.xUserId ?? null,
+            evidencePostId: incoming.evidencePostId ?? previous.evidencePostId ?? null,
+            detectionSource: incoming.detectionSource ?? previous.detectionSource ?? null,
+            ruleId: incoming.ruleId ?? previous.ruleId ?? null,
+            detectionReason: incoming.detectionReason ?? previous.detectionReason ?? null,
+          }
+        : incoming,
     );
 
     // 标签是否变化的内存推演：与 setActiveLabel 的「同标签幂等」语义一致。
     if (labelState.get(canonical) !== 'allowed') {
-      writeStatements.push(
-        env.DB.prepare(
-          `INSERT INTO active_labels (installation_id, handle, label, updated_at)
-           VALUES (?1, ?2, ?3, ?4)
-           ON CONFLICT(installation_id, handle) DO UPDATE SET
-             label = excluded.label,
-             updated_at = excluded.updated_at`,
-        )
-          .bind(installHash, canonical, 'allowed', now),
-      );
+      labelRows.push({
+        installationId: installHash,
+        handle: canonical,
+        label: 'allowed',
+        updatedAt: now,
+      });
       labelState.set(canonical, 'allowed');
       refreshingHandles.push(canonical);
       existsCheckIndexes.set(item.resultIndex, canonical);
@@ -273,7 +281,40 @@ export async function processRescueBatch(
       results[item.resultIndex]!.status = 'duplicate';
     }
   }
-  await batchStatements(env, writeStatements);
+
+  // 多行写入按主键排序：并发请求以相同顺序锁行，避免死锁
+  const sortedRescueRows = [...rescueRows.values()].sort((a, b) => compareText(a.handle, b.handle));
+  labelRows.sort((a, b) => compareText(a.handle, b.handle));
+  const rescuesUpsert = db
+    .insert(rescues)
+    .values(sortedRescueRows)
+    .onConflictDoUpdate({
+      target: [rescues.installationId, rescues.handle],
+      set: {
+        xUserId: sql`COALESCE(excluded.x_user_id, ${rescues.xUserId})`,
+        evidencePostId: sql`COALESCE(excluded.evidence_post_id, ${rescues.evidencePostId})`,
+        clientVersion: sql`excluded.client_version`,
+        createdAt: sql`excluded.created_at`,
+        detectionSource: sql`COALESCE(excluded.detection_source, ${rescues.detectionSource})`,
+        ruleId: sql`COALESCE(excluded.rule_id, ${rescues.ruleId})`,
+        detectionReason: sql`COALESCE(excluded.detection_reason, ${rescues.detectionReason})`,
+      },
+    });
+  if (labelRows.length === 0) {
+    await retryOnConflict(async () => {
+      await rescuesUpsert;
+    });
+  } else {
+    const labelsUpsert = db
+      .insert(activeLabels)
+      .values(labelRows)
+      .onConflictDoUpdate({
+        target: [activeLabels.installationId, activeLabels.handle],
+        set: { label: sql`excluded.label`, updatedAt: sql`excluded.updated_at` },
+      });
+    const writeStatement = sql`WITH r AS ${rescuesUpsert}, l AS ${labelsUpsert} SELECT 1`;
+    await retryOnConflict(() => db.execute(writeStatement));
+  }
 
   const existingHandles = await refreshAccountsFromLabels(env, refreshingHandles);
   for (const [resultIndex, canonical] of existsCheckIndexes) {

@@ -15,7 +15,11 @@ describe('runNativeAction', () => {
     document.cookie = 'ct0=csrf-token-123';
     const fetchMock = mockFetch(200);
 
-    const result = await runNativeAction('block', '900000000000000001', fetchMock as unknown as typeof fetch);
+    const result = await runNativeAction(
+      'block',
+      '900000000000000001',
+      fetchMock as unknown as typeof fetch,
+    );
 
     expect(result).toEqual({ ok: true });
     expect(fetchMock).toHaveBeenCalledWith(
@@ -46,7 +50,11 @@ describe('runNativeAction', () => {
     [500, 'http_error'],
   ])('maps HTTP %i to %s failure', async (status, code) => {
     document.cookie = 'ct0=csrf-token-123';
-    const result = await runNativeAction('block', '1', mockFetch(status) as unknown as typeof fetch);
+    const result = await runNativeAction(
+      'block',
+      '1',
+      mockFetch(status) as unknown as typeof fetch,
+    );
     expect(result).toMatchObject({ ok: false, code });
   });
 
@@ -60,5 +68,34 @@ describe('runNativeAction', () => {
     const failing = vi.fn().mockRejectedValue(new Error('offline'));
     const result = await runNativeAction('block', '1', failing as unknown as typeof fetch);
     expect(result).toMatchObject({ ok: false, code: 'network_error', message: 'offline' });
+  });
+
+  it('403 的响应体带人机验证特征时归为 challenge，而不是登录失效', async () => {
+    document.cookie = 'ct0=csrf-token-123';
+    const body = JSON.stringify({
+      errors: [{ message: 'This request requires a challenge', challenge_id: 'abc' }],
+    });
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      clone: () => ({ text: async () => body }),
+    });
+    const result = await runNativeAction('block', '1', fetchMock as unknown as typeof fetch);
+    expect(result).toMatchObject({ ok: false, code: 'challenge', statusCode: 403 });
+  });
+
+  it('读不出响应体时退回 auth_required，不猜成验证码', async () => {
+    document.cookie = 'ct0=csrf-token-123';
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      clone: () => ({
+        text: async () => {
+          throw new Error('body consumed');
+        },
+      }),
+    });
+    const result = await runNativeAction('block', '1', fetchMock as unknown as typeof fetch);
+    expect(result).toMatchObject({ ok: false, code: 'auth_required', statusCode: 403 });
   });
 });

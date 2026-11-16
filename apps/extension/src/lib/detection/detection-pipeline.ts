@@ -12,11 +12,10 @@
 
 import {
   detect,
-  contactNumberBait,
+  RUNTIME_HEURISTICS,
   type DetectInput,
   type Detection,
   type HeuristicRule,
-  weakSignalCombo,
 } from '@feedsieve/detector';
 import type { CommunityEntry, MarkStrength } from '@feedsieve/community-lists';
 import type { RuntimeCommunity } from '../community/community-store';
@@ -61,35 +60,68 @@ function keywordCategoryFromCatalog(
 }
 
 /**
- * 社区名单命中的黄框理由：票数为主体，证据/分类为注脚。
- * 发布分类可能来自证据推导而非逐张票面，措辞不宣称「N 人标记为 X」；
- * 分类为 other（无证据、无具体票）时只报票数，不冒充具体理由。
+ * 社区名单命中的黄框理由：票数为主体，证据/分类/争议为注脚。
+ * 发布分类可能来自证据推导而非逐张票面，措辞不宣称「N 人标记为 X」。
+ *
+ * 票数不等于共识：有抢救票时同时报出来，否则「5 人标记」看起来像 5 人一致认定。
+ * 分类 other 且没有任何证据时写明「原因未细分」——旧客户端手动票不带原因，
+ * 与其让别人猜，不如承认这条标注没有可解释的细分理由。
+ * 维护者写过 reason 的条目优先展示维护者说明（维护者单源时票数位也换成「维护者标注」）。
  */
 export function communityHitReason(
-  entry: Pick<CommunityEntry, 'category' | 'report_count' | 'domains' | 'campaign_size'>,
+  entry: Pick<
+    CommunityEntry,
+    | 'category'
+    | 'report_count'
+    | 'rescue_count'
+    | 'sources'
+    | 'maintainer_note'
+    | 'domains'
+    | 'campaign_size'
+  >,
   uiLanguage: UiLanguage,
 ): string {
+  const zh = uiLanguage === 'zh';
+  const maintainer = entry.sources.includes('maintainer');
+  const note = maintainer ? (entry.maintainer_note?.trim() ?? '') : '';
   const voteSummary =
-    entry.report_count > 1
-      ? uiLanguage === 'zh'
-        ? `${entry.report_count} 人标记`
-        : `${entry.report_count} community marks`
-      : uiLanguage === 'zh'
-        ? '社区名单'
-        : 'Community list';
-  const detail =
-    (entry.domains?.length ?? 0) > 0
-      ? uiLanguage === 'zh'
+    maintainer && entry.report_count <= 0
+      ? zh
+        ? '维护者标注'
+        : 'Maintainer listed'
+      : entry.report_count > 1
+        ? zh
+          ? `${entry.report_count} 人标记`
+          : `${entry.report_count} community marks`
+        : zh
+          ? '社区名单'
+          : 'Community list';
+  const rescueSummary =
+    entry.rescue_count > 0
+      ? zh
+        ? `${entry.rescue_count} 人抢救`
+        : `${entry.rescue_count} rescues`
+      : '';
+  const detail = note
+    ? entry.report_count > 0
+      ? zh
+        ? `维护者：${note}`
+        : `Maintainer: ${note}`
+      : note
+    : (entry.domains?.length ?? 0) > 0
+      ? zh
         ? '外链指向垃圾域名'
         : 'links to spam domains'
       : (entry.campaign_size ?? 0) >= 2
-        ? uiLanguage === 'zh'
+        ? zh
           ? `与 ${entry.campaign_size} 个已确认垃圾账号同模板`
           : `matches template of ${entry.campaign_size} confirmed spam accounts`
         : entry.category !== 'other'
           ? categoryLabel(entry.category, uiLanguage)
-          : '';
-  return detail ? `${voteSummary} · ${detail}` : voteSummary;
+          : zh
+            ? '原因未细分'
+            : 'reason not specified';
+  return [voteSummary, rescueSummary, detail].filter(Boolean).join(' · ');
 }
 
 export function runDetectionPipeline(input: DetectionPipelineInput): DetectionPipelineResult {
@@ -121,10 +153,24 @@ export function runDetectionPipeline(input: DetectionPipelineInput): DetectionPi
     };
   }
 
+  // 误伤率超线、已被服务端静音的规则（快照 muted_rules）：不再用它们标黄框。名单命中不受影响。
+  const muted = community?.mutedRules;
+  const isMuted = (found: Detection | null): boolean =>
+    !!found?.ruleId &&
+    !!muted?.has(found.ruleId) &&
+    found.source !== 'community-list' &&
+    found.source !== 'builtin-list';
+  // 精确指纹和话术变体分开静音：只静音其一时，另一种照常用
+  const exactMuted = !!muted?.has('community-fingerprint');
+  const variantMuted = !!muted?.has('community-fingerprint-sim');
+  const domainsMuted = !!muted?.has('community-domain');
+
   // 识别顺序：社区快照名单 -> 内置名单兜底 -> 用户/官方可配置词库。
   const evidenceOptions = {
-    ...(community?.fingerprintSet.size ? { fingerprints: community.fingerprintSet } : {}),
-    ...(community?.domainSet.size ? { domains: community.domainSet } : {}),
+    ...(community?.fingerprintSet.size && !exactMuted
+      ? { fingerprints: community.fingerprintSet }
+      : {}),
+    ...(community?.domainSet.size && !domainsMuted ? { domains: community.domainSet } : {}),
   };
   let detection = community
     ? detect(source, {
@@ -132,12 +178,16 @@ export function runDetectionPipeline(input: DetectionPipelineInput): DetectionPi
         listSource: 'community-list',
         // v0.5 指纹即 SimHash：simhashes 集合与 fingerprints 集合同源，
         // exact 命中优先，miss 后走汉明距离找「话术变体」
-        ...(community.fingerprintSet.size ? { simhashes: community.fingerprintSet } : {}),
+        ...(community.fingerprintSet.size && !variantMuted
+          ? { simhashes: community.fingerprintSet }
+          : {}),
         ...evidenceOptions,
         // 关键词/默认名称等单信号只保留在 Detector 评测层，不直接进入黄框
         heuristics: [],
       })
     : null;
+  // 兜底：命中的是被静音的规则就当没命中，继续往下查
+  if (isMuted(detection)) detection = null;
   if (!detection && builtinList.size > 0) {
     detection = detect(source, {
       list: builtinList,
@@ -149,12 +199,15 @@ export function runDetectionPipeline(input: DetectionPipelineInput): DetectionPi
   if (!detection) {
     detection = detect(source, {
       ...evidenceOptions,
-      // 用户明确配置的字面短语 / 官方词库，加上两个直线双信号内置启发式——
-      // weak-signal-combo（乱码/数字批量号锚点 + 内容佐证）与
-      // contact-number-bait（正文长数字载荷 + 简介钩子），分层见 detection-policy；
+      // 用户明确配置的字面短语 / 官方词库，加上内置组合层与双信号启发式（RUNTIME_HEURISTICS）——
+      // weak-signal-combo（乱码/数字批量号锚点 + 内容佐证）、fresh-account-combo（新注册小号 +
+      // 内容佐证）与 contact-number-bait（正文长数字载荷 + 简介钩子），分层见 detection-policy；
       // 其余内置单信号规则仍只留在 detector 评测层。排在词库规则之后收尾。
-      heuristics: [...keywordHeuristics, weakSignalCombo, contactNumberBait],
+      heuristics: [...keywordHeuristics, ...RUNTIME_HEURISTICS].filter(
+        (rule) => !muted?.has(rule.id),
+      ),
     });
+    if (isMuted(detection)) detection = null;
   }
 
   if (!detection) {

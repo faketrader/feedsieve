@@ -13,8 +13,9 @@ import {
   PUBLIC_BLOCKLIST_PACK,
   SNAPSHOT_PACK,
 } from '../src/snapshot';
-import { MAINTAINER_UPSERT_SQL } from '../src/maintainer-blocklist';
-import { MAINTAINER_WHITELIST_UPSERT_SQL } from '../src/maintainer-whitelist';
+import { getDb } from '../src/db/client';
+import { maintainerBlocklist, maintainerWhitelist, snapshots } from '../src/db/schema';
+import { spreadLatestReport } from './vote-days';
 
 const ORIGIN = 'https://api.example.com';
 
@@ -31,6 +32,7 @@ async function report(installationId: string, handle: string, extra: Record<stri
     env,
   );
   expect(res.status).toBe(200);
+  await spreadLatestReport();
 }
 
 async function rescue(installationId: string, handle: string) {
@@ -152,8 +154,8 @@ describe('snapshot pipeline', () => {
     expect(entry.report_count).toBe(4);
     expect(entry.rescue_count).toBe(0);
     expect(entry.net_votes).toBe(4);
-    // 4 票同日：4/7 = 0.571 → 0.57（未达爆发线，不打折）
-    expect(entry.community_score).toBe(0.57);
+    // 4 票分在 2 天（spreadLatestReport）：4/7 = 0.571 + 跨天 0.02 → 0.59
+    expect(entry.community_score).toBe(0.59);
     expect(entry.evidence_post_ids).toEqual(['18000000000000000']);
 
     const latest = (await (
@@ -191,7 +193,10 @@ describe('snapshot pipeline', () => {
       detection_source: 'heuristic',
     });
     // fp_user：4 张 other 票（2 个安装带同一话术指纹，达快照下发门槛）→ copy_paste
-    for (const id of ['fp000000-3001-4000-8000-ffffffffffff', 'fp000000-3002-4000-8000-ffffffffffff']) {
+    for (const id of [
+      'fp000000-3001-4000-8000-ffffffffffff',
+      'fp000000-3002-4000-8000-ffffffffffff',
+    ]) {
       await report(id, 'fp_user', { reason: 'other', content_fingerprint: '0123456789abcdef' });
     }
     await report('fp000000-3003-4000-8000-ffffffffffff', 'fp_user', { reason: 'other' });
@@ -280,7 +285,8 @@ describe('snapshot pipeline', () => {
   });
 
   it('verified 变化（抢救票产生白名单条目）会 mint 新版本而不是复用旧 body', async () => {
-    const first = (await generateSnapshot(env, 0, { bypassDailyOnce: true })).manifest as unknown as Manifest;
+    const first = (await generateSnapshot(env, 0, { bypassDailyOnce: true }))
+      .manifest as unknown as Manifest;
     // 制造一个 rescue - report = 4 的新白名单条目（rescue_user 11 字符，合法 handle）
     const ids = [
       'wwwwwwww-4001-4001-8000-wwwwwwwwwwww',
@@ -291,14 +297,13 @@ describe('snapshot pipeline', () => {
     await report(ids[0]!, 'rescue_user');
     for (const id of ids) await rescue(id, 'rescue_user');
 
-    const second = (await generateSnapshot(env, 0, { bypassDailyOnce: true })).manifest as unknown as Manifest;
+    const second = (await generateSnapshot(env, 0, { bypassDailyOnce: true }))
+      .manifest as unknown as Manifest;
     expect(second.snapshot_version).not.toBe(first.snapshot_version);
     const body = JSON.parse(
       await (
         await worker.fetch(
-          new Request(
-            `${ORIGIN}/v1/snapshots/${second.snapshot_version}/${SNAPSHOT_PACK}`,
-          ),
+          new Request(`${ORIGIN}/v1/snapshots/${second.snapshot_version}/${SNAPSHOT_PACK}`),
           env,
         )
       ).text(),
@@ -314,16 +319,22 @@ describe('snapshot pipeline', () => {
     ];
     // 同账号虽有 3 个黑票（单独看会进黑名单），白名单一票否决 -> 进 whitelist 段、不进 entries
     for (const id of installs) await report(id, 'vouched_user');
-    await env.DB.prepare(MAINTAINER_WHITELIST_UPSERT_SQL)
-      .bind('vouched_user', null, null, null, '误标申诉已核实：知名反诈骗博主', Date.now())
-      .run();
+    await getDb(env).insert(maintainerWhitelist).values({
+      handle: 'vouched_user',
+      note: '误标申诉已核实：知名反诈骗博主',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
 
     await generateSnapshot(env, 0, { bypassDailyOnce: true });
     const res = await worker.fetch(
       new Request(
         `${ORIGIN}/v1/snapshots/${
-          ((await (await worker.fetch(new Request(`${ORIGIN}/v1/snapshots/latest`), env)).json()) as Manifest)
-            .snapshot_version
+          (
+            (await (
+              await worker.fetch(new Request(`${ORIGIN}/v1/snapshots/latest`), env)
+            ).json()) as Manifest
+          ).snapshot_version
         }/${SNAPSHOT_PACK}`,
       ),
       env,
@@ -346,19 +357,23 @@ describe('snapshot pipeline', () => {
   });
 
   it('whitelist 变化会 mint 新版本而不是复用旧 body', async () => {
-    const first = (await generateSnapshot(env, 0, { bypassDailyOnce: true })).manifest as unknown as Manifest;
-    await env.DB.prepare(MAINTAINER_WHITELIST_UPSERT_SQL)
-      .bind('second_vouch', '1234567890', null, null, '第二个推荐白名单账号', Date.now())
-      .run();
+    const first = (await generateSnapshot(env, 0, { bypassDailyOnce: true }))
+      .manifest as unknown as Manifest;
+    await getDb(env).insert(maintainerWhitelist).values({
+      handle: 'second_vouch',
+      xUserId: '1234567890',
+      note: '第二个推荐白名单账号',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
 
-    const second = (await generateSnapshot(env, 0, { bypassDailyOnce: true })).manifest as unknown as Manifest;
+    const second = (await generateSnapshot(env, 0, { bypassDailyOnce: true }))
+      .manifest as unknown as Manifest;
     expect(second.snapshot_version).not.toBe(first.snapshot_version);
     const body = JSON.parse(
       await (
         await worker.fetch(
-          new Request(
-            `${ORIGIN}/v1/snapshots/${second.snapshot_version}/${SNAPSHOT_PACK}`,
-          ),
+          new Request(`${ORIGIN}/v1/snapshots/${second.snapshot_version}/${SNAPSHOT_PACK}`),
           env,
         )
       ).text(),
@@ -411,32 +426,31 @@ describe('snapshot pipeline', () => {
   it.skipIf(env.REQUIRE_SIGNED_SNAPSHOTS !== '1')(
     'REQUIRE_SIGNED_SNAPSHOTS 开启时，未签名的新行不会成为最新公开快照',
     async () => {
-    const signed = (await generateSnapshot(env)).manifest as unknown as Manifest;
-    // 直接插入一条「更新但未签名」的行 —— 模拟存储侧注入
-    await env.DB.prepare(
-      `INSERT INTO snapshots (version, manifest_json, signature_json, files_json, created_at)
-       VALUES (?1, ?2, NULL, ?3, ?4)`,
-    )
-      .bind(
-        '2099.01.01.1',
-        JSON.stringify({
-          schema_version: 2,
-          snapshot_version: '2099.01.01.1',
-          generated_at: '2099-01-01T00:00:00Z',
-          files: [],
-        }),
-        '{}',
-        Math.floor(Date.now() / 1000),
-      )
-      .run();
+      const signed = (await generateSnapshot(env)).manifest as unknown as Manifest;
+      // 直接插入一条「更新但未签名」的行 —— 模拟存储侧注入
+      await getDb(env)
+        .insert(snapshots)
+        .values({
+          version: '2099.01.01.1',
+          manifestJson: JSON.stringify({
+            schema_version: 2,
+            snapshot_version: '2099.01.01.1',
+            generated_at: '2099-01-01T00:00:00Z',
+            files: [],
+          }),
+          signatureJson: null,
+          filesJson: '{}',
+          createdAt: Math.floor(Date.now() / 1000),
+        });
 
-    const latest = (await (
-      await worker.fetch(new Request(`${ORIGIN}/v1/snapshots/latest`), env)
-    ).json()) as Manifest;
-    // 门槛开启时跳过未签名行，仍返回已签名的最新版本
-    expect(latest.snapshot_version).toBe(signed.snapshot_version);
-    expect(latest.snapshot_version).not.toBe('2099.01.01.1');
-  });
+      const latest = (await (
+        await worker.fetch(new Request(`${ORIGIN}/v1/snapshots/latest`), env)
+      ).json()) as Manifest;
+      // 门槛开启时跳过未签名行，仍返回已签名的最新版本
+      expect(latest.snapshot_version).toBe(signed.snapshot_version);
+      expect(latest.snapshot_version).not.toBe('2099.01.01.1');
+    },
+  );
 
   it('REQUIRE_SIGNED_SNAPSHOTS=1 但签名密钥缺失时 fail fast，不发布扩展必拒的无签名快照', async () => {
     const misconfigured = {
@@ -471,10 +485,7 @@ describe('snapshot pipeline', () => {
     expect(await getLatestSnapshotVersion(env)).toBe(snapshot_version);
 
     // blocklist/latest.json 从 R2 返回最新文件体，与发布版本一致
-    const latestBody = await worker.fetch(
-      new Request(`${ORIGIN}/v1/blocklist/latest.json`),
-      env,
-    );
+    const latestBody = await worker.fetch(new Request(`${ORIGIN}/v1/blocklist/latest.json`), env);
     expect(latestBody.status).toBe(200);
     expect((await latestBody.json()) as { snapshot_version?: string }).toMatchObject({
       snapshot_version,
@@ -494,14 +505,15 @@ describe('snapshot pipeline', () => {
     ]) {
       await rescue(id, 'dual_role_user');
     }
-    await env.DB.prepare(MAINTAINER_UPSERT_SQL).bind(
-      'dual_role_user',
-      null,
-      'bot_spam',
-      '测试条目：既是维护者收录又满足 verified 公式',
-      null,
-      Math.floor(Date.now() / 1000),
-    ).run();
+    await getDb(env)
+      .insert(maintainerBlocklist)
+      .values({
+        handle: 'dual_role_user',
+        category: 'bot_spam',
+        reason: '测试条目：既是维护者收录又满足 verified 公式',
+        createdAt: Math.floor(Date.now() / 1000),
+        updatedAt: Math.floor(Date.now() / 1000),
+      });
 
     await generateSnapshot(env, 0, { bypassDailyOnce: true });
     const res = await worker.fetch(

@@ -20,7 +20,8 @@ beforeEach(() => {
   tabSendMessage = vi.fn().mockResolvedValue({ blocked: [], failed: [] });
   vi.stubGlobal('browser', {
     storage: {
-      local: { remove: vi.fn(),
+      local: {
+        remove: vi.fn(),
         // 提供空社区快照：真实环境下无快照时 lib 会用内置名单兜底（99+ 条），
         // 会让名单 tab 徽章常驻 99、按钮文本带数字，干扰本套冒烟断言。
         get: vi
@@ -47,6 +48,8 @@ beforeEach(() => {
 function renderApp(): HTMLElement {
   // jsdom 默认 innerHeight=768 会被判成侧边栏模式；固定成弹窗实际高度
   Object.defineProperty(window, 'innerHeight', { value: 600, configurable: true });
+  // 默认栏目是「洞察」；这组冒烟测试从「清理」开始
+  history.replaceState(null, '', '/?view=clean');
   const rootEl = document.createElement('div');
   document.body.append(rootEl);
   const root = ReactDOM.createRoot(rootEl);
@@ -63,6 +66,26 @@ async function waitForCondition(predicate: () => boolean, timeoutMs = 1200): Pro
   }
 }
 
+/**
+ * 视图是 React.lazy 的：点完栏目要等一次异步导入才挂上。
+ * 真实定时器等宏任务；测试里开了假定时器时手动推进，不然导入永远排不上。
+ */
+async function waitForLazy(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const startedAt = Date.now();
+  while (!predicate()) {
+    if (Date.now() - startedAt > timeoutMs) throw new Error('lazy view did not render');
+    if (vi.isFakeTimers()) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(16);
+      });
+    } else {
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 16));
+      });
+    }
+  }
+}
+
 function buttonWithText(root: HTMLElement, label: string): HTMLButtonElement {
   const button = [...root.querySelectorAll('button')].find((candidate) => {
     const clone = candidate.cloneNode(true) as HTMLElement;
@@ -72,6 +95,90 @@ function buttonWithText(root: HTMLElement, label: string): HTMLButtonElement {
   });
   if (!button) throw new Error(`button not found: ${label}`);
   return button;
+}
+
+/** 设置首页的二级入口（行文字后面带着数量，按标签名精确匹配）。 */
+function navRow(root: HTMLElement, label: string): HTMLButtonElement {
+  const row = [...root.querySelectorAll<HTMLButtonElement>('.nav-row')].find(
+    (candidate) => candidate.querySelector('.row-label')?.textContent?.trim() === label,
+  );
+  if (!row) throw new Error(`settings row not found: ${label}`);
+  return row;
+}
+
+/** 打开某个模块的齿轮页（tab 仍高亮该模块）。 */
+async function openModuleSettings(
+  root: HTMLElement,
+  navLabel: string,
+  gearLabel = `${navLabel}设置`,
+): Promise<void> {
+  await waitForLazy(() => root.querySelector('.section-nav button') !== null, 400);
+  // 水军 / 伪人 合并进了「降噪」：先点顶栏那一格，再点它的二级 tab
+  if (['水军', 'Spam', '伪人', 'AI'].includes(navLabel) && !root.querySelector('.section-subnav')) {
+    const groupTab = [...root.querySelectorAll<HTMLButtonElement>('.section-nav button')].find(
+      (button) => ['降噪', 'Denoise'].includes(button.textContent?.trim() ?? ''),
+    );
+    if (!groupTab) throw new Error('block tab not found');
+    await act(async () => groupTab.click());
+    await waitForLazy(() => root.querySelector('.section-subnav button') !== null);
+  }
+  await act(async () => buttonWithText(root, navLabel).click());
+  await waitForLazy(() => root.querySelector(`button[aria-label="${gearLabel}"]`) !== null);
+  await act(async () =>
+    root.querySelector<HTMLButtonElement>(`button[aria-label="${gearLabel}"]`)!.click(),
+  );
+  await waitForLazy(() => root.querySelector('.subpage-head') !== null);
+}
+
+/** 全局页（模块开关 / 通用 / 数据与隐私 / 关于）。 */
+async function openGlobal(root: HTMLElement): Promise<void> {
+  await waitForLazy(() => root.querySelector('.section-nav button') !== null, 400);
+  await act(async () =>
+    root.querySelector<HTMLButtonElement>('.section-nav .nav-settings')!.click(),
+  );
+  await waitForLazy(() => root.textContent?.includes('模块开关') ?? false);
+}
+
+/** 水军规则下的名单 / 关键词：降噪 tab → 齿轮 → 水军规则 → 子页。 */
+async function openFilterRule(root: HTMLElement, label: string): Promise<void> {
+  await openModuleSettings(root, '水军');
+  await waitForLazy(() => root.textContent?.includes('水军规则') ?? false);
+  await act(async () => navRow(root, '水军规则').click());
+  await waitForLazy(() => {
+    try {
+      navRow(root, label);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  await act(async () => navRow(root, label).click());
+}
+
+/** 旧测试里的「设置 › X」路径，映射到新 IA。 */
+async function openSettingsPage(root: HTMLElement, label: string): Promise<void> {
+  if (['关键词', '拉黑记录', '白名单', '关注保护'].includes(label)) {
+    await openFilterRule(root, label);
+    return;
+  }
+  if (label === '伪人标注') {
+    await openModuleSettings(root, '伪人');
+    return;
+  }
+  if (label === '发帖辅助') {
+    await openModuleSettings(root, '落笔');
+    return;
+  }
+  if (label === '数据与隐私') {
+    await openGlobal(root);
+    await act(async () => navRow(root, '数据与隐私').click());
+    return;
+  }
+  if (label === '语言与关于') {
+    await openGlobal(root);
+    return;
+  }
+  throw new Error(`unknown settings page: ${label}`);
 }
 
 function personalConfigFile(customPhrase = '迁移关键词'): File {
@@ -162,16 +269,14 @@ async function chooseFile(input: HTMLInputElement, file: File): Promise<void> {
 
 describe('popup App 渲染冒烟', () => {
   it('automatically clears transient notices', async () => {
+    const rootEl = renderApp();
+    // 先按真实定时器把按需加载的视图挂上，再切到假定时器测「提示自动消失」
+    await openSettingsPage(rootEl, '关键词');
+    const syncButton = rootEl.querySelector<HTMLButtonElement>('button[aria-label="同步词库"]');
+    if (!syncButton) throw new Error('keyword-pack sync button not found');
+
     vi.useFakeTimers();
     try {
-      const rootEl = renderApp();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(150);
-      });
-
-      await act(async () => buttonWithText(rootEl, '关键词').click());
-      const syncButton = rootEl.querySelector<HTMLButtonElement>('button[aria-label="同步词库"]');
-      if (!syncButton) throw new Error('keyword-pack sync button not found');
       await act(async () => {
         syncButton.click();
         await Promise.resolve();
@@ -187,61 +292,197 @@ describe('popup App 渲染冒烟', () => {
     }
   });
 
+  it('opens on the profile view when the active tab is a creator profile', async () => {
+    (browser.tabs.query as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 1, active: true, url: 'https://x.com/alice' },
+    ]);
+    // renderApp 固定带 ?view=clean（链接指定了视图就照旧）；这里模拟直接点开扩展图标
+    Object.defineProperty(window, 'innerHeight', { value: 600, configurable: true });
+    history.replaceState(null, '', '/');
+    const rootEl = document.createElement('div');
+    document.body.append(rootEl);
+    const root = ReactDOM.createRoot(rootEl);
+    mountedRoots.push(root);
+    await act(async () => {
+      root.render(React.createElement(App));
+    });
+    await waitForCondition(
+      () => rootEl.querySelector('.section-nav .is-active')?.textContent === '阅人',
+    );
+    expect(rootEl.querySelector('.section-nav .is-active')?.textContent).toBe('阅人');
+    // 判断完之前不渲染淘金：淘金页的工具栏一次都没出现过
+    expect(rootEl.querySelector('.hot-view')).toBeNull();
+  });
+
   it('renders header and empty page-marked hint without throwing', async () => {
     const rootEl = renderApp();
-    // 等 storage/tabs 异步 resolve 完成（加载态「…」过渡到空态提示）；
-    // 全量 verify 高并发时放宽到 250ms
-    await new Promise((r) => setTimeout(r, 250));
+    // 等 storage/tabs 异步 resolve 完成（加载态「…」过渡到空态提示）
+    await waitForLazy(() => rootEl.textContent?.includes('本页没有标黄的账号') ?? false);
 
-    expect(rootEl.textContent).toContain('福滤娃');
-    expect(rootEl.textContent).toContain('当前页面');
-    expect(rootEl.textContent).toContain('当前页面没有待处理账号');
-    expect(rootEl.textContent).toContain('一键拉黑全部');
-    expect(rootEl.textContent).toContain('清理');
-    expect(rootEl.textContent).toContain('名单');
-    expect(rootEl.textContent).toContain('关键词');
-    expect(rootEl.textContent).toContain('我的');
+    // 顶部只有栏目，不放商标和名字
+    expect(rootEl.querySelector('.masthead')?.textContent).not.toContain('福滤娃');
+    expect(rootEl.querySelector('.masthead img')).toBeNull();
+    expect(rootEl.textContent).toContain('本页标黄');
+    expect(rootEl.textContent).toContain('本页没有标黄的账号');
+    expect(rootEl.textContent).toContain('社区黑名单');
+    const nav = [...rootEl.querySelectorAll('.section-nav button')].map(
+      (button) => button.getAttribute('aria-label') ?? button.textContent,
+    );
+    // 拾穗的内容还没准备好，这一版先不挂入口
+    expect(nav).toEqual(['淘金', '阅人', '落笔', '降噪', '调校，设置']);
+    expect(
+      [...rootEl.querySelectorAll('.section-subnav button')].map((button) => button.textContent),
+    ).toEqual(['水军', '伪人', '禁语']);
 
-    await act(async () => buttonWithText(rootEl, '名单').click());
-    expect(rootEl.textContent).toContain('社区');
-    expect(rootEl.textContent).toContain('拉黑');
-    expect(rootEl.textContent).toContain('白名单');
-    expect(rootEl.textContent).toContain('关注');
-
-    await act(async () => buttonWithText(rootEl, '关键词').click());
-    expect(rootEl.textContent).toContain('我的关键词');
+    await openSettingsPage(rootEl, '关键词');
     expect(rootEl.textContent).toContain('官方预置词库');
     expect(rootEl.textContent).toContain('黄推 / 成人引流');
-    expect(rootEl.textContent).not.toContain('未订阅');
 
-    const adultToggle = rootEl.querySelector(
-      'button[role="switch"][aria-label^="黄推 / 成人引流"]',
-    ) as HTMLButtonElement | null;
-    expect(adultToggle?.getAttribute('aria-checked')).toBe('true');
+    const adultToggle = rootEl.querySelector<HTMLInputElement>(
+      'input[role="switch"][aria-label^="黄推 / 成人引流"]',
+    );
+    expect(adultToggle?.checked).toBe(true);
     await act(async () => adultToggle?.click());
-    expect(adultToggle?.getAttribute('aria-checked')).toBe('false');
+    expect(adultToggle?.checked).toBe(false);
 
-    const adultTitle = [...rootEl.querySelectorAll<HTMLButtonElement>('.keyword-pack-title')].find(
+    const adultTitle = [...rootEl.querySelectorAll<HTMLButtonElement>('.disclosure')].find(
       (button) => button.textContent?.includes('黄推 / 成人引流'),
     );
     await act(async () => adultTitle?.click());
     expect(rootEl.textContent).toContain('同城上门约炮');
 
-    await act(async () => buttonWithText(rootEl, '我的').click());
-    await act(async () => rootEl.querySelector<HTMLButtonElement>('.me-settings-entry')?.click());
-    expect(rootEl.textContent).toContain('页面标黄');
+    // 全局页：模块开关 + 通用 + 数据与隐私 + 关于
+    await openGlobal(rootEl);
+    for (const label of ['模块开关', '通用', '分享菜单', '界面语言', '数据与隐私', '关于'])
+      expect(rootEl.textContent).toContain(label);
+
+    // 每个模块的齿轮页就是它自己的配置
+    await openModuleSettings(rootEl, '伪人');
+    const aiToggle = rootEl.querySelector<HTMLInputElement>(
+      'input[role="switch"][aria-label="伪人标注"]',
+    );
+    expect(aiToggle?.checked).toBe(true);
+    await act(async () => {
+      aiToggle?.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(storageSet).toHaveBeenCalledWith({
+      moduleSettingsV1: expect.objectContaining({ aiCheck: false }),
+    });
+
+    await openModuleSettings(rootEl, '落笔');
+    const composeToggle = rootEl.querySelector<HTMLInputElement>(
+      'input[role="switch"][aria-label="发帖辅助"]',
+    );
+    expect(composeToggle?.checked).toBe(true);
+    await act(async () => {
+      composeToggle?.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(storageSet).toHaveBeenCalledWith({
+      composeScheduleV1: expect.objectContaining({ composeHelper: false, articleHelper: false }),
+    });
+
+    // 全局 → 通用 里切英文
+    await openGlobal(rootEl);
     await act(async () => buttonWithText(rootEl, 'EN').click());
-    expect(rootEl.textContent).toContain('FeedSieve');
+    expect(rootEl.textContent).toContain('Modules');
+    // 水军齿轮页 → 水军规则确认英文文案
+    await openModuleSettings(rootEl, 'Spam', 'Spam settings');
+    await act(async () => navRow(rootEl, 'Spam rules').click());
     expect(rootEl.textContent).toContain('Detection level');
+  });
+
+  it('二级页标题已经含父级名时，返回按钮不再重复一遍', async () => {
+    const rootEl = renderApp();
+    await openModuleSettings(rootEl, '落笔');
+    const head = rootEl.querySelector('.subpage-head')!;
+    expect(head.querySelector('h2')?.textContent).toBe('落笔设置');
+    // 标题里已经有「落笔」，返回按钮只留箭头，读屏名不变
+    expect(head.querySelector('.back-button')?.textContent).toBe('');
+    expect(head.querySelector('.back-button')?.getAttribute('aria-label')).toBe('返回 · 落笔');
+
+    // 父级名和标题不是一个词的二级页，返回按钮照旧写父级名
+    await openGlobal(rootEl);
+    await act(async () => navRow(rootEl, '数据与隐私').click());
+    await waitForLazy(() => rootEl.querySelector('.subpage-head h2')?.textContent === '数据与隐私');
+    expect(rootEl.querySelector('.subpage-head .back-button')?.textContent).toBe('调校');
+  });
+
+  it('降噪二级 tab：水军 / 伪人 / 禁语，切走再切回停在原处', async () => {
+    const rootEl = renderApp();
+    await waitForLazy(() => rootEl.querySelector('.section-subnav button') !== null);
+
+    const subnavLabels = (): (string | null)[] =>
+      [...rootEl.querySelectorAll('.section-subnav button')].map((button) => button.textContent);
+    const activeSubtab = (): string | null | undefined =>
+      rootEl.querySelector('.section-subnav .is-active')?.textContent;
+
+    expect(subnavLabels()).toEqual(['水军', '伪人', '禁语']);
+    expect(activeSubtab()).toBe('水军');
+
+    // 切到禁语：顶栏仍停在「降噪」
+    await act(async () => buttonWithText(rootEl, '禁语').click());
+    await waitForLazy(() => activeSubtab() === '禁语');
+    expect(rootEl.querySelector('.section-nav .is-active')?.textContent).toBe('降噪');
+
+    // 切到别的栏目再回「降噪」：停在刚才的禁语
+    await act(async () => buttonWithText(rootEl, '淘金').click());
+    await waitForLazy(() => rootEl.querySelector('.section-subnav') === null);
+    await act(async () => buttonWithText(rootEl, '降噪').click());
+    await waitForLazy(() => activeSubtab() === '禁语');
+    expect(activeSubtab()).toBe('禁语');
+  });
+
+  it('关闭模块后 tab 立即消失', async () => {
+    const rootEl = renderApp();
+    await openGlobal(rootEl);
+    const hotSwitch = rootEl.querySelector<HTMLInputElement>(
+      'input[role="switch"][aria-label="淘金"]',
+    )!;
+    await act(async () => {
+      hotSwitch.click();
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const nav = [...rootEl.querySelectorAll('.section-nav button')].map(
+      (button) => button.getAttribute('aria-label') ?? button.textContent,
+    );
+    expect(nav).not.toContain('淘金');
+    expect(nav).toContain('调校，设置');
+    expect(rootEl.querySelector('.section-nav .is-active')?.getAttribute('aria-label')).toBe(
+      '调校，设置',
+    );
+  });
+
+  it('发帖节奏：发帖辅助二级页里改每小时条数写回本机', async () => {
+    const rootEl = renderApp();
+    await new Promise((r) => setTimeout(r, 150));
+    await openSettingsPage(rootEl, '发帖辅助');
+    expect(rootEl.textContent).toContain('集中时段');
+    expect(rootEl.textContent).toContain('本周最多');
+
+    const perHour = rootEl.querySelector<HTMLSelectElement>('select[aria-label="每小时最多"]');
+    if (!perHour) throw new Error('per-hour select not found');
+    await act(async () => {
+      perHour.value = '2';
+      perHour.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(storageSet).toHaveBeenCalledWith({
+      composeScheduleV1: expect.objectContaining({
+        windows: expect.arrayContaining([expect.objectContaining({ perHour: 2 })]),
+      }),
+    });
+
+    // 返回上一层回到「发帖」页
+    await act(async () => rootEl.querySelector<HTMLButtonElement>('.back-button')!.click());
+    expect(rootEl.querySelector('.write-view')).not.toBeNull();
   });
 
   it('白名单 tab 手动添加账号：写入本地白名单并显示瞬时反馈', async () => {
     const rootEl = renderApp();
     await new Promise((r) => setTimeout(r, 150));
-    await act(async () => buttonWithText(rootEl, '名单').click());
-    const allowTab = rootEl.querySelector<HTMLButtonElement>('#allowlist-tab');
-    if (!allowTab) throw new Error('allowlist tab not found');
-    await act(async () => allowTab.click());
+    await openSettingsPage(rootEl, '白名单');
 
     const input = rootEl.querySelector<HTMLInputElement>('#allowlist-handle');
     if (!input) throw new Error('allowlist input not found');
@@ -266,7 +507,7 @@ describe('popup App 渲染冒烟', () => {
     const rootEl = renderApp();
     await new Promise((r) => setTimeout(r, 150));
 
-    await act(async () => buttonWithText(rootEl, '关键词').click());
+    await openSettingsPage(rootEl, '关键词');
     const helpIcon = rootEl.querySelector<HTMLElement>(
       '[aria-label="命中会标黄，是否拉黑由你决定。"]',
     );
@@ -286,7 +527,8 @@ describe('popup App 渲染冒烟', () => {
   it('renders page-marked accounts after querying the active x.com tab', async () => {
     vi.stubGlobal('browser', {
       storage: {
-        local: { remove: vi.fn(),
+        local: {
+          remove: vi.fn(),
           get: vi.fn().mockResolvedValue({ uiLanguage: 'zh' }),
           set: vi.fn().mockResolvedValue(undefined),
         },
@@ -314,18 +556,21 @@ describe('popup App 渲染冒烟', () => {
     await waitForCondition(() => rootEl.textContent?.includes('@spamking88') ?? false);
 
     expect(rootEl.textContent).toContain('@spamking88');
-    expect(rootEl.textContent).toContain('3 人标记 · 重复刷屏');
-    expect(rootEl.textContent).toContain('一键拉黑全部 · 1');
+    // 理由里和类别标签重复的那一段去掉
+    expect(rootEl.querySelector('.category-tag')?.textContent).toBe('重复刷屏');
+    expect(rootEl.querySelector('.reason-text')?.textContent).toBe('3 人标记');
+    expect(rootEl.querySelector('.primary-button')?.textContent).toBe('拉黑 1 个');
   });
 
-  it('shows every final-list source and sends the visible accounts to the one-click queue', async () => {
+  it('shows the community blocklist as one row and queues every eligible account', async () => {
     const snapshot = communitySnapshot([
       { handle: 'three_votes' },
       { handle: 'maintained', maintainer: true },
     ]);
     vi.stubGlobal('browser', {
       storage: {
-        local: { remove: vi.fn(),
+        local: {
+          remove: vi.fn(),
           get: vi.fn().mockResolvedValue({ uiLanguage: 'zh', communitySnapshotV2: snapshot }),
           set: vi.fn().mockResolvedValue(undefined),
         },
@@ -335,31 +580,23 @@ describe('popup App 渲染冒烟', () => {
         query: vi.fn().mockResolvedValue([{ id: 1, active: true, url: 'https://x.com/home' }]),
         sendMessage: tabSendMessage,
       },
-      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage: runtimeSendMessage },
+      runtime: {
+        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+        sendMessage: runtimeSendMessage,
+      },
     });
 
     const rootEl = renderApp();
     await new Promise((resolve) => setTimeout(resolve, 150));
-    await act(async () => buttonWithText(rootEl, '名单').click());
-
-    expect(rootEl.textContent).toContain('@three_votes');
-    expect(rootEl.textContent).toContain('3');
-    expect(rootEl.textContent).toContain('票');
-    expect(rootEl.textContent).toContain('@maintained');
-    expect(rootEl.textContent).toContain('推荐白名单');
-
-    // 一键入口必须排在名单列表之前（否则在 600px 弹窗里落到折叠线以下不可见）
-    const cleanAction = rootEl.querySelector('.community-clean-action');
-    const communityList = rootEl.querySelector('.community-list');
-    expect(cleanAction).not.toBeNull();
-    expect(communityList).not.toBeNull();
-    const cardChildren = [...rootEl.querySelector('.community-fill-card')!.children];
-    expect(cardChildren.indexOf(communityList!)).toBeGreaterThan(
-      cardChildren.indexOf(cleanAction!),
-    );
+    // 社区黑名单只占一行：数量 + 全部拉黑，不再逐条列出
+    expect(rootEl.textContent).toContain('2 个未拉黑');
+    expect(rootEl.textContent).not.toContain('@three_votes');
 
     await act(async () => {
-      buttonWithText(rootEl, '一键开始清理 2 个').click();
+      buttonWithText(rootEl, '全部拉黑').click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      // 全部拉黑需要二次确认
+      buttonWithText(rootEl, '再点一次：拉黑 2 个').click();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(tabSendMessage).toHaveBeenCalledWith(
@@ -378,7 +615,8 @@ describe('popup App 渲染冒烟', () => {
     const snapshot = communitySnapshot([{ handle: 'three_votes' }]);
     vi.stubGlobal('browser', {
       storage: {
-        local: { remove: vi.fn(),
+        local: {
+          remove: vi.fn(),
           get: vi.fn().mockResolvedValue({ uiLanguage: 'zh', communitySnapshotV2: snapshot }),
           set: storageSet,
         },
@@ -391,14 +629,18 @@ describe('popup App 渲染冒烟', () => {
         ]),
         sendMessage: tabSendMessage,
       },
-      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage: runtimeSendMessage },
+      runtime: {
+        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+        sendMessage: runtimeSendMessage,
+      },
     });
 
     const rootEl = renderApp();
     await new Promise((resolve) => setTimeout(resolve, 150));
-    await act(async () => buttonWithText(rootEl, '名单').click());
     await act(async () => {
-      rootEl.querySelector<HTMLButtonElement>('.community-clean-action')?.click();
+      buttonWithText(rootEl, '全部拉黑').click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      buttonWithText(rootEl, '再点一次：拉黑 1 个').click();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(tabSendMessage).not.toHaveBeenCalled();
@@ -408,10 +650,10 @@ describe('popup App 渲染冒烟', () => {
   it('starts with community uploads enabled and exposes local-only as an opt-out', async () => {
     const rootEl = renderApp();
     await new Promise((resolve) => setTimeout(resolve, 150));
-    await act(async () => buttonWithText(rootEl, '我的').click());
-    await act(async () => rootEl.querySelector<HTMLButtonElement>('.me-settings-entry')?.click());
-    const row = [...rootEl.querySelectorAll<HTMLLabelElement>('label.setting-row')].find(
-      (candidate) => candidate.textContent?.includes('仅本地运行'),
+    await openGlobal(rootEl);
+    await act(async () => navRow(rootEl, '数据与隐私').click());
+    const row = [...rootEl.querySelectorAll<HTMLElement>('.row')].find((candidate) =>
+      candidate.textContent?.includes('仅本地运行'),
     );
     const input = row?.querySelector<HTMLInputElement>('input[type="checkbox"]');
     expect(input).toBeTruthy();
@@ -425,15 +667,43 @@ describe('popup App 渲染冒烟', () => {
     });
   });
 
+  it('global hot list sharing is its own switch and locks when local-only mode is on', async () => {
+    const rootEl = renderApp();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await openGlobal(rootEl);
+    await act(async () => navRow(rootEl, '数据与隐私').click());
+    const rowInput = (label: string) =>
+      [...rootEl.querySelectorAll<HTMLElement>('.row')]
+        .find((row) => row.textContent?.includes(label))
+        ?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+    const hot = rowInput('参与全站热榜');
+    expect(hot?.checked).toBe(true);
+    expect(hot?.disabled).toBe(false);
+    await act(async () => {
+      hot?.click();
+      await Promise.resolve();
+    });
+    expect(storageSet).toHaveBeenCalledWith({
+      communitySettings: expect.objectContaining({ hotContribute: false, autoContribute: true }),
+    });
+    // 打开「仅本地运行」：全站热榜开关显示为关闭并锁住
+    await act(async () => {
+      rowInput('仅本地运行')?.click();
+      await Promise.resolve();
+    });
+    expect(rowInput('参与全站热榜')?.disabled).toBe(true);
+    expect(rowInput('参与全站热榜')?.checked).toBe(false);
+  });
+
   it('previews a personal config before applying only local preference storage', async () => {
     const rootEl = renderApp();
     await new Promise((r) => setTimeout(r, 150));
-    await act(async () => buttonWithText(rootEl, '我的').click());
-    await act(async () => rootEl.querySelector<HTMLButtonElement>('.me-settings-entry')?.click());
+    await openGlobal(rootEl);
+    await act(async () => navRow(rootEl, '数据与隐私').click());
 
     expect(rootEl.textContent).toContain('备份与迁移');
-    expect(rootEl.textContent).toContain('导出个人配置');
-    expect(rootEl.textContent).toContain('导入个人配置');
+    expect(rootEl.textContent).toContain('导出');
+    expect(rootEl.textContent).toContain('导入');
 
     const input = rootEl.querySelector<HTMLInputElement>('input[type="file"]');
     if (!input) throw new Error('personal config input not found');
@@ -464,8 +734,8 @@ describe('popup App 渲染冒烟', () => {
       expect.objectContaining({ communitySettings: expect.anything() }),
     );
     expect(storageSet).toHaveBeenCalledWith({ uiLanguage: 'zh' });
-    // 设置页多出的第 4 次写入是安装 ID 引导写入（getInstallationId 引导生成），与个人配置无关
-    expect(storageSet.mock.calls.filter(([value]) => 'installationId' in value).length).toBe(1);
+    // 「我的」页（会引导生成安装 ID）已移除：导入配置不应再顺带写安装 ID
+    expect(storageSet.mock.calls.filter(([value]) => 'installationId' in value).length).toBe(0);
     expect(runtimeSendMessage).toHaveBeenCalledTimes(initialRuntimeCalls);
     expect(tabSendMessage).toHaveBeenCalledTimes(initialTabCalls);
     expect(rootEl.textContent).toContain('仅本地设置已更新');
@@ -474,8 +744,8 @@ describe('popup App 渲染冒烟', () => {
   it('shows invalid-file feedback and can replace the scoped local configuration', async () => {
     const rootEl = renderApp();
     await new Promise((r) => setTimeout(r, 150));
-    await act(async () => buttonWithText(rootEl, '我的').click());
-    await act(async () => rootEl.querySelector<HTMLButtonElement>('.me-settings-entry')?.click());
+    await openGlobal(rootEl);
+    await act(async () => navRow(rootEl, '数据与隐私').click());
 
     const input = rootEl.querySelector<HTMLInputElement>('input[type="file"]');
     if (!input) throw new Error('personal config input not found');
@@ -495,7 +765,7 @@ describe('popup App 渲染冒烟', () => {
       expect.objectContaining({ communitySettings: expect.anything() }),
     );
     expect(storageSet).toHaveBeenCalledWith({ uiLanguage: 'zh' });
-    expect(storageSet.mock.calls.filter(([value]) => 'installationId' in value).length).toBe(1);
+    expect(storageSet.mock.calls.filter(([value]) => 'installationId' in value).length).toBe(0);
     expect(rootEl.textContent).toContain('仅本地设置已更新');
   });
 
@@ -504,12 +774,15 @@ describe('popup App 渲染冒烟', () => {
     get.mockResolvedValue({ uiLanguage: 'en' });
     const rootEl = renderApp();
     await new Promise((r) => setTimeout(r, 150));
-    await act(async () => buttonWithText(rootEl, 'Me').click());
-    await act(async () => rootEl.querySelector<HTMLButtonElement>('.me-settings-entry')?.click());
+    await act(async () =>
+      rootEl.querySelector<HTMLButtonElement>('.section-nav .nav-settings')!.click(),
+    );
+    await waitForLazy(() => rootEl.textContent?.includes('Modules') ?? false);
+    await act(async () => navRow(rootEl, 'Data & privacy').click());
 
     expect(rootEl.textContent).toContain('Backup & migration');
-    expect(rootEl.textContent).toContain('Export personal config');
-    expect(rootEl.textContent).toContain('Import personal config');
+    expect(rootEl.textContent).toContain('Export');
+    expect(rootEl.textContent).toContain('Import');
   });
 
   it('官方暂停开关生效时禁用拉黑入口并显示理由', async () => {
@@ -522,7 +795,8 @@ describe('popup App 渲染冒烟', () => {
     });
     vi.stubGlobal('browser', {
       storage: {
-        local: { remove: vi.fn(),
+        local: {
+          remove: vi.fn(),
           get: vi.fn().mockResolvedValue({ uiLanguage: 'zh', communitySnapshotV2: snapshot }),
           set: vi.fn().mockResolvedValue(undefined),
         },
@@ -532,18 +806,19 @@ describe('popup App 渲染冒烟', () => {
         query: vi.fn().mockResolvedValue([{ id: 1, active: true, url: 'https://x.com/home' }]),
         sendMessage: tabSendMessage,
       },
-      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage: runtimeSendMessage },
+      runtime: {
+        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+        sendMessage: runtimeSendMessage,
+      },
     });
 
     const rootEl = renderApp();
     // Wait for observable async state, not machine-dependent fixed rendering latency.
     await vi.waitFor(() => {
-      expect(rootEl.textContent).toContain('官方暂停了拉黑操作：接口排查中');
+      expect(rootEl.textContent).toContain('维护者已暂停拉黑：接口排查中');
     });
-    await act(async () => buttonWithText(rootEl, '名单').click());
     // 社区批量入口本来可用（有合格条目），降级后必须禁用
-    const cleanBtn = rootEl.querySelector<HTMLButtonElement>('.community-clean-action');
-    expect(cleanBtn?.disabled).toBe(true);
+    expect(buttonWithText(rootEl, '全部拉黑').disabled).toBe(true);
   });
 
   it('Block 接口能力失败时禁用拉黑入口并显示降级提示', async () => {
@@ -558,7 +833,8 @@ describe('popup App 渲染冒烟', () => {
     };
     vi.stubGlobal('browser', {
       storage: {
-        local: { remove: vi.fn(),
+        local: {
+          remove: vi.fn(),
           get: vi.fn().mockResolvedValue({ uiLanguage: 'zh' }),
           set: vi.fn().mockResolvedValue(undefined),
         },
@@ -568,21 +844,24 @@ describe('popup App 渲染冒烟', () => {
         query: vi.fn().mockResolvedValue([{ id: 1, active: true, url: 'https://x.com/home' }]),
         sendMessage: vi.fn().mockResolvedValue(caps),
       },
-      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage: runtimeSendMessage },
+      runtime: {
+        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+        sendMessage: runtimeSendMessage,
+      },
     });
 
     const rootEl = renderApp();
     await new Promise((resolve) => setTimeout(resolve, 150));
 
     expect(rootEl.textContent).toContain('拉黑接口暂不可用');
-    const blockBtn = rootEl.querySelector<HTMLButtonElement>('.primary-action');
-    expect(blockBtn?.disabled).toBe(true);
+    expect(buttonWithText(rootEl, '全部拉黑').disabled).toBe(true);
   });
 
   it('能力快照正常时（working）不显示降级提示', async () => {
     vi.stubGlobal('browser', {
       storage: {
-        local: { remove: vi.fn(),
+        local: {
+          remove: vi.fn(),
           get: vi.fn().mockResolvedValue({ uiLanguage: 'zh' }),
           set: vi.fn().mockResolvedValue(undefined),
         },
@@ -600,7 +879,10 @@ describe('popup App 渲染冒烟', () => {
           updatedAt: 0,
         }),
       },
-      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage: runtimeSendMessage },
+      runtime: {
+        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+        sendMessage: runtimeSendMessage,
+      },
     });
 
     const rootEl = renderApp();
@@ -620,18 +902,24 @@ describe('popup App 渲染冒烟', () => {
     let storedQueue: PersistentBlockQueueState | null = null;
     vi.stubGlobal('browser', {
       storage: {
-        local: { remove: vi.fn(),
+        local: {
+          remove: vi.fn(),
           get: vi.fn(() => {
-            const base: Record<string, unknown> = { uiLanguage: 'zh', communitySnapshotV2: snapshot };
+            const base: Record<string, unknown> = {
+              uiLanguage: 'zh',
+              communitySnapshotV2: snapshot,
+            };
             if (storedQueue) base.persistentBlockQueueV1 = storedQueue;
             return Promise.resolve(base);
           }),
           set: vi.fn().mockResolvedValue(undefined),
         },
         onChanged: {
-          addListener: vi.fn((listener: (changes: Record<string, unknown>, areaName: string) => void) => {
-            queueListeners.push(listener);
-          }),
+          addListener: vi.fn(
+            (listener: (changes: Record<string, unknown>, areaName: string) => void) => {
+              queueListeners.push(listener);
+            },
+          ),
           removeListener: vi.fn(),
         },
       },
@@ -639,7 +927,10 @@ describe('popup App 渲染冒烟', () => {
         query: vi.fn().mockResolvedValue([{ id: 1, active: true, url: 'https://x.com/home' }]),
         sendMessage: tabSendMessage,
       },
-      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage: runtimeSendMessage },
+      runtime: {
+        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+        sendMessage: runtimeSendMessage,
+      },
     });
 
     // 首屏：页面有 3 个黄框 → 按钮可用并带计数
@@ -651,9 +942,9 @@ describe('popup App 渲染冒烟', () => {
     const rootEl = renderApp();
     await new Promise((resolve) => setTimeout(resolve, 150));
 
-    const blockAll = rootEl.querySelector<HTMLButtonElement>('.primary-action');
+    const blockAll = rootEl.querySelector<HTMLButtonElement>('.primary-button');
     expect(blockAll?.disabled).toBe(false);
-    expect(blockAll?.textContent).toContain('3');
+    expect(blockAll?.textContent).toBe('拉黑 3 个');
 
     // 队列写入 running → 按钮仍禁用（进行中）；完成后重新拉黄框 → 已清空 → 放行并禁用
     storedQueue = {
@@ -672,13 +963,15 @@ describe('popup App 渲染冒烟', () => {
     fireStorageChange({ persistentBlockQueueV1: {} });
     await new Promise((resolve) => setTimeout(resolve, 30));
 
-    const refreshCalls = tabSendMessage.mock.calls.filter(([, message]) =>
-      Object.prototype.hasOwnProperty.call(message, 'type') &&
-      (message as { type: string }).type === 'feedsieve:page-marked-list',
+    const refreshCalls = tabSendMessage.mock.calls.filter(
+      ([, message]) =>
+        Object.prototype.hasOwnProperty.call(message, 'type') &&
+        (message as { type: string }).type === 'feedsieve:page-marked-list',
     );
     expect(refreshCalls.length).toBeGreaterThanOrEqual(2);
-    expect(blockAll?.disabled).toBe(true);
-    expect(rootEl.textContent).toContain('当前页面没有待处理账号');
+    // 清空后主按钮随列表一起消失，显示空态
+    expect(rootEl.querySelector('.primary-button')).toBeNull();
+    expect(rootEl.textContent).toContain('本页没有标黄的账号');
   });
 
   it('社区清理队列收尾有失败项时，如实展示失败原因而不是让按钮无声重试', async () => {
@@ -701,7 +994,8 @@ describe('popup App 渲染冒烟', () => {
     };
     vi.stubGlobal('browser', {
       storage: {
-        local: { remove: vi.fn(),
+        local: {
+          remove: vi.fn(),
           get: vi.fn().mockResolvedValue({
             uiLanguage: 'zh',
             communitySnapshotV2: snapshot,
@@ -715,19 +1009,19 @@ describe('popup App 渲染冒烟', () => {
         query: vi.fn().mockResolvedValue([{ id: 1, active: true, url: 'https://x.com/home' }]),
         sendMessage: tabSendMessage,
       },
-      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage: runtimeSendMessage },
+      runtime: {
+        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+        sendMessage: runtimeSendMessage,
+      },
     });
 
     const rootEl = renderApp();
     await new Promise((resolve) => setTimeout(resolve, 150));
-    await act(async () => buttonWithText(rootEl, '名单').click());
-
     // 失败条目与原因如实展示，避免「怎么都清不掉」的无声死循环
     expect(rootEl.textContent).toContain('@cndon91');
     expect(rootEl.textContent).toContain('缺少用户 ID');
     // 剩余可清理条目仍在，可重试
-    const retry = rootEl.querySelector<HTMLButtonElement>('.community-clean-action');
-    expect(retry?.disabled).toBe(false);
+    expect(buttonWithText(rootEl, '全部拉黑').disabled).toBe(false);
   });
 
   it('额度用尽暂停时给友情提醒，点「仍要继续」显式放行本轮', async () => {
@@ -745,7 +1039,8 @@ describe('popup App 渲染冒烟', () => {
     };
     vi.stubGlobal('browser', {
       storage: {
-        local: { remove: vi.fn(),
+        local: {
+          remove: vi.fn(),
           get: vi.fn().mockResolvedValue({
             uiLanguage: 'zh',
             persistentBlockQueueV1: pausedQueue,
@@ -758,15 +1053,17 @@ describe('popup App 渲染冒烟', () => {
         query: vi.fn().mockResolvedValue([{ id: 1, active: true, url: 'https://x.com/home' }]),
         sendMessage: tabSendMessage,
       },
-      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage: runtimeSendMessage },
+      runtime: {
+        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+        sendMessage: runtimeSendMessage,
+      },
     });
 
     const rootEl = renderApp();
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    await act(async () => buttonWithText(rootEl, '名单').click());
-
+    // 等可观察的状态，不靠固定延迟：全量校验并发高时 150ms 不一定够
+    await vi.waitFor(() => expect(rootEl.textContent).toContain('今日额度已用完'));
     // 友情提醒：额度到顶 + 风险提示；不再是「只能明天继续」的硬规定
-    expect(rootEl.textContent).toContain('今日安全额度已到（400/24h）');
+    expect(rootEl.textContent).toContain('今日额度已用完（400/24 小时）');
     expect(rootEl.textContent).toContain('仍要继续可以，但被 X 临时限制的风险会变高');
     await act(async () => buttonWithText(rootEl, '仍要继续').click());
     expect(tabSendMessage).toHaveBeenCalledWith(
@@ -801,7 +1098,8 @@ describe('popup App 渲染冒烟', () => {
     };
     vi.stubGlobal('browser', {
       storage: {
-        local: { remove: vi.fn(),
+        local: {
+          remove: vi.fn(),
           get: vi.fn().mockResolvedValue({
             uiLanguage: 'zh',
             persistentBlockQueueV1: failedQueue,
@@ -814,15 +1112,18 @@ describe('popup App 渲染冒烟', () => {
         query: vi.fn().mockResolvedValue([{ id: 1, active: true, url: 'https://x.com/search' }]),
         sendMessage: tabSendMessage,
       },
-      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage: runtimeSendMessage },
+      runtime: {
+        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+        sendMessage: runtimeSendMessage,
+      },
     });
 
     const rootEl = renderApp();
     await new Promise((resolve) => setTimeout(resolve, 150));
 
     // 死账号与瞬时失败语义分开：前者不用重试，后者等待重试
-    expect(rootEl.textContent).toContain('@mtzntzvcuuvan5（账号已不存在）');
-    expect(rootEl.textContent).toContain('@petersulli92sm（请求过于频繁）');
+    expect(rootEl.textContent).toContain('@mtzntzvcuuvan5账号已不存在');
+    expect(rootEl.textContent).toContain('@petersulli92sm请求过于频繁');
   });
 
   it('white-list tab 底部推荐白名单默认折叠，展开后展示维护者背书理由', async () => {
@@ -830,15 +1131,13 @@ describe('popup App 渲染冒烟', () => {
       storage: {
         local: {
           remove: vi.fn(),
-          get: vi
-              .fn()
-              .mockResolvedValue({
-                uiLanguage: 'zh',
-                communitySnapshotV2: whitelistSnapshot({
-                  handle: 'goodactor',
-                  note: '知名科普博主，多次被模板误标，复核为正常账号',
-                }),
-              }),
+          get: vi.fn().mockResolvedValue({
+            uiLanguage: 'zh',
+            communitySnapshotV2: whitelistSnapshot({
+              handle: 'goodactor',
+              note: '知名科普博主，多次被模板误标，复核为正常账号',
+            }),
+          }),
           set: storageSet,
         },
         onChanged: { addListener: vi.fn(), removeListener: vi.fn() },
@@ -847,29 +1146,30 @@ describe('popup App 渲染冒烟', () => {
         query: vi.fn().mockResolvedValue([{ id: 1, active: true, url: 'https://x.com/home' }]),
         sendMessage: tabSendMessage,
       },
-      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage: runtimeSendMessage },
+      runtime: {
+        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+        sendMessage: runtimeSendMessage,
+      },
     });
 
     const rootEl = renderApp();
     await new Promise((resolve) => setTimeout(resolve, 150));
-    await act(async () => buttonWithText(rootEl, '名单').click());
-    await act(async () => rootEl.querySelector<HTMLButtonElement>('#allowlist-tab')!.click());
+    await openSettingsPage(rootEl, '白名单');
 
     // 折叠态：标题行带数量，备注未展开
-    const toggle = rootEl.querySelector<HTMLButtonElement>('.recommend-list-toggle');
+    const toggle = rootEl.querySelector<HTMLButtonElement>('.disclosure');
     expect(toggle?.getAttribute('aria-expanded')).toBe('false');
     expect(toggle?.textContent).toContain('推荐白名单');
     expect(toggle?.textContent).toContain('1');
-    // 折叠时不渲染条目正文
     expect(rootEl.textContent).not.toContain('知名科普博主');
 
     await act(async () => toggle?.click());
-    const reasonLine = rootEl.querySelector<HTMLElement>('.recommend-list-head + .recommend-card-list .recommend-note');
-    expect(reasonLine?.textContent).toBe('知名科普博主，多次被模板误标，复核为正常账号');
-    expect(reasonLine?.getAttribute('title')).toBe('知名科普博主，多次被模板误标，复核为正常账号');
+    expect(rootEl.querySelector('.account-note')?.textContent).toBe(
+      '知名科普博主，多次被模板误标，复核为正常账号',
+    );
   });
 
-  it('支持在当前页面卡片浏览推文帖子正文，并可剔除误伤项后再一键拉黑', async () => {
+  it('支持在当前页面卡片浏览帖子正文，并可移除误伤项后再一键拉黑', async () => {
     vi.stubGlobal('browser', {
       storage: {
         local: {
@@ -883,7 +1183,10 @@ describe('popup App 渲染冒烟', () => {
         query: vi.fn().mockResolvedValue([{ id: 1, active: true, url: 'https://x.com/home' }]),
         sendMessage: tabSendMessage,
       },
-      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage: runtimeSendMessage },
+      runtime: {
+        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+        sendMessage: runtimeSendMessage,
+      },
     });
 
     tabSendMessage.mockImplementation(async (_tabId, msg) => {
@@ -920,31 +1223,66 @@ describe('popup App 渲染冒烟', () => {
     expect(rootEl.textContent).toContain('普通博主');
     expect(rootEl.textContent).toContain('这是一条正常的讨论');
 
-    const primaryBtn = rootEl.querySelector<HTMLButtonElement>('.primary-action');
-    expect(primaryBtn?.textContent).toContain('2');
+    const primaryBtn = rootEl.querySelector<HTMLButtonElement>('.primary-button');
+    expect(primaryBtn?.textContent).toBe('拉黑 2 个');
 
-    // 用户快速剔除误伤的 normal_user
-    const excludeBtns = rootEl.querySelectorAll<HTMLButtonElement>('.item-btn-exclude');
+    // 用户快速移除误伤的 normal_user
+    const excludeBtns = rootEl.querySelectorAll<HTMLButtonElement>('button[aria-label^="移除"]');
     expect(excludeBtns.length).toBe(2);
     await act(async () => {
-      excludeBtns[1]?.click(); // 剔除第 2 个（normal_user）
+      excludeBtns[1]?.click(); // 移除第 2 个（normal_user）
     });
 
-    // 剔除后整行离开清单，其余按钮文案联动为选中的 1 个
-    const reviewedRows = [...rootEl.querySelectorAll('.review-item')];
+    // 移除后整行离开清单，其余按钮文案联动为选中的 1 个
+    const reviewedRows = [...rootEl.querySelectorAll('.marked-list li')];
     expect(reviewedRows.some((row) => row.textContent?.includes('normal_user'))).toBe(false);
-    // 剔除专属账号后没有另行勾选，按钮回到「全部 · 剩余数」
-    expect(primaryBtn?.textContent).toContain('一键拉黑全部 · 1');
+    // 移除专属账号后没有另行勾选，按钮回到「全部 · 剩余数」
+    expect(primaryBtn?.textContent).toBe('拉黑 1 个');
 
-    // 点击一键拉黑，校验只发出了未剔除的账号
+    // 点击一键拉黑，校验只发出了未移除的账号
     await act(async () => {
       primaryBtn?.click();
     });
 
-    const blockCalls = tabSendMessage.mock.calls.filter(([, msg]) =>
-      (msg as { type: string }).type === 'feedsieve:run-page-block'
+    const blockCalls = tabSendMessage.mock.calls.filter(
+      ([, msg]) => (msg as { type: string }).type === 'feedsieve:run-page-block',
     );
     expect(blockCalls.length).toBe(1);
-    expect((blockCalls[0]?.[1] as { handles: string[] } | undefined)?.handles).toEqual(['spam_queen']);
+    expect((blockCalls[0]?.[1] as { handles: string[] } | undefined)?.handles).toEqual([
+      'spam_queen',
+    ]);
+  });
+  it('旧链接参数落到新位置：名单 › 拉黑记录进设置二级页，默认打开淘金', async () => {
+    Object.defineProperty(window, 'innerHeight', { value: 600, configurable: true });
+    history.replaceState(null, '', '/?view=lists&list=blocked');
+    const rootEl = document.createElement('div');
+    document.body.append(rootEl);
+    const root = ReactDOM.createRoot(rootEl);
+    mountedRoots.push(root);
+    await act(async () => root.render(React.createElement(App)));
+    await waitForCondition(() => rootEl.querySelector('.subpage-head') !== null);
+    expect(rootEl.querySelector('.subpage-head h2')?.textContent).toBe('拉黑记录');
+    expect(rootEl.querySelector('.section-nav .is-active')?.textContent).toBe('降噪');
+    expect(rootEl.querySelector('.section-subnav .is-active')?.textContent).toBe('水军');
+
+    // 返回「水军规则」→「水军设置」→ 水军页
+    await act(async () => rootEl.querySelector<HTMLButtonElement>('.back-button')!.click());
+    expect(rootEl.querySelector('.subpage-head h2')?.textContent).toBe('水军规则');
+    await act(async () => rootEl.querySelector<HTMLButtonElement>('.back-button')!.click());
+    expect(rootEl.querySelector('.subpage-head h2')?.textContent).toBe('水军设置');
+    await act(async () => rootEl.querySelector<HTMLButtonElement>('.back-button')!.click());
+    expect(rootEl.querySelector('.subpage-head')).toBeNull();
+    expect(rootEl.textContent).toContain('本页标黄');
+
+    history.replaceState(null, '', '/');
+    const second = document.createElement('div');
+    document.body.append(second);
+    const root2 = ReactDOM.createRoot(second);
+    mountedRoots.push(root2);
+    await act(async () => root2.render(React.createElement(App)));
+    await waitForCondition(
+      () => second.querySelector('.section-nav .is-active')?.textContent === '淘金',
+    );
+    expect(second.querySelector('.section-nav .is-active')?.textContent).toBe('淘金');
   });
 });

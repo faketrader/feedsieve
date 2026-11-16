@@ -1,3 +1,8 @@
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { getDb, type DbOrTx } from './db/client';
+import { maintainerWhitelist, maintainerWhitelistAudit } from './db/schema';
+import { collateC, compareText, stripNul } from './lib/sql';
+
 /**
  * 推荐白名单（金刚防护罩）的维护者通道。
  *
@@ -53,7 +58,7 @@ export function validateWhitelistEntry(raw: unknown): WhitelistEntryValidation {
   if (xUserId === undefined) {
     return { ok: false, error: 'invalid_x_user_id' };
   }
-  const note = typeof input.note === 'string' ? input.note.trim() : '';
+  const note = typeof input.note === 'string' ? stripNul(input.note).trim() : '';
   if (note.length < 4 || note.length > 240) {
     return { ok: false, error: 'invalid_note' };
   }
@@ -85,41 +90,98 @@ export async function listMaintainerWhitelist(
   env: Cloudflare.Env,
   includeInactive = false,
 ): Promise<MaintainerWhitelistEntry[]> {
-  const result = await env.DB.prepare(
-    `SELECT handle, x_user_id, name, avatar_url, note, active, created_at, updated_at
-     FROM maintainer_whitelist
-     ${includeInactive ? '' : 'WHERE active = 1'}
-     ORDER BY active DESC, updated_at DESC, handle ASC`,
-  ).all<{
-    handle: string;
-    x_user_id: string | null;
-    name: string | null;
-    avatar_url: string | null;
-    note: string;
-    active: number;
-    created_at: number;
-    updated_at: number;
-  }>();
-  return result.results.map((row) => ({ ...row, active: row.active === 1 }));
+  const rows = await getDb(env)
+    .select({
+      handle: maintainerWhitelist.handle,
+      x_user_id: maintainerWhitelist.xUserId,
+      name: maintainerWhitelist.name,
+      avatar_url: maintainerWhitelist.avatarUrl,
+      note: maintainerWhitelist.note,
+      active: maintainerWhitelist.active,
+      created_at: maintainerWhitelist.createdAt,
+      updated_at: maintainerWhitelist.updatedAt,
+    })
+    .from(maintainerWhitelist)
+    .where(includeInactive ? undefined : eq(maintainerWhitelist.active, 1))
+    .orderBy(
+      desc(maintainerWhitelist.active),
+      desc(maintainerWhitelist.updatedAt),
+      asc(collateC(maintainerWhitelist.handle)),
+    );
+  return rows.map((row) => ({ ...row, active: row.active === 1 }));
 }
 
-/** 发布脚本批量写入用；SQL 抽成常量保证脚本与语义测试走同一份语句。 */
-export const MAINTAINER_WHITELIST_UPSERT_SQL = `
-  INSERT INTO maintainer_whitelist
-    (handle, x_user_id, name, avatar_url, note, active, created_at, updated_at)
-  VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)
-  ON CONFLICT(handle) DO UPDATE SET
-    x_user_id = COALESCE(excluded.x_user_id, maintainer_whitelist.x_user_id),
-    name = COALESCE(excluded.name, maintainer_whitelist.name),
-    avatar_url = COALESCE(excluded.avatar_url, maintainer_whitelist.avatar_url),
-    note = excluded.note,
-    active = 1,
-    updated_at = excluded.updated_at`;
+export interface MaintainerWhitelistUpsertRow {
+  handle: string;
+  xUserId: string | null;
+  name: string | null;
+  avatarUrl: string | null;
+  note: string;
+}
 
-export const MAINTAINER_WHITELIST_AUDIT_INSERT_SQL = `
-  INSERT INTO maintainer_whitelist_audit
-    (action, handle, note, created_at)
-  VALUES (?1, ?2, ?3, ?4)`;
+/**
+ * 发布脚本批量写入用：upsert 并置为生效；已有行的 x_user_id / name / avatar_url
+ * 在新值为空时保留旧值。同一 handle 重复时后者生效。
+ */
+export async function upsertMaintainerWhitelist(
+  db: DbOrTx,
+  rows: MaintainerWhitelistUpsertRow[],
+  time: number,
+): Promise<void> {
+  // 按主键排序：并发批量 UPSERT 以相同顺序锁行，避免死锁
+  const unique = [...new Map(rows.map((row) => [row.handle, row] as const)).values()].sort((a, b) =>
+    compareText(a.handle, b.handle),
+  );
+  if (unique.length === 0) return;
+  await db
+    .insert(maintainerWhitelist)
+    .values(
+      unique.map((row) => ({
+        handle: row.handle,
+        xUserId: row.xUserId,
+        name: row.name,
+        avatarUrl: row.avatarUrl,
+        note: row.note,
+        active: 1,
+        createdAt: time,
+        updatedAt: time,
+      })),
+    )
+    .onConflictDoUpdate({
+      target: maintainerWhitelist.handle,
+      set: {
+        xUserId: sql`coalesce(excluded.x_user_id, ${maintainerWhitelist.xUserId})`,
+        name: sql`coalesce(excluded.name, ${maintainerWhitelist.name})`,
+        avatarUrl: sql`coalesce(excluded.avatar_url, ${maintainerWhitelist.avatarUrl})`,
+        note: sql`excluded.note`,
+        active: 1,
+        updatedAt: sql`excluded.updated_at`,
+      },
+    });
+}
 
-export const MAINTAINER_WHITELIST_DEACTIVATE_SQL =
-  'UPDATE maintainer_whitelist SET active = 0, updated_at = ?2 WHERE handle = ?1 AND active = 1';
+export async function insertMaintainerWhitelistAudits(
+  db: DbOrTx,
+  rows: Array<{ action: 'add' | 'remove' | 'update'; handle: string; note: string | null }>,
+  time: number,
+): Promise<void> {
+  if (rows.length === 0) return;
+  await db
+    .insert(maintainerWhitelistAudit)
+    .values(rows.map((row) => ({ ...row, createdAt: time })));
+}
+
+/** 停用仍生效的条目，返回实际被停用的 handle。 */
+export async function deactivateMaintainerWhitelist(
+  db: DbOrTx,
+  handles: string[],
+  time: number,
+): Promise<string[]> {
+  if (handles.length === 0) return [];
+  const rows = await db
+    .update(maintainerWhitelist)
+    .set({ active: 0, updatedAt: time })
+    .where(and(inArray(maintainerWhitelist.handle, handles), eq(maintainerWhitelist.active, 1)))
+    .returning({ handle: maintainerWhitelist.handle });
+  return rows.map((row) => row.handle);
+}

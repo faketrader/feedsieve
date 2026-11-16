@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "prepare": "node scripts/configure-git-hooks.mjs",
+    "prepare": "git config core.hooksPath .githooks || true",
     "lint": "eslint .",
     "format": "prettier --write .",
     "typecheck": "pnpm -r run typecheck",
@@ -17,7 +17,12 @@
     "keyword-packs:check": "node scripts/build-keyword-packs.mjs --check",
     "keyword-packs:publish": "sh scripts/publish-keyword-packs.sh",
     "build:extension": "pnpm --filter @feedsieve/extension build",
+    "build:extension:firefox": "pnpm --filter @feedsieve/extension build:firefox",
+    "check:extension:firefox": "node scripts/check-firefox.mjs",
+    "zip:extension:firefox": "pnpm --filter @feedsieve/extension zip:firefox",
     "verify": "sh scripts/verify.sh",
+    "smoke:extension": "node scripts/smoke-extension-runtime.mjs",
+    "release": "sh scripts/release.sh",
     "variant-tables:build": "node scripts/build-variant-tables.mjs"
   },
   "devDependencies": {
@@ -25,12 +30,21 @@
     "eslint": "^10.9.1",
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.11.0",
-    "happy-dom": "^20.11.6",
+    "happy-dom": "^21.0.4",
     "opencc-js": "^1.4.2",
     "playwright": "1.62.1",
     "prettier": "^3.9.6",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.68.0",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/realchendahuang/feedsieve.git"
+  },
+  "homepage": "https://feedsieve.win",
+  "bugs": {
+    "url": "https://github.com/realchendahuang/feedsieve/issues"
   }
 }

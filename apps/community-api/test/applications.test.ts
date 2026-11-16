@@ -178,3 +178,24 @@ describe('名单公示申请', () => {
     expect(result.ok).toBe(true);
   });
 });
+describe('邮件通道生产守卫', () => {
+  it('生产环境未配置邮件通道：绝不返回 dev_code（503 mail_unconfigured）', async () => {
+    const res = await worker.fetch(
+      new Request(`${ORIGIN}/v1/applications`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'cf-connecting-ip': '203.0.113.99' },
+        body: JSON.stringify({
+          handle: '@prod_guard',
+          kind: 'whitelist',
+          email: 'prod-guard@example.com',
+          statement: '本人宣言：不刷屏不引流。',
+        }),
+      }),
+      { ...env, WORKER_ENV: 'production' },
+    );
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe('mail_unconfigured');
+    expect(body.dev_code).toBeUndefined();
+  });
+});

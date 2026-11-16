@@ -1,9 +1,11 @@
-import { POLICY } from './reports';
+import { count, eq, gte } from 'drizzle-orm';
+import { getDb } from './db/client';
+import { accounts, adminAccountDrafts, installations, reports, rescues } from './db/schema';
 import { getLatestSnapshotMeta } from './snapshot';
 
 /**
  * 概览页分层指标。口径分层，避免「数据库记录了多少」与「已经公开发布了多少」混淆：
- * - community_listed：社区净票达标（进入公开名单的来源之一）
+ * - community_listed：在当前公开名单里的社区账号（accounts.listed，快照发布写入，政策 v4 口径）
  * - community_candidates：未达标的社区候选账号
  * - maintainer_entries：维护者草稿（独立来源）
  * - public_entries：客户端实际下载的最终名单条目数（快照 manifest，含维护者并集）
@@ -23,29 +25,17 @@ export interface DashboardMetrics {
 }
 
 export async function getDashboardMetrics(env: Cloudflare.Env): Promise<DashboardMetrics> {
+  const db = getDb(env);
   const dayAgo = Math.floor(Date.now() / 1000) - 24 * 3600;
-  const [draftCount, listed, candidates, feedback, reports24h, installs, snapshot] =
+  const [[draftCount], [listed], [candidates], [feedback], [reports24h], [installs], snapshot] =
     await Promise.all([
-      env.DB.prepare('SELECT COUNT(*) AS n FROM admin_account_drafts WHERE active = 1').first<{
-        n: number;
-      }>(),
-      env.DB.prepare(
-        'SELECT COUNT(*) AS n FROM accounts WHERE report_count - rescue_count >= ?1',
-      )
-        .bind(POLICY.communityNetThreshold)
-        .first<{ n: number }>(),
-      env.DB.prepare(
-        'SELECT COUNT(*) AS n FROM accounts WHERE report_count - rescue_count < ?1',
-      )
-        .bind(POLICY.communityNetThreshold)
-        .first<{ n: number }>(),
-      env.DB.prepare('SELECT COUNT(*) AS n FROM rescues').first<{ n: number }>(),
-      env.DB.prepare('SELECT COUNT(*) AS n FROM reports WHERE created_at >= ?1')
-        .bind(dayAgo)
-        .first<{ n: number }>(),
-      env.DB.prepare('SELECT COUNT(*) AS n FROM installations WHERE last_seen_at >= ?1')
-        .bind(dayAgo)
-        .first<{ n: number }>(),
+      db.select({ n: count() }).from(adminAccountDrafts).where(eq(adminAccountDrafts.active, 1)),
+      // 已上榜 / 候选：和公开名单同一口径（快照发布写入 accounts.listed）
+      db.select({ n: count() }).from(accounts).where(eq(accounts.listed, 1)),
+      db.select({ n: count() }).from(accounts).where(eq(accounts.listed, 0)),
+      db.select({ n: count() }).from(rescues),
+      db.select({ n: count() }).from(reports).where(gte(reports.createdAt, dayAgo)),
+      db.select({ n: count() }).from(installations).where(gte(installations.lastSeenAt, dayAgo)),
       getLatestSnapshotMeta(env),
     ]);
 

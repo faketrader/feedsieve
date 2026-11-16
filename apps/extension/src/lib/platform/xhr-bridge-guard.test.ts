@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import {
-  normalizeStrictHandle,
-  sanitizeBridgePayload,
-  sanitizeXUserId,
-} from './xhr-bridge-guard';
+import { normalizeStrictHandle, sanitizeBridgePayload, sanitizeXUserId } from './xhr-bridge-guard';
 
 /** 构造一个最小合法 payload，单个测试只覆盖需要伪造的字段。 */
 function validPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -169,6 +165,72 @@ import {
   timelineParseThrottleKey,
 } from './xhr-bridge-guard';
 
+describe('主页洞察需要的字段', () => {
+  it('保留帖子类型、置顶和媒体类型；非法值丢掉', () => {
+    const tweet = (postId: string, extra: Record<string, unknown>) => ({
+      postId,
+      author: { handle: 'alice' },
+      text: 't',
+      metrics: { views: 10 },
+      isReply: false,
+      isQuote: false,
+      ...extra,
+    });
+    const out = sanitizeBridgePayload(
+      validPayload({
+        matchedEndpoints: ['UserTimeline'],
+        tweets: [
+          tweet('1', { media: 'photo' }),
+          tweet('2', { isReply: true, isPinned: true, media: 'video' }),
+          tweet('3', { isQuote: true, media: 'hologram' }),
+          { postId: '4', author: { handle: 'alice' }, text: 't' },
+        ],
+      }),
+    );
+    expect(
+      out?.tweetStats.map(({ postId, kind, pinned, media }) => ({ postId, kind, pinned, media })),
+    ).toEqual([
+      { postId: '1', kind: 'original', pinned: undefined, media: 'photo' },
+      { postId: '2', kind: 'reply', pinned: true, media: 'video' },
+      { postId: '3', kind: 'quote', pinned: undefined, media: undefined },
+      // 没有类型标记的旧响应：不猜
+      { postId: '4', kind: undefined, pinned: undefined, media: undefined },
+    ]);
+  });
+
+  it('资料端点保留名字、头像和蓝标；头像只认 X 图床', () => {
+    const out = sanitizeBridgePayload(
+      validPayload({
+        matchedEndpoints: ['UserByScreenName'],
+        tweets: [],
+        users: [
+          {
+            handle: 'Alice',
+            displayName: '  Alice  ',
+            avatarUrl: 'https://pbs.twimg.com/profile_images/1/a_normal.jpg',
+            stats: { followers: 12_000, isBlueVerified: true },
+          },
+          {
+            handle: 'bob',
+            avatarUrl: 'https://evil.example/a.jpg',
+            stats: { followers: 5 },
+          },
+        ],
+      }),
+    );
+    expect(out?.authorStats).toEqual([
+      {
+        handle: 'alice',
+        followers: 12_000,
+        displayName: 'Alice',
+        avatarUrl: 'https://pbs.twimg.com/profile_images/1/a_normal.jpg',
+        verified: true,
+      },
+      { handle: 'bob', followers: 5 },
+    ]);
+  });
+});
+
 describe('timelineParseThrottleKey', () => {
   it('只命中两个首页时间线端点；其它端点（含 Following / TweetDetail）不节流', () => {
     expect(timelineParseThrottleKey('https://x.com/i/api/graphql/x/HomeTimeline?variables=1')).toBe(
@@ -177,9 +239,15 @@ describe('timelineParseThrottleKey', () => {
     expect(
       timelineParseThrottleKey('https://x.com/i/api/graphql/x/HomeLatestTimeline?variables=1'),
     ).toBe('HomeLatestTimeline');
-    expect(timelineParseThrottleKey('https://x.com/i/api/graphql/x/Following?variables=1')).toBeNull();
-    expect(timelineParseThrottleKey('https://x.com/i/api/graphql/x/TweetDetail?variables=1')).toBeNull();
-    expect(timelineParseThrottleKey('https://x.com/i/api/graphql/x/UserByScreenName?variables=1')).toBeNull();
+    expect(
+      timelineParseThrottleKey('https://x.com/i/api/graphql/x/Following?variables=1'),
+    ).toBeNull();
+    expect(
+      timelineParseThrottleKey('https://x.com/i/api/graphql/x/TweetDetail?variables=1'),
+    ).toBeNull();
+    expect(
+      timelineParseThrottleKey('https://x.com/i/api/graphql/x/UserByScreenName?variables=1'),
+    ).toBeNull();
   });
 });
 
@@ -229,5 +297,114 @@ describe('createParseThrottle', () => {
     // 没调 mark（比如解析抛错）：时钟推进后仍放行
     clock = TIMELINE_PARSE_THROTTLE_MS - 1;
     expect(throttle.allow(url)).toBe(true);
+  });
+});
+
+describe('sanitizeBridgePayload：推文指标与作者统计', () => {
+  const createdAt = Date.UTC(2026, 9, 29, 12);
+
+  it('保留合法的推文指标与作者统计', () => {
+    const result = sanitizeBridgePayload(
+      validPayload({
+        tweets: [
+          {
+            postId: '1850000000000000001',
+            text: '  正文  ',
+            createdAt,
+            metrics: { views: 1200, likes: 30, retweets: 2 },
+            author: {
+              handle: 'Alice',
+              displayName: 'Alice A',
+              stats: { followers: 3200, followingCount: 210, createdAt },
+            },
+          },
+        ],
+        users: [{ handle: 'bob', stats: { followers: 99, tweets: 5 } }],
+      }),
+    );
+    expect(result?.tweetStats).toEqual([
+      {
+        postId: '1850000000000000001',
+        handle: 'alice',
+        displayName: 'Alice A',
+        snippet: '正文',
+        createdAt,
+        views: 1200,
+        likes: 30,
+        retweets: 2,
+      },
+    ]);
+    expect(result?.authorStats).toEqual([
+      { handle: 'alice', followers: 3200, followingCount: 210, createdAt },
+      { handle: 'bob', followers: 99, tweets: 5 },
+    ]);
+  });
+
+  it('丢弃伪造或越界的字段，不丢整条', () => {
+    const result = sanitizeBridgePayload(
+      validPayload({
+        tweets: [
+          {
+            postId: '1850000000000000002',
+            text: 'x'.repeat(3000),
+            createdAt: 123, // 早于 2006
+            metrics: { views: -1, likes: 1.5, retweets: 1e20, replies: '3', quotes: 4 },
+            author: { handle: 'carol', displayName: { evil: true }, stats: { followers: 'many' } },
+          },
+        ],
+      }),
+    );
+    expect(result?.tweetStats).toEqual([
+      { postId: '1850000000000000002', handle: 'carol', snippet: 'x'.repeat(1000), quotes: 4 },
+    ]);
+    // 统计字段全部非法：不生成空的作者条目
+    expect(result?.authorStats).toEqual([]);
+  });
+
+  it('头像和媒体只接受 X 图床地址', () => {
+    const result = sanitizeBridgePayload(
+      validPayload({
+        tweets: [
+          {
+            postId: '1850000000000000003',
+            mediaUrl: 'https://pbs.twimg.com/media/A.jpg',
+            author: {
+              handle: 'erin',
+              avatarUrl: 'https://pbs.twimg.com/profile_images/1/a_normal.jpg',
+              stats: { isBlueVerified: true },
+            },
+          },
+          {
+            postId: '1850000000000000004',
+            mediaUrl: 'https://evil.example/x.jpg',
+            author: { handle: 'frank', avatarUrl: 'javascript:alert(1)' },
+          },
+        ],
+      }),
+    );
+    expect(result?.tweetStats).toEqual([
+      {
+        postId: '1850000000000000003',
+        handle: 'erin',
+        avatarUrl: 'https://pbs.twimg.com/profile_images/1/a_normal.jpg',
+        verified: true,
+        mediaUrl: 'https://pbs.twimg.com/media/A.jpg',
+      },
+      { postId: '1850000000000000004', handle: 'frank' },
+    ]);
+  });
+
+  it('postId 或 handle 非法时整条推文指标丢弃', () => {
+    const result = sanitizeBridgePayload(
+      validPayload({
+        tweets: [
+          { postId: 'abc', metrics: { views: 1 }, author: { handle: 'dave' } },
+          { postId: '1', metrics: { views: 1 }, author: { handle: 'bad name' } },
+        ],
+        users: [{ handle: '<script>', stats: { followers: 1 } }],
+      }),
+    );
+    expect(result?.tweetStats).toEqual([]);
+    expect(result?.authorStats).toEqual([]);
   });
 });

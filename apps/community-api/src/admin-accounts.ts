@@ -1,11 +1,15 @@
+import { and, asc, desc, eq, ilike, inArray, or, sql } from 'drizzle-orm';
+import { getDb } from './db/client';
+import { adminAccountDrafts, adminAuditLog, adminReleases, maintainerBlocklist } from './db/schema';
 import {
-  MAINTAINER_AUDIT_INSERT_SQL,
-  MAINTAINER_DEACTIVATE_SQL,
-  MAINTAINER_UPSERT_SQL,
+  deactivateMaintainerEntries,
+  insertMaintainerAudits,
+  upsertMaintainerEntries,
   validateMaintainerEntry,
+  type MaintainerAuditRow,
 } from './maintainer-blocklist';
 import { generateSnapshot } from './snapshot';
-import { D1_CHUNK, escapeLike } from './lib/d1';
+import { collateC, escapeLike } from './lib/sql';
 
 export interface AccountDraft {
   handle: string;
@@ -20,8 +24,26 @@ export interface AccountDraft {
 
 const now = () => Math.floor(Date.now() / 1000);
 
-// D1 单条查询最多 100 个绑定参数，IN 分句与 batch 分片都按 100 切。
-const DRAFT_COLUMNS = 'handle, x_user_id, category, note, evidence_post_id, active, created_at, updated_at';
+/** 批量写入、IN 探测的分片大小（单条语句参数上限 65535，远未触及，按 1000 切足够稳）。 */
+const CHUNK = 1000;
+
+function chunks<T>(items: T[]): T[][] {
+  const out: T[][] = [];
+  for (let index = 0; index < items.length; index += CHUNK)
+    out.push(items.slice(index, index + CHUNK));
+  return out;
+}
+
+const DRAFT_SELECT = {
+  handle: adminAccountDrafts.handle,
+  x_user_id: adminAccountDrafts.xUserId,
+  category: adminAccountDrafts.category,
+  note: adminAccountDrafts.note,
+  evidence_post_id: adminAccountDrafts.evidencePostId,
+  active: adminAccountDrafts.active,
+  created_at: adminAccountDrafts.createdAt,
+  updated_at: adminAccountDrafts.updatedAt,
+};
 
 function normalizeHandle(raw: string): string | null {
   const handle = raw.trim().replace(/^@+/, '').toLowerCase();
@@ -44,50 +66,68 @@ export async function listAdminAccountDrafts(
   options: ListDraftsOptions = {},
 ): Promise<AccountDraft[]> {
   const q = options.q?.trim();
-  const limit =
+  const pattern = q ? `%${escapeLike(q)}%` : null;
+  const query = getDb(env)
+    .select(DRAFT_SELECT)
+    .from(adminAccountDrafts)
+    .where(
+      pattern
+        ? or(ilike(adminAccountDrafts.handle, pattern), ilike(adminAccountDrafts.note, pattern))
+        : undefined,
+    )
+    .orderBy(
+      desc(adminAccountDrafts.active),
+      desc(adminAccountDrafts.updatedAt),
+      asc(collateC(adminAccountDrafts.handle)),
+    );
+  const rows =
     typeof options.limit === 'number'
-      ? `LIMIT ${Math.min(Math.max(Math.trunc(options.limit), 1), 500)}`
-      : '';
-  const sql = `SELECT ${DRAFT_COLUMNS}
-     FROM admin_account_drafts
-     ${q ? "WHERE handle LIKE ?1 ESCAPE '\\' OR note LIKE ?1 ESCAPE '\\'" : ''}
-     ORDER BY active DESC, updated_at DESC, handle ASC
-     ${limit}`;
-  const result = await (q
-    ? env.DB.prepare(sql).bind(`%${escapeLike(q)}%`)
-    : env.DB.prepare(sql)
-  ).all<Omit<AccountDraft, 'active'> & { active: number }>();
-  return result.results.map(asDraft);
+      ? await query.limit(Math.min(Math.max(Math.trunc(options.limit), 1), 500))
+      : await query;
+  return rows.map(asDraft);
 }
 
 export async function saveAdminAccountDraft(
   env: Cloudflare.Env,
   raw: unknown,
-): Promise<{ ok: true; action: 'add' | 'update'; entry: AccountDraft } | { ok: false; error: string }> {
+): Promise<
+  { ok: true; action: 'add' | 'update'; entry: AccountDraft } | { ok: false; error: string }
+> {
   const validated = validateMaintainerEntry(raw);
   if (!validated.ok) return validated;
   const input = validated.value;
+  const db = getDb(env);
   // 主键探测一次即可区分 add/update；写入后用 RETURNING 直接拿回行，
   // 不再「写完整表再查一遍」。
-  const prior = await env.DB.prepare('SELECT 1 AS present FROM admin_account_drafts WHERE handle = ?1')
-    .bind(input.handle)
-    .first<{ present: number }>();
+  const [prior] = await db
+    .select({ handle: adminAccountDrafts.handle })
+    .from(adminAccountDrafts)
+    .where(eq(adminAccountDrafts.handle, input.handle));
   const time = now();
-  const row = await env.DB.prepare(
-    `INSERT INTO admin_account_drafts
-       (${DRAFT_COLUMNS})
-     VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?6)
-     ON CONFLICT(handle) DO UPDATE SET
-       x_user_id = COALESCE(excluded.x_user_id, admin_account_drafts.x_user_id),
-       category = excluded.category,
-       note = excluded.note,
-       evidence_post_id = excluded.evidence_post_id,
-       active = 1,
-       updated_at = excluded.updated_at
-     RETURNING ${DRAFT_COLUMNS}`,
-  )
-    .bind(input.handle, input.xUserId, input.category, input.note, input.evidencePostId, time)
-    .first<Omit<AccountDraft, 'active'> & { active: number }>();
+  const [row] = await db
+    .insert(adminAccountDrafts)
+    .values({
+      handle: input.handle,
+      xUserId: input.xUserId,
+      category: input.category,
+      note: input.note,
+      evidencePostId: input.evidencePostId,
+      active: 1,
+      createdAt: time,
+      updatedAt: time,
+    })
+    .onConflictDoUpdate({
+      target: adminAccountDrafts.handle,
+      set: {
+        xUserId: sql`coalesce(excluded.x_user_id, ${adminAccountDrafts.xUserId})`,
+        category: sql`excluded.category`,
+        note: sql`excluded.note`,
+        evidencePostId: sql`excluded.evidence_post_id`,
+        active: 1,
+        updatedAt: sql`excluded.updated_at`,
+      },
+    })
+    .returning(DRAFT_SELECT);
   if (!row) return { ok: false, error: 'write_failed' };
   return { ok: true, action: prior ? 'update' : 'add', entry: asDraft(row) };
 }
@@ -98,12 +138,12 @@ export async function deactivateAdminAccountDraft(
 ): Promise<{ ok: true; changed: boolean } | { ok: false; error: string }> {
   const handle = normalizeHandle(rawHandle);
   if (!handle) return { ok: false, error: 'invalid_handle' };
-  const result = await env.DB.prepare(
-    'UPDATE admin_account_drafts SET active = 0, updated_at = ?2 WHERE handle = ?1 AND active = 1',
-  )
-    .bind(handle, now())
-    .run();
-  return { ok: true, changed: result.meta.changes > 0 };
+  const changed = await getDb(env)
+    .update(adminAccountDrafts)
+    .set({ active: 0, updatedAt: now() })
+    .where(and(eq(adminAccountDrafts.handle, handle), eq(adminAccountDrafts.active, 1)))
+    .returning({ handle: adminAccountDrafts.handle });
+  return { ok: true, changed: changed.length > 0 };
 }
 
 function archiveKey(): string {
@@ -117,13 +157,11 @@ async function recordRelease(
   actorEmail: string,
   detail: Record<string, unknown>,
 ): Promise<number> {
-  const result = await env.DB.prepare(
-    `INSERT INTO admin_releases (kind, version, actor_email, detail, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5)`,
-  )
-    .bind(kind, version, actorEmail, JSON.stringify(detail), now())
-    .run();
-  return Number(result.meta.last_row_id);
+  const [row] = await getDb(env)
+    .insert(adminReleases)
+    .values({ kind, version, actorEmail, detail: JSON.stringify(detail), createdAt: now() })
+    .returning({ id: adminReleases.id });
+  return row!.id;
 }
 
 export async function recordAdminAudit(
@@ -134,12 +172,16 @@ export async function recordAdminAudit(
   targetId: string,
   detail: Record<string, unknown> = {},
 ): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO admin_audit_log (actor_email, action, target_type, target_id, detail, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6)`,
-  )
-    .bind(actorEmail, action, targetType, targetId, JSON.stringify(detail), now())
-    .run();
+  await getDb(env)
+    .insert(adminAuditLog)
+    .values({
+      actorEmail,
+      action,
+      targetType,
+      targetId,
+      detail: JSON.stringify(detail),
+      createdAt: now(),
+    });
 }
 
 /** 将维护者草稿同步到公开名单，且只在此处生成新的公开快照。 */
@@ -157,67 +199,65 @@ export async function publishAdminAccountDrafts(
   const activeHandles = new Set(activeDrafts.map((draft) => draft.handle));
   const time = now();
 
+  const db = getDb(env);
   // 一次查出已发布行，diff 出需要停用的账号；不再逐行 await。
-  const publishedRows = await env.DB.prepare(
-    'SELECT handle, category, reason, evidence_post_id FROM maintainer_blocklist WHERE active = 1',
-  ).all<{ handle: string; category: string; reason: string; evidence_post_id: string | null }>();
+  const publishedRows = await db
+    .select({
+      handle: maintainerBlocklist.handle,
+      category: maintainerBlocklist.category,
+      reason: maintainerBlocklist.reason,
+      evidencePostId: maintainerBlocklist.evidencePostId,
+    })
+    .from(maintainerBlocklist)
+    .where(eq(maintainerBlocklist.active, 1));
 
-  // 已存在的账号决定审计动作（add/update）；按 D1 参数上限分批探测。
+  // 已存在的账号决定审计动作（add/update）。
   const existingHandles = new Set<string>();
-  const draftHandles = activeDrafts.map((draft) => draft.handle);
-  for (let index = 0; index < draftHandles.length; index += D1_CHUNK) {
-    const chunk = draftHandles.slice(index, index + D1_CHUNK);
-    const placeholders = chunk.map((_, position) => `?${position + 1}`).join(',');
-    const rows = await env.DB.prepare(
-      `SELECT handle FROM maintainer_blocklist WHERE handle IN (${placeholders})`,
-    )
-      .bind(...chunk)
-      .all<{ handle: string }>();
-    for (const row of rows.results) existingHandles.add(row.handle);
+  for (const chunk of chunks(activeDrafts.map((draft) => draft.handle))) {
+    const rows = await db
+      .select({ handle: maintainerBlocklist.handle })
+      .from(maintainerBlocklist)
+      .where(inArray(maintainerBlocklist.handle, chunk));
+    for (const row of rows) existingHandles.add(row.handle);
   }
 
-  const statements: D1PreparedStatement[] = [];
-  for (const draft of activeDrafts) {
-    statements.push(
-      env.DB.prepare(MAINTAINER_UPSERT_SQL).bind(
-        draft.handle,
-        draft.x_user_id,
-        draft.category,
-        draft.note,
-        draft.evidence_post_id,
+  const removed = publishedRows.filter((published) => !activeHandles.has(published.handle));
+  // upsert / 审计 / 停用在同一个事务里提交，发布要么全部生效要么全不生效。
+  await db.transaction(async (tx) => {
+    for (const chunk of chunks(activeDrafts)) {
+      await upsertMaintainerEntries(
+        tx,
+        chunk.map((draft) => ({
+          handle: draft.handle,
+          xUserId: draft.x_user_id,
+          category: draft.category,
+          note: draft.note,
+          evidencePostId: draft.evidence_post_id,
+        })),
         time,
-      ),
-    );
-    statements.push(
-      env.DB.prepare(MAINTAINER_AUDIT_INSERT_SQL).bind(
-        existingHandles.has(draft.handle) ? 'update' : 'add',
-        draft.handle,
-        draft.category,
-        draft.note,
-        draft.evidence_post_id,
-        time,
-      ),
-    );
-  }
-  for (const published of publishedRows.results) {
-    if (activeHandles.has(published.handle)) continue;
-    statements.push(
-      env.DB.prepare(MAINTAINER_DEACTIVATE_SQL).bind(published.handle, time),
-    );
-    statements.push(
-      env.DB.prepare(MAINTAINER_AUDIT_INSERT_SQL).bind(
-        'remove',
-        published.handle,
-        published.category,
-        published.reason,
-        published.evidence_post_id,
-        time,
-      ),
-    );
-  }
-  for (let index = 0; index < statements.length; index += D1_CHUNK) {
-    await env.DB.batch(statements.slice(index, index + D1_CHUNK));
-  }
+      );
+    }
+    const audits: MaintainerAuditRow[] = [
+      ...activeDrafts.map((draft): MaintainerAuditRow => ({
+        action: existingHandles.has(draft.handle) ? 'update' : 'add',
+        handle: draft.handle,
+        category: draft.category,
+        reason: draft.note,
+        evidencePostId: draft.evidence_post_id,
+      })),
+      ...removed.map((published): MaintainerAuditRow => ({
+        action: 'remove',
+        handle: published.handle,
+        category: published.category,
+        reason: published.reason,
+        evidencePostId: published.evidencePostId,
+      })),
+    ];
+    for (const chunk of chunks(audits)) await insertMaintainerAudits(tx, chunk, time);
+    for (const chunk of chunks(removed.map((published) => published.handle))) {
+      await deactivateMaintainerEntries(tx, chunk, time);
+    }
+  });
 
   // 维护者显式发布走即时通道（bypassDailyOnce）：与社区投票的自动化高频变化不同，
   // 人工发布是低频、可审计的，不应被 day-once 守卫顺延到次日。
@@ -230,7 +270,11 @@ export async function publishAdminAccountDrafts(
     release_id: releaseId,
     active_entries: activeDrafts.length,
   });
-  return { release_id: releaseId, snapshot_version: snapshot.version, active_entries: activeDrafts.length };
+  return {
+    release_id: releaseId,
+    snapshot_version: snapshot.version,
+    active_entries: activeDrafts.length,
+  };
 }
 
 export interface AdminRelease {
@@ -254,31 +298,38 @@ function parseReleaseDetail(raw: string): Record<string, unknown> {
   return {};
 }
 
-const RELEASE_COLUMNS = 'id, kind, version, actor_email, detail, created_at';
-
-type ReleaseRow = Omit<AdminRelease, 'detail' | 'kind'> & {
-  kind: 'accounts' | 'keywords';
-  detail: string;
+const RELEASE_SELECT = {
+  id: adminReleases.id,
+  kind: adminReleases.kind,
+  version: adminReleases.version,
+  actor_email: adminReleases.actorEmail,
+  detail: adminReleases.detail,
+  created_at: adminReleases.createdAt,
 };
+
+type ReleaseRow = Omit<AdminRelease, 'detail'> & { detail: string };
 
 function toRelease(row: ReleaseRow): AdminRelease {
   return { ...row, detail: parseReleaseDetail(row.detail) };
 }
 
 export async function listAdminReleases(env: Cloudflare.Env): Promise<AdminRelease[]> {
-  const result = await env.DB.prepare(
-    `SELECT ${RELEASE_COLUMNS}
-     FROM admin_releases
-     ORDER BY created_at DESC, id DESC
-     LIMIT 100`,
-  ).all<ReleaseRow>();
-  return result.results.map(toRelease);
+  const rows = await getDb(env)
+    .select(RELEASE_SELECT)
+    .from(adminReleases)
+    .orderBy(desc(adminReleases.createdAt), desc(adminReleases.id))
+    .limit(100);
+  return rows.map(toRelease);
 }
 
-export async function getAdminRelease(env: Cloudflare.Env, id: number): Promise<AdminRelease | null> {
-  const row = await env.DB.prepare(`SELECT ${RELEASE_COLUMNS} FROM admin_releases WHERE id = ?1`)
-    .bind(id)
-    .first<ReleaseRow>();
+export async function getAdminRelease(
+  env: Cloudflare.Env,
+  id: number,
+): Promise<AdminRelease | null> {
+  const [row] = await getDb(env)
+    .select(RELEASE_SELECT)
+    .from(adminReleases)
+    .where(eq(adminReleases.id, id));
   return row ? toRelease(row) : null;
 }
 
@@ -299,31 +350,36 @@ export async function rollbackAdminAccountRelease(
   if (!Array.isArray(payload.drafts)) throw new Error('release_archive_invalid');
 
   const restored = payload.drafts
-    .filter((item): item is AccountDraft => typeof item === 'object' && item !== null && typeof (item as AccountDraft).handle === 'string')
+    .filter(
+      (item): item is AccountDraft =>
+        typeof item === 'object' &&
+        item !== null &&
+        typeof (item as AccountDraft).handle === 'string',
+    )
     .map((item) => ({ ...item, handle: normalizeHandle(item.handle) }))
-    .filter((item): item is Omit<AccountDraft, 'handle'> & { handle: string } => Boolean(item.handle));
-
-  await env.DB.prepare('DELETE FROM admin_account_drafts').run();
-  const time = now();
-  for (let index = 0; index < restored.length; index += D1_CHUNK) {
-    await env.DB.batch(
-      restored.slice(index, index + D1_CHUNK).map((draft) =>
-        env.DB.prepare(
-          `INSERT INTO admin_account_drafts
-             (${DRAFT_COLUMNS})
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)`,
-        ).bind(
-          draft.handle,
-          draft.x_user_id ?? null,
-          draft.category,
-          draft.note,
-          draft.evidence_post_id ?? null,
-          draft.active ? 1 : 0,
-          time,
-        ),
-      ),
+    .filter((item): item is Omit<AccountDraft, 'handle'> & { handle: string } =>
+      Boolean(item.handle),
     );
-  }
+
+  const time = now();
+  // 清空并回填草稿放在同一个事务里，中途失败不会留下半张表。
+  await getDb(env).transaction(async (tx) => {
+    await tx.delete(adminAccountDrafts);
+    for (const chunk of chunks(restored)) {
+      await tx.insert(adminAccountDrafts).values(
+        chunk.map((draft) => ({
+          handle: draft.handle,
+          xUserId: draft.x_user_id ?? null,
+          category: draft.category,
+          note: draft.note,
+          evidencePostId: draft.evidence_post_id ?? null,
+          active: draft.active ? 1 : 0,
+          createdAt: time,
+          updatedAt: time,
+        })),
+      );
+    }
+  });
   const published = await publishAdminAccountDrafts(env, actorEmail);
   await recordAdminAudit(env, actorEmail, 'rollback', 'accounts', String(releaseId), {
     snapshot_version: published.snapshot_version,

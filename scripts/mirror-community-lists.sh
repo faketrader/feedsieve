@@ -5,8 +5,7 @@
 # 不经 jsDelivr 或本仓库分发）；这里把线上快照以 git diff 形式留在公开仓库，
 # 供人读、审计与构建期打包兜底（扩展随包内置 official.json）。
 #
-# 运行方式：GitHub Actions 每日 01:17 UTC 自动跑（无变化不提交），
-# 发版前 / 名单大变化后也可手动在本地运行一次并提交。
+# 运行方式：发版前 / 名单大变化后在本地手动运行一次并提交（仓库没有云端 CI，不会自动跑）。
 #
 # 用法: scripts/mirror-community-lists.sh   （发版前 / 名单变化后运行并提交）
 # API 地址: FEEDSIEVE_API 环境变量，或本地 ~/.config/feedsieve/api-base（0600）
@@ -19,7 +18,7 @@ resolve_feedsieve_api_base
 API="$FEEDSIEVE_API_BASE"
 DIR="community/lists"
 
-# 网络：跑在每日 CI 上，curl 带超时+重试，防端点挂起拖满 job 时限
+# 网络：curl 带超时+重试，防端点挂起
 CURL="curl -fsSL --max-time 60 --retry 3 --retry-delay 5"
 
 $CURL "$API/v1/snapshots/latest" -o "$DIR/manifest.json"

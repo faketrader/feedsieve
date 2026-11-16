@@ -39,7 +39,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     // 水合后一次性同步真实偏好：SSR 一致性要求首帧用占位值，这里 setState 属
-    // 该规则文档认可的「mount 时同步外部状态」例外（同 RankedPanel 的豁免先例）。
+    // 该规则文档认可的「mount 时同步外部状态」例外。
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setModeState(readStoredMode());
     setSystemDark(window.matchMedia('(prefers-color-scheme: dark)').matches);

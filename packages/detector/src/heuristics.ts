@@ -427,6 +427,64 @@ const weakSignalCombo: HeuristicRule = {
   },
 };
 
+const DAY_MS = 86_400_000;
+
+/**
+ * 新注册小号锚点：注册不满 maxAgeDays 天、粉丝不超过 maxFollowers，并且还在用默认头像
+ * 或关注数是粉丝数的 followRatio 倍以上（批量号先狂关注再引流）。只用 X 已返回的账号数据，
+ * 缺任何一项就不成立（宁可漏判）。
+ */
+export function isFreshThrowawayAccount(
+  author: import('./detect').DetectAuthor | undefined,
+  observedAt: number,
+): { ageDays: number; followers: number } | null {
+  const cfg = detectorConfig.freshAccount;
+  if (!author || typeof author.createdAt !== 'number' || typeof author.followers !== 'number') {
+    return null;
+  }
+  const ageDays = (observedAt - author.createdAt) / DAY_MS;
+  if (ageDays < 0 || ageDays > cfg.maxAgeDays || author.followers > cfg.maxFollowers) return null;
+  const followHeavy =
+    typeof author.following === 'number' &&
+    author.following >= cfg.followRatio * Math.max(author.followers, 1);
+  if (author.defaultAvatar !== true && !followHeavy) return null;
+  return { ageDays: Math.floor(ageDays), followers: author.followers };
+}
+
+/**
+ * 新注册小号组合层（fresh-account-combo，2026-10-31）。
+ *
+ * 和 weak-signal-combo 同一思路：账号形状异常的锚点 + 内容佐证才标。锚点换成 X 接口给的
+ * 账号数据（注册时长、粉丝、关注、默认头像），覆盖 handle 看起来正常、但昨天才注册的黄推小号。
+ * 新用户也会发「哈哈哈哈」，所以内容佐证比 weak-signal-combo 更严：只认擦边特征、纯 emoji 正文、
+ * 经典单词沙拉形状、昵称 / 简介里的引流隐语，不认重复字符和弱形状。
+ * handle 已是批量号形态时交给 weak-signal-combo，这里不重复命中。
+ */
+const freshAccountCombo: HeuristicRule = {
+  id: 'fresh-account-combo',
+  check(input) {
+    if (hasBatchHandleAnchor(input.handle)) return null;
+    const anchor = isFreshThrowawayAccount(input.author, input.observedAt ?? Date.now());
+    if (!anchor) return null;
+    const evidence: string[] = [];
+    const fields = [input.text, input.bio].filter(
+      (value): value is string => typeof value === 'string' && value.length > 0,
+    );
+    const marker = EROGENOUS_MARKERS.find(([pattern]) =>
+      fields.some((field) => pattern.test(field)),
+    );
+    if (marker) evidence.push(`擦边特征（${marker[1]}）`);
+    else if (fields.some(isPureEmojiText)) evidence.push('纯 emoji 正文');
+    if (fields.some(isWordSaladShape)) evidence.push('英文单词沙拉形状');
+    const profileText = [input.displayName, input.bio].filter(Boolean).join('\n');
+    if (profileText && WORD_SALAD_TRAFFIC_HINT_RE.test(profileText)) {
+      evidence.push('昵称 / 简介引流隐语');
+    }
+    if (evidence.length === 0) return null;
+    return `新注册小号（${anchor.ageDays} 天、${anchor.followers} 粉丝）+ ${evidence.join(' + ')}`;
+  },
+};
+
 /**
  * 联系方式载荷规则（2026-09-12 娇妻/单男变体实锤）。
  *
@@ -480,11 +538,25 @@ export const DEFAULT_HEURISTICS: readonly HeuristicRule[] = [
   templatedText,
   wordSalad,
   weakSignalCombo,
+  freshAccountCombo,
   contactNumberBait,
 ];
 
 /**
- * 弱信号组合层单独导出：扩展运行时只装配本规则（其余内置单信号规则
- * 留在 detector 评测层，分层决策见 extension detection-policy）。
+ * 扩展运行时真正装配的内置启发式（排在关键词词库之后收尾）：只有组合层与双信号规则，
+ * 其余内置单信号规则留在 detector 评测层，分层决策见 extension detection-policy。
+ * golden corpus 同时统计 DEFAULT_HEURISTICS 与这一组的指标（corpus/metrics.json 的 runtime 段）。
  */
-export { weakSignalCombo, contactNumberBait };
+export const RUNTIME_HEURISTICS: readonly HeuristicRule[] = [
+  weakSignalCombo,
+  freshAccountCombo,
+  contactNumberBait,
+];
+
+export { weakSignalCombo, freshAccountCombo, contactNumberBait };
+
+/**
+ * 热榜（全站 / 我刷到的）出榜前的内容过滤：只用误伤极低的两条（黄推话术、联系方式载荷），
+ * 不用默认名 + 数字之类的账号形态规则——正常大号也会撞上。
+ */
+export const HOT_LIST_HEURISTICS: readonly HeuristicRule[] = [pornBaitZh, contactNumberBait];

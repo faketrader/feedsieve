@@ -1,45 +1,16 @@
-# FeedSieve 文档索引
+# FeedSieve 文档
 
-用户视角从 [README](../README.md) 开始；本文档站按读者分层组织。
+公开文档只留和贡献、使用、算法有关的。维护者内部资料（部署、成本、竞品调研、商业判断）在 `docs/internal/`，不入库。
 
-## 给用户
-
-| 文档 | 内容 |
-| --- | --- |
-| [USAGE.md](USAGE.md) | 使用教程：安装、上手、打野排位、设置项、安全边界、常见问题 |
-| [PRIVACY.md](../PRIVACY.md) | 双语隐私政策 |
-| [CHANGELOG.md](../CHANGELOG.md) | 版本更新日志 |
-| [DISCLAIMER.md](../DISCLAIMER.md) | 名单公示免责声明 |
-
-## 设计与路线
-
-| 文档 | 内容 |
-| --- | --- |
-| [VISION.md](VISION.md) | 产品定位与边界（只做 X + Chrome 系，不做跨平台） |
-| [PRODUCT.md](PRODUCT.md) | 产品功能全景 |
-| [ROADMAP.md](ROADMAP.md) | 版本路线与当前实施顺序 |
-| [HUNTING.md](HUNTING.md) | 打野排位赛产品方案（计分 / 称号 / 榜单 / 认领） |
-| [BRAND.md](BRAND.md) | 品牌人格与文案口径 |
-
-## 工程实现
-
-| 文档 | 内容 |
-| --- | --- |
-| [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) | 实现基准：协议、Schema、算法参数 |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 模块架构图与数据流向 |
-| [X_ACTION_ADAPTER.md](X_ACTION_ADAPTER.md) | X 原生 Block / Unblock / 读取适配层基准 |
-| [BLOCK_SAFETY.md](BLOCK_SAFETY.md) | 批量拉黑安全策略（额度 / 风暴降级 / 认证失效） |
-| [TRUST_HARDENING_PLAN.md](TRUST_HARDENING_PLAN.md) | 信任边界加固路线（签名 / 共识 / gold corpus） |
-
-## 运营与治理
-
-| 文档 | 内容 |
-| --- | --- |
-| [OPEN_SOURCE_GOVERNANCE.md](OPEN_SOURCE_GOVERNANCE.md) | 名单治理：一票一账号、入榜门槛、维护者流程 |
-| [RELEASES.md](RELEASES.md) | 各版本工程记录 |
-| [STORE_SUBMISSION.md](STORE_SUBMISSION.md) | Chrome Web Store 上架手册 |
-| [research/](research/) | 竞品拆解与词库收录边界研究 |
-
-## 名单与词库本体
-
-[community/README.md](../community/README.md) — YAML for humans, JSON for machines：名单源文件、校验协议、快照镜像。
+| 文档                                                                     | 内容                                                                       |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| [../ROADMAP.md](../ROADMAP.md)                                           | 产品路线图：已上线、下一版、规划中、明确不做                               |
+| [03-X推荐算法与指标设计.md](03-X推荐算法与指标设计.md)                   | X 开源推荐算法要点、流速与爆帖指数的设计依据、展示规范                     |
+| [04-弹窗与推文徽章重构.md](04-弹窗与推文徽章重构.md)                     | 弹窗五栏改三栏的理由与结构、推文徽章的落点与窄屏退化规则                   |
+| [16-定时发送与文章编辑调研.md](16-定时发送与文章编辑调研.md)             | 定时发送与文章编辑：网页版痛点、竞品与开源方案、选型与实现记录             |
+| [../community/README.md](../community/README.md)                         | 公开名单与词库的结构、上榜口径、Schema、如何提 PR                          |
+| [../CONTRIBUTING.md](../CONTRIBUTING.md)                                 | 环境搭建、贡献方向、产品原则                                               |
+| [../PRIVACY.md](../PRIVACY.md)                                           | 隐私政策：收了什么、存在哪、怎么删                                         |
+| [../SECURITY.md](../SECURITY.md)                                         | 安全漏洞的私密报告方式                                                     |
+| [../DISCLAIMER.md](../DISCLAIMER.md)                                     | 名单公示免责声明                                                           |
+| [../CHANGELOG.md](../CHANGELOG.md)                                       | 版本变更记录                                                               |

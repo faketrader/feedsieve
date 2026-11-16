@@ -57,6 +57,32 @@ const CONTEXT_BY_PREFIX: ReadonlyArray<readonly [RegExp, FeedContext]> = [
   [/^\/notifications|^\/messages|^\/explore/, 'other'],
 ];
 
+/** 个人主页上的 Tab；`other` 是关注 / 粉丝列表等不是帖子的页面。 */
+export type ProfileTab =
+  'posts' | 'replies' | 'reposts' | 'subs' | 'media' | 'highlights' | 'articles' | 'other';
+
+const PROFILE_TABS: Record<string, ProfileTab> = {
+  '': 'posts',
+  with_replies: 'replies',
+  reposts: 'reposts',
+  subs: 'subs',
+  media: 'media',
+  highlights: 'highlights',
+  articles: 'articles',
+};
+
+/**
+ * 个人主页路径 → 主页主人与 Tab：`/kim` → posts，`/kim/with_replies` → replies。
+ * 不是个人主页（帖子详情、首页、保留路径）返回 null。
+ */
+export function profileFromPath(pathname: string): { handle: string; tab: ProfileTab } | null {
+  if (contextFromPath(pathname) !== 'profile') return null;
+  const handle = extractHandleFromPath(pathname);
+  if (!handle || !/^[a-z0-9_]{1,15}$/.test(handle)) return null;
+  const second = (pathname.split(/[?#]/)[0] ?? '').split('/').filter(Boolean)[1] ?? '';
+  return { handle, tab: PROFILE_TABS[second.toLowerCase()] ?? 'other' };
+}
+
 /** URL path -> FeedItem.context。v0.1 只区分四类，其余归 other。 */
 export function contextFromPath(pathname: string): FeedContext {
   for (const [pattern, context] of CONTEXT_BY_PREFIX) {

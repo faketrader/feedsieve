@@ -1,5 +1,9 @@
+import { and, count, desc, eq, inArray, max, sql } from 'drizzle-orm';
+import { getDb } from './db/client';
+import { keywordContribUsage, keywordContributions } from './db/schema';
 import { installationHash } from './labels';
 import { hashIp } from './lib/hash';
+import { collateC, compareText, stripNul } from './lib/sql';
 import { nowSeconds, utcToday } from './lib/time';
 
 /**
@@ -43,7 +47,7 @@ function normPhrase(value: string): string {
 
 function validatedPhrase(raw: unknown): { display: string; norm: string } | { error: string } {
   if (typeof raw !== 'string') return { error: 'phrase_must_be_string' };
-  const display = raw.trim();
+  const display = stripNul(raw).trim();
   if (display.length < 1 || display.length > MAX_PHRASE_LENGTH) {
     return { error: 'invalid_phrase_length' };
   }
@@ -113,6 +117,7 @@ export async function processKeywordContributions(
     return { ok: true, results };
   }
 
+  const db = getDb(env);
   const validNorms = valid.map((item) => item.norm);
   const dailyLimit = isWebChannel ? MAX_WEB_PHRASES_PER_DAY : MAX_PHRASES_PER_DAY;
 
@@ -120,65 +125,67 @@ export async function processKeywordContributions(
   // 才消耗每日额度；重复提交走主键幂等，不会把瞬时失败变成额度锁死。
   const existingNorms = new Set(
     (
-      await env.DB.prepare(
-        `SELECT norm_phrase FROM keyword_contributions
-         WHERE installation_id = ?1
-           AND norm_phrase IN (${validNorms.map((_, index) => `?${index + 2}`).join(', ')})`,
-      )
-        .bind(submissionKey, ...validNorms)
-        .all<{ norm_phrase: string }>()
-    ).results.map((row) => row.norm_phrase),
+      await db
+        .select({ normPhrase: keywordContributions.normPhrase })
+        .from(keywordContributions)
+        .where(
+          and(
+            eq(keywordContributions.installationId, submissionKey),
+            inArray(keywordContributions.normPhrase, validNorms),
+          ),
+        )
+    ).map((row) => row.normPhrase),
   );
   const quotaUnits = valid.filter((item) => !existingNorms.has(item.norm)).length;
   if (quotaUnits > 0) {
     // 原子预留本批额度（条件 UPSERT 本身即门禁，杜绝并发 COUNT 检查两写并存）。
     // 与 rescues 语义一致：预留消耗即计入全天，即使后续写入失败不做回退（日切换归还）。
-    const reserved = await env.DB.prepare(
-      `INSERT INTO keyword_contrib_usage (submission_key, day, used)
-       VALUES (?1, ?2, ?3)
-       ON CONFLICT(submission_key) DO UPDATE SET
-         day = excluded.day,
-         used = CASE
-           WHEN keyword_contrib_usage.day = excluded.day
-             THEN keyword_contrib_usage.used + excluded.used
-           ELSE excluded.used
-         END
-       WHERE (
-         CASE
-           WHEN keyword_contrib_usage.day = excluded.day THEN keyword_contrib_usage.used
-           ELSE 0
-         END
-         + excluded.used
-       ) <= ?4`,
-    )
-      .bind(submissionKey, utcToday(), quotaUnits, dailyLimit)
-      .run();
-    if ((reserved.meta.changes ?? 0) === 0) {
+    const today = utcToday();
+    const usedToday = sql`CASE WHEN ${keywordContribUsage.day} = excluded.day THEN ${keywordContribUsage.used} ELSE 0 END`;
+    const reserved = await db
+      .insert(keywordContribUsage)
+      .values({ submissionKey, day: today, used: quotaUnits })
+      .onConflictDoUpdate({
+        target: keywordContribUsage.submissionKey,
+        set: {
+          day: sql`excluded.day`,
+          used: sql`${usedToday} + excluded.used`,
+        },
+        setWhere: sql`${usedToday} + excluded.used <= ${dailyLimit}`,
+      })
+      .returning({ submissionKey: keywordContribUsage.submissionKey });
+    if (reserved.length === 0) {
       return { ok: false, httpStatus: 429, error: 'rate_limited' };
     }
   }
 
-  const statements = valid.map((item) =>
-    env.DB.prepare(
-      `INSERT INTO keyword_contributions
-         (norm_phrase, installation_id, display_phrase, client_version, status, created_at)
-       VALUES (?1, ?2, ?3, ?4, 'new', ?5)
-       ON CONFLICT(norm_phrase, installation_id) DO NOTHING`,
-    ).bind(
-      item.norm,
-      submissionKey,
-      item.phrase,
-      typeof b.client_version === 'string' ? b.client_version.slice(0, 20) : null,
-      nowSeconds(),
-    ),
-  );
-  const metas = await env.DB.batch(statements);
-  metas.forEach((raw, index) => {
-    const changes = (raw as { meta?: { changes?: number } }).meta?.changes ?? 0;
-    if (changes === 0) {
-      results[valid[index]!.resultIndex] = { phrase: valid[index]!.phrase, status: 'duplicate' };
+  // 一条 INSERT 写入整批；冲突（同来源同词已存在）不返回行，据此标记 duplicate。
+  const createdAt = nowSeconds();
+  const clientVersion =
+    typeof b.client_version === 'string' ? stripNul(b.client_version).slice(0, 20) : null;
+  const inserted = await db
+    .insert(keywordContributions)
+    .values(
+      // 按主键排序：并发批量写入以相同顺序锁行，避免死锁
+      [...valid]
+        .sort((a, b) => compareText(a.norm, b.norm))
+        .map((item) => ({
+          normPhrase: item.norm,
+          installationId: submissionKey,
+          displayPhrase: item.phrase,
+          clientVersion,
+          status: 'new',
+          createdAt,
+        })),
+    )
+    .onConflictDoNothing()
+    .returning({ normPhrase: keywordContributions.normPhrase });
+  const insertedNorms = new Set(inserted.map((row) => row.normPhrase));
+  for (const item of valid) {
+    if (!insertedNorms.has(item.norm)) {
+      results[item.resultIndex] = { phrase: item.phrase, status: 'duplicate' };
     }
-  });
+  }
 
   return { ok: true, results };
 }
@@ -195,22 +202,23 @@ export interface KeywordContributionRow {
 export async function listKeywordContributions(
   env: Cloudflare.Env,
 ): Promise<{ contributions: KeywordContributionRow[] }> {
-  const rows = await env.DB.prepare(
-    `SELECT norm_phrase, MIN(display_phrase) AS display_phrase, COUNT(*) AS reports,
-            MAX(created_at) AS last_created_at
-     FROM keyword_contributions
-     WHERE status = 'new'
-     GROUP BY norm_phrase
-     ORDER BY last_created_at DESC
-     LIMIT 200`,
-  ).all<{
-    norm_phrase: string;
-    display_phrase: string;
-    reports: number;
-    last_created_at: number;
-  }>();
+  const lastCreatedAt = max(keywordContributions.createdAt);
+  const rows = await getDb(env)
+    .select({
+      norm_phrase: keywordContributions.normPhrase,
+      display_phrase: sql<string>`min(${collateC(keywordContributions.displayPhrase)})`.mapWith(
+        String,
+      ),
+      reports: count(),
+      last_created_at: lastCreatedAt.mapWith(Number),
+    })
+    .from(keywordContributions)
+    .where(eq(keywordContributions.status, 'new'))
+    .groupBy(keywordContributions.normPhrase)
+    .orderBy(desc(lastCreatedAt))
+    .limit(200);
   return {
-    contributions: rows.results.map((row) => ({
+    contributions: rows.map((row) => ({
       norm_phrase: row.norm_phrase,
       display_phrase: row.display_phrase,
       reports: row.reports,
@@ -232,12 +240,15 @@ export async function decideKeywordContributions(
   decision: KeywordContributionDecision,
   maintainerEmail: string,
 ): Promise<{ changed: number }> {
-  const result = await env.DB.prepare(
-    `UPDATE keyword_contributions
-     SET status = ?1, decided_at = ?2, decided_by = ?3
-     WHERE norm_phrase = ?4 AND status = 'new'`,
-  )
-    .bind(decision, nowSeconds(), maintainerEmail, normPhrase)
-    .run();
-  return { changed: result.meta.changes ?? 0 };
+  const changed = await getDb(env)
+    .update(keywordContributions)
+    .set({ status: decision, decidedAt: nowSeconds(), decidedBy: maintainerEmail })
+    .where(
+      and(
+        eq(keywordContributions.normPhrase, stripNul(normPhrase)),
+        eq(keywordContributions.status, 'new'),
+      ),
+    )
+    .returning({ normPhrase: keywordContributions.normPhrase });
+  return { changed: changed.length };
 }

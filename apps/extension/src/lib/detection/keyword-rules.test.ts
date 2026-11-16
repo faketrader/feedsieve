@@ -12,7 +12,7 @@ import {
   setOfficialKeywordRuleEnabled,
   type KeywordRuleSettings,
 } from './keyword-rules';
-import { BUNDLED_KEYWORD_PACK_CATALOG } from './keyword-packs';
+import { BUNDLED_KEYWORD_PACK_CATALOG, type KeywordPackCatalog } from './keyword-packs';
 
 /** 全量官方规则数（从随包目录直接算，测试里 Node 态已同步装入） */
 const OFFICIAL_RULE_COUNT = BUNDLED_KEYWORD_PACK_CATALOG.packs.reduce(
@@ -42,11 +42,11 @@ describe('本地关键词规则', () => {
   it('默认启用的黄推引流词库会命中目标成人引流样本', async () => {
     const settings = await getKeywordRuleSettings();
     const rule = createKeywordHeuristics(settings).find(
-      (candidate) => candidate.id === 'keyword:official:adult-fu-not-black',
+      (candidate) => candidate.id === 'keyword:official:adult-profile-collect-benefits',
     );
     expect(
-      rule?.check({ handle: 'bait', text: '应该没人比我玩的开了吧 🤚 😊 我福不黑不信你看' }),
-    ).toContain('我福不黑');
+      rule?.check({ handle: 'bait', text: '应该没人比我玩的开了吧 🤚 😊 主页自取福利' }),
+    ).toContain('主页自取福利');
     expect(activeKeywordRules(settings)).toHaveLength(OFFICIAL_RULE_COUNT);
   });
 
@@ -102,16 +102,16 @@ describe('本地关键词规则', () => {
 
   it('用户移除官方短语后立刻不再生成该规则，但可恢复', async () => {
     await setOfficialKeywordCategorySubscribed('adult_gray_traffic', true);
-    await setOfficialKeywordRuleEnabled('adult-fu-not-black', false);
+    await setOfficialKeywordRuleEnabled('adult-profile-collect-benefits', false);
     let settings = await getKeywordRuleSettings();
     expect(
-      createKeywordHeuristics(settings).some((rule) => rule.id.includes('adult-fu-not-black')),
+      createKeywordHeuristics(settings).some((rule) => rule.id.includes('adult-profile-collect-benefits')),
     ).toBe(false);
 
-    await setOfficialKeywordRuleEnabled('adult-fu-not-black', true);
+    await setOfficialKeywordRuleEnabled('adult-profile-collect-benefits', true);
     settings = await getKeywordRuleSettings();
     expect(
-      createKeywordHeuristics(settings).some((rule) => rule.id.includes('adult-fu-not-black')),
+      createKeywordHeuristics(settings).some((rule) => rule.id.includes('adult-profile-collect-benefits')),
     ).toBe(true);
   });
 
@@ -181,10 +181,29 @@ describe('本地关键词规则', () => {
     expect(rules[1]?.check(input)).toContain('同城上门可约');
   });
 
-  it('英文短语按整词命中：bio 里的 Adulthood 不误标 adult，正文广告仍命中（issue #4）', async () => {
-    const settings = await getKeywordRuleSettings();
-    const rule = createKeywordHeuristics(settings).find(
-      (candidate) => candidate.id === 'keyword:official:adult-gray-traffic-7fdc3e8038e87ff5',
+  it('英文短语按整词命中：bio 里的 Adulthood 不误标 adult，正文广告仍命中（issue #4）', () => {
+    // 「adult」已在 2026-11-08 第二批词库收敛中下线：改用合成词库锁定整词匹配语义，
+    // 不再让回归用例依赖真实词库的收录内容（issue #4 的真实样本仍原样保留）。
+    const catalog: KeywordPackCatalog = {
+      schema_version: 1,
+      pack_version: '2026.11.08.1',
+      generated_at: null,
+      packs: [
+        {
+          id: 'adult_gray_traffic',
+          name: { zh: '黄推 / 成人引流', en: 'Adult bait' },
+          description: { zh: '测试词库', en: 'test pack' },
+          source_refs: [],
+          rules: [{ id: 'test-adult', phrase: 'adult', name: { zh: 'adult', en: 'adult' } }],
+        },
+      ],
+    };
+    const settings: KeywordRuleSettings = {
+      ...DEFAULT_KEYWORD_RULE_SETTINGS,
+      subscribedCategoryIds: ['adult_gray_traffic'],
+    };
+    const rule = createKeywordHeuristics(settings, catalog).find(
+      (candidate) => candidate.id === 'keyword:official:test-adult',
     );
     expect(rule).toBeDefined();
     // @MarcosBL 的真实 bio：Adulthood 含 adult 子串但语义无关
@@ -199,6 +218,51 @@ describe('本地关键词规则', () => {
     expect(rule?.check({ handle: 'bait', text: 'hot amateur adult content daily' })).toContain(
       '命中官方规则：adult',
     );
+  });
+
+  it('官方短词命中简介不再标黄，正文命中仍保留；长短语和自定义词不受限', () => {
+    // 2026-11-08 线上误标：「自拍」这类 2 字官方词出现在简介的自我描述里被大量点误标。
+    // 用合成词库测试，避免测试依赖真实词库的收录内容。
+    const catalog: KeywordPackCatalog = {
+      schema_version: 1,
+      pack_version: '2026.11.08.1',
+      generated_at: null,
+      packs: [
+        {
+          id: 'adult_gray_traffic',
+          name: { zh: '黄推 / 成人引流', en: 'Adult bait' },
+          description: { zh: '测试词库', en: 'test pack' },
+          source_refs: [],
+          rules: [
+            { id: 'test-short', phrase: '自拍', name: { zh: '自拍', en: '自拍' } },
+            {
+              id: 'test-long',
+              phrase: '主页自取福利',
+              name: { zh: '主页自取福利', en: '主页自取福利' },
+            },
+          ],
+        },
+      ],
+    };
+    const settings: KeywordRuleSettings = {
+      ...DEFAULT_KEYWORD_RULE_SETTINGS,
+      subscribedCategoryIds: ['adult_gray_traffic'],
+      disabledOfficialRuleIds: [],
+      customRules: [{ id: 'custom-selfie', phrase: '自拍', createdAt: 1 }],
+    };
+    const rules = createKeywordHeuristics(settings, catalog);
+    const short = rules.find((rule) => rule.id === 'keyword:official:test-short');
+    const long = rules.find((rule) => rule.id === 'keyword:official:test-long');
+    const custom = rules.find((rule) => rule.id.startsWith('keyword:custom:'));
+
+    // 简介里的短词是普通自我描述：不标
+    expect(short?.check({ handle: 'ball2baby', bio: '喜歡自拍，記錄生活' })).toBeNull();
+    // 正文命中同一短词：保留提示，并透出字段
+    expect(short?.check({ handle: 'bait', text: '今晚发点自拍' })).toContain('自拍 · 正文');
+    // 更长的短语在简介里仍可命中（成句话术的误伤面小）
+    expect(long?.check({ handle: 'bait', bio: '主页自取福利，懂的都懂' })).toContain('· 简介');
+    // 自定义词是用户自己的选择，简介命中照常显示
+    expect(custom?.check({ handle: 'spam', bio: '喜欢自拍' })).toContain('命中你的关键词');
   });
 
   it('官方词同时匹配昵称和账号名，正文为空也能标记', async () => {
@@ -229,53 +293,54 @@ describe('本地关键词规则', () => {
   it('精确短语也会忽略用于规避的标点、符号和空格', async () => {
     const settings = await getKeywordRuleSettings();
     const rule = createKeywordHeuristics(settings).find(
-      (candidate) => candidate.id === 'keyword:official:adult-fu-not-black',
+      (candidate) => candidate.id === 'keyword:official:adult-profile-collect-benefits',
     );
-    expect(rule?.check({ handle: 'bait', text: '我·福 🔥 不 黑，不信你看' })).toContain('我福不黑');
+    expect(rule?.check({ handle: 'bait', text: '主·页 🔥 自 取 福 利' })).toContain('主页自取福利');
   });
 
   it('字间拆入不可见格式字符（U+2060 词连接符等）仍命中（真机样本）', async () => {
     const settings = await getKeywordRuleSettings();
     const rule = createKeywordHeuristics(settings).find(
-      (candidate) => candidate.id === 'keyword:official:adult-fu-not-black',
+      (candidate) => candidate.id === 'keyword:official:adult-profile-collect-benefits',
     );
     expect(rule).toBeDefined();
     const sample = [
       '应没没人比我玩的开了吧🍀🙉',
-      '我\u2060\u200C\u200D福\u200C\u2060不\u2060黑\u200D不信\u200C你看',
+      '主\u2060\u200C\u200D页\u200C\u2060自\u2060取\u200D福利',
     ].join('');
-    expect(rule?.check({ handle: 'bait', text: sample })).toContain('我福不黑');
+    expect(rule?.check({ handle: 'bait', text: sample })).toContain('主页自取福利');
   });
 
   it('变体矩阵：不可见附加符/填充符/繁体/部首/同形异源字均可命中', async () => {
     const settings = await getKeywordRuleSettings();
     const heuristics = createKeywordHeuristics(settings);
-    const fuRule = heuristics.find(
-      (candidate) => candidate.id === 'keyword:official:adult-fu-not-black',
+    const benefitRule = heuristics.find(
+      (candidate) => candidate.id === 'keyword:official:adult-profile-collect-benefits',
     );
     const cityRule = heuristics.find((candidate) =>
       candidate.id.includes('adult-terms-local-door'),
     );
 
     // Zalgo 组合附加符（Mn 类，NFKC 消不掉）
-    expect(fuRule?.check({ handle: 'bait', text: '我\u0301\u0316福不黑不信你看' })).toContain(
-      '我福不黑',
+    expect(benefitRule?.check({ handle: 'bait', text: '主\u0301\u0316页自取福利' })).toContain(
+      '主页自取福利',
     );
     // 韩文填充符（U+3164/115F/1160，Lo 类空白）
-    expect(fuRule?.check({ handle: 'bait', text: '我\u3164福\u115F不黑不信你看' })).toContain(
-      '我福不黑',
+    expect(benefitRule?.check({ handle: 'bait', text: '主\u3164页\u115F自取福利' })).toContain(
+      '主页自取福利',
     );
     // 繁体写法：官方简体词条要能在繁体样本上命中（opencc 映射）
     expect(
-      fuRule?.check({ handle: 'bait', text: '同城裏面誰都不信，快看我福不黑不信你看' }),
-    ).toContain('我福不黑');
+      benefitRule?.check({ handle: 'bait', text: '同城裏面誰都不信，快看我主頁自取福利' }),
+    ).toContain('主页自取福利');
     expect(cityRule?.check({ handle: 'bait', text: '同城上門服務' })).toContain('同城 + 上门');
     // CJK 补充部首替字（⻔→门 等，CJKRadicals.txt 映射）
     expect(cityRule?.check({ handle: 'bait', text: '同城上\u2ED4服務' })).toContain('同城 + 上门');
-    // 同形异源字（confusables 映射：西里尔 а）
-    const adultRule = heuristics.find(
-      (candidate) => candidate.id === 'keyword:official:adult-gray-traffic-7fdc3e8038e87ff5',
+    // 同形异源字（confusables 映射：西里尔 х→x）。「adult」已下线，改用仍在线的
+    // xiao77 锁定同一条归一化路径，避免测试绑定已删词条。
+    const siteRule = heuristics.find(
+      (candidate) => candidate.id === 'keyword:official:adult-gray-traffic-58c2e555821225d3',
     );
-    expect(adultRule?.check({ handle: 'bait', text: '\u0430dult 看过来' })).toContain('adult');
+    expect(siteRule?.check({ handle: 'bait', text: '\u0445iao77 看过来' })).toContain('xiao77');
   });
 });

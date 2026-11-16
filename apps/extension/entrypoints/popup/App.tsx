@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   parseSnapshotBody,
   type CommunityEntry,
@@ -8,7 +8,11 @@ import { shouldPauseDestructive, type XAdapterCapabilities } from '@feedsieve/x-
 import { ensureVariantTables } from '../../src/lib/detection/keyword-rules';
 import { getBlockedAccounts, subscribeBlocked } from '../../src/lib/community/blocked-accounts';
 import { getAllowlist, subscribeAllowlist } from '../../src/lib/community/allowlist';
-import { getFollowingAllowlist, subscribeFollowingAllowlist } from '../../src/lib/community/following-allowlist';
+import {
+  getFollowingAllowlist,
+  subscribeFollowingAllowlist,
+} from '../../src/lib/community/following-allowlist';
+import { AI_LIST_KEY, syncAiList, type AiListEntry } from '../../src/lib/ai-check/client';
 import {
   getCommunityKillSwitch,
   getCommunitySettings,
@@ -25,80 +29,311 @@ import {
   UI_COPY,
   type UiLanguage,
 } from '../../src/lib/platform/i18n';
-import CleanView from './views/CleanView';
-import ListsView from './views/ListsView';
-import KeywordsView from './views/KeywordsView';
-import MeView from './views/MeView';
-import HuntingView from './views/HuntingView';
+import {
+  DEFAULT_MODULE_SETTINGS,
+  getModuleSettings,
+  setModuleSettings,
+  subscribeModuleSettings,
+  type ModuleSettings,
+} from '../../src/lib/settings/module-settings';
+import {
+  enabledModules,
+  groupOf,
+  isModuleId,
+  MODULE_GROUPS,
+  MODULES,
+  moduleById,
+  type ModuleId,
+} from '../../src/lib/settings/modules';
+import HotView from './views/HotView';
+import type { GlobalPage, SettingsPage } from './views/settings/pages';
+import { isGlobalPage } from './views/settings/pages';
+// 其余视图按需加载：打开弹窗只要热帖这一屏，没理由先把五个界面全部解析一遍。
+// 首屏多出的那次 chunk 读取在扩展本地几乎察觉不到，省下的是每次打开都要付的解析时间。
+const ProfileView = lazy(() => import('./views/ProfileView'));
+const AiView = lazy(() => import('./views/AiView').then((module) => ({ default: module.AiView })));
+const WriteView = lazy(() =>
+  import('./views/WriteView').then((module) => ({ default: module.WriteView })),
+);
+const CleanView = lazy(() => import('./views/CleanView'));
+const WeeklyView = lazy(() => import('./views/WeeklyView'));
+
+/**
+ * 拾穗还没准备好：先不挂入口，链接里的 `?view=weekly` 也落到淘金。
+ * 视图、样式和测试都留着，准备好了把这里改回 true 就恢复。
+ * 标成 boolean 是为了让编译器别把后面的分支当死代码删掉。
+ */
+const WEEKLY_ENABLED: boolean = false;
+const MuteView = lazy(() => import('./views/MuteView'));
+const GlobalView = lazy(() => import('./views/settings/GlobalView'));
+const ModuleSettingsView = lazy(() => import('./views/settings/ModuleSettingsView'));
+import ToastHost from './views/ToastHost';
+import { isProfileUrl } from './views/profile-model';
+import { PANEL_VIEW_REQUEST_KEY, readPanelViewRequest } from '../../src/lib/platform/panel-route';
+import { dismissToast, showToast } from '../../src/lib/platform/toast';
 import {
   AppIcon,
   asPageMarkedList,
-  getSidePanel,
+  getChromeSidePanel,
+  SkeletonList,
   type PageMarkedItem,
 } from './views/shared';
 
-type PopupView = 'clean' | 'lists' | 'keywords' | 'hunting' | 'settings';
+/**
+ * 顶部栏目：功能模块各占一格，同组的模块（水军 / 伪人）合并成「降噪」一格，
+ * 组内用二级 tab 切换；「禁语」也挂在「降噪」下。最后是常驻的「拾穗」和「设置」。
+ * tab 是否出现由模块总开关决定，顺序由 MODULES / MODULE_GROUPS 注册表决定。
+ */
+type PopupView = ModuleId | 'global' | 'weekly' | 'mute';
+/** 顶栏 tab 的 id：分组 tab（降噪）不对应单个模块。 */
+type TopTabId = PopupView | 'noise';
+
+/** 这个视图是否属于「降噪」分组（关键词也算）。 */
+function inNoiseGroup(view: PopupView): boolean {
+  if (view === 'mute') return true;
+  return isModuleId(view) && groupOf(view) !== undefined;
+}
+
+/** 模块被关掉后的落点：同组还有开着的就留在组里，其余回调校。 */
+function fallbackViewFor(module: ModuleId, settings: ModuleSettings | null): PopupView {
+  if (!groupOf(module)) return 'global';
+  const sibling = enabledModules(settings).find((item) => groupOf(item.id));
+  return sibling?.id ?? 'mute';
+}
 
 const PAGE_MARKED_MESSAGE = { type: 'feedsieve:page-marked-list' } as const;
 
-function initialPopupView(): PopupView {
-  const value = new URLSearchParams(globalThis.location?.search ?? '').get('view');
-  switch (value) {
+interface InitialRoute {
+  view: PopupView;
+  page: SettingsPage;
+  moduleSettingsOpen: ModuleId | null;
+}
+
+/** 旧链接参数兼容：`?view=lists&list=blocked`、`?view=keywords` 等。 */
+function initialRoute(): InitialRoute {
+  const params = new URLSearchParams(globalThis.location?.search ?? '');
+  const list = params.get('list');
+  switch (params.get('view')) {
+    case 'clean':
+    case 'filter':
+      return { view: 'filter', page: 'global', moduleSettingsOpen: null };
+    case 'profile':
+      return { view: 'profile', page: 'global', moduleSettingsOpen: null };
+    case 'ai':
+      return { view: 'ai', page: 'global', moduleSettingsOpen: null };
+    case 'write':
+      return { view: 'write', page: 'global', moduleSettingsOpen: null };
+    case 'weekly':
+      if (!WEEKLY_ENABLED) return { view: 'hot', page: 'global', moduleSettingsOpen: null };
+      return { view: 'weekly', page: 'global', moduleSettingsOpen: null };
+    case 'mute':
+      return { view: 'mute', page: 'global', moduleSettingsOpen: null };
     case 'lists':
     case 'overview':
-      return 'lists';
+      if (list === 'blocked' || list === 'allowlist' || list === 'following') {
+        return { view: 'filter', page: list, moduleSettingsOpen: 'filter' };
+      }
+      return { view: 'filter', page: 'global', moduleSettingsOpen: null };
     case 'keywords':
     case 'detection':
-      return 'keywords';
-    case 'hunting':
-      return 'hunting';
+      return { view: 'filter', page: 'keywords', moduleSettingsOpen: 'filter' };
     case 'settings':
-      return 'settings';
+      return { view: 'global', page: 'global', moduleSettingsOpen: null };
     default:
-      return 'clean';
+      // 旧链接里已下线的页面（insight / hot / hunting 等）都落到热帖
+      return { view: 'hot', page: 'global', moduleSettingsOpen: null };
   }
 }
 
+/**
+ * 同一个 popup.html 既做工具栏弹窗，也做侧边栏（manifest side_panel）。
+ * 只有工具栏弹窗是固定 420×600；侧边栏和在标签页里打开时都撑满。
+ * 按扩展登记的视图判断：工具栏弹窗出现在 getViews({ type: 'popup' }) 里。
+ * 原先按窗口高度猜（> 650 算侧边栏），窗口矮时侧边栏会被当成弹窗。
+ */
+function detectSidePanel(): boolean {
+  if (typeof window === 'undefined') return false;
+  if (window.location.search.includes('panel') || window.location.hash.includes('sidepanel')) {
+    return true;
+  }
+  const getViews = (
+    globalThis as {
+      chrome?: { extension?: { getViews?: (filter: { type: string }) => Window[] } };
+    }
+  ).chrome?.extension?.getViews;
+  if (typeof getViews === 'function') {
+    try {
+      return !getViews({ type: 'popup' }).includes(window);
+    } catch {
+      // 拿不到登记信息时退回按高度判断
+    }
+  }
+  return window.innerHeight > 650;
+}
+
+/**
+ * 手机上的工具栏弹窗：按屏幕宽度收窄，别让固定 420px 超出屏幕。
+ * 不能用 vw/vh——action popup 按内容测尺寸，视口单位会自引用把弹窗塌缩；
+ * screen.width 是设备宽度，不受弹窗测量影响。
+ */
+function fitPopupToScreen(): void {
+  if (typeof window === 'undefined') return;
+  const width = Math.min(420, Math.round(window.screen.width || 420));
+  const height = Math.min(600, Math.round(window.screen.height || 600));
+  document.documentElement.style.setProperty('--popup-width', `${width}px`);
+  document.documentElement.style.setProperty('--popup-height', `${height}px`);
+}
+
+fitPopupToScreen();
+
 export default function App() {
   const [language, setLanguage] = useState<UiLanguage>(defaultUiLanguage);
-  const [view, setView] = useState<PopupView>(initialPopupView);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [route] = useState(initialRoute);
+  const [view, setView] = useState<PopupView>(route.view);
+  // 从「降噪」切到别的栏目再切回来，停在刚才那个二级 tab。
+  // 记在 ref 里：它只是下次点「降噪」时的落点，不需要为它再渲染一次。
+  const lastNoiseView = useRef<PopupView>(inNoiseGroup(route.view) ? route.view : 'filter');
+
+  /** 切视图；落在「屏蔽」里时顺手记住是哪个二级 tab。 */
+  const showView = useCallback((next: PopupView): void => {
+    if (inNoiseGroup(next)) lastNoiseView.current = next;
+    setView(next);
+  }, []);
+  const [settingsPage, setSettingsPage] = useState<SettingsPage>(route.page);
+  const [moduleSettingsOpen, setModuleSettingsOpen] = useState<ModuleId | null>(
+    route.moduleSettingsOpen,
+  );
+  const [modules, setModules] = useState<ModuleSettings | null>(null);
+
   const [pageMarked, setPageMarked] = useState<PageMarkedItem[] | null>(null);
-  const [killSwitch, setKillSwitch] = useState<
-    { destructive_actions_disabled: true; reason?: string; disabled_since?: string } | null
-  >(null);
+  const [killSwitch, setKillSwitch] = useState<{
+    destructive_actions_disabled: true;
+    reason?: string;
+    disabled_since?: string;
+  } | null>(null);
   const [capabilities, setCapabilities] = useState<XAdapterCapabilities | null>(null);
   const [community, setCommunity] = useState<CommunitySettings | null>(null);
   const [communityEntries, setCommunityEntries] = useState<CommunityEntry[]>([]);
-  // 社区快照在拉取中：名单 tab 先给骨架，不闪「空态」误导用户（有三秒超时兜底不必）
+  // 社区快照在拉取中：清理页先不显示数量，不闪「0」
   const [communityEntriesLoading, setCommunityEntriesLoading] = useState(true);
-  // 推荐白名单：快照 whitelist 段随名单一起下发，只读展示不做任何操作；
-  // note 是维护者的公开背书理由（仓库 whitelist.yaml 强制字段），名单页直接展示
+  // 推荐白名单：快照 whitelist 段随名单一起下发，只读展示
   const [recommendList, setRecommendList] = useState<WhitelistEntry[]>([]);
-  // 名单 tab 徽章需要计算「社区候选中未被保护」的数量，轻量订阅三份名单。
-  const [blocked, setBlocked] = useState<Array<{ handle: string }>>([]);
-  const [allowlist, setAllowlist] = useState<Array<{ handle: string }>>([]);
-  const [following, setFollowing] = useState<Array<{ handle: string }>>([]);
+  const [blocked, setBlocked] = useState<Array<{ handle: string }> | null>(null);
+  const [allowlist, setAllowlist] = useState<Array<{ handle: string }> | null>(null);
+  const [following, setFollowing] = useState<Array<{ handle: string }> | null>(null);
+  /** 社区伪人名单（aiListV1）：[handle, score|null, listed 0|1]，伪人页的一键屏蔽从这里取 */
+  const [aiEntries, setAiEntries] = useState<AiListEntry[]>([]);
 
   const t = UI_COPY[language];
 
-  const notify = useCallback((message: string | null): void => setNotice(message), []);
+  // 所有瞬时提示都走同一个通道，App 只渲染一条吐司（见 ToastHost）
+  const notify = useCallback((message: string | null): void => {
+    if (message) showToast(message);
+    else dismissToast();
+  }, []);
+
+  // 模块总开关：tab 去留、齿轮页、默认落点都读这一份
+  useEffect(() => {
+    let active = true;
+    const apply = (value: ModuleSettings): void => {
+      if (active) setModules(value);
+    };
+    void getModuleSettings()
+      .then(apply)
+      .catch(() => apply(DEFAULT_MODULE_SETTINGS));
+    const unsubscribe = subscribeModuleSettings(apply);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, []);
+
+  const hasExplicitView = useMemo(
+    () => new URLSearchParams(globalThis.location?.search ?? '').get('view') !== null,
+    [],
+  );
+  const [viewReady, setViewReady] = useState(
+    () => new URLSearchParams(globalThis.location?.search ?? '').get('view') !== null,
+  );
+  const modulesReady = modules !== null;
+
+  // 默认落点：链接指定的模块 → 当前是 X 主页则「主页」→ 热帖 → 第一个启用的模块 → 调校。
+  // 只在模块开关第一次加载时判断一次；之后切 tab 或开关模块都不再重置当前视图。
+  useEffect(() => {
+    if (!modules) return;
+    let active = true;
+    const enabled = enabledModules(modules);
+    const enabledIds = new Set(enabled.map((module) => module.id));
+    const apply = (profileDefault: boolean): void => {
+      if (!active) return;
+      let next = route.view;
+      if (isModuleId(next) && !enabledIds.has(next)) next = fallbackViewFor(next, modules);
+      if (!hasExplicitView && route.view === 'hot') {
+        if (profileDefault && enabledIds.has('profile')) next = 'profile';
+        else if (enabledIds.has('hot')) next = 'hot';
+        else next = enabled[0]?.id ?? 'global';
+      }
+      showView(next);
+      if (next === 'global') {
+        setSettingsPage(isGlobalPage(route.page) ? route.page : 'global');
+        setModuleSettingsOpen(null);
+      } else if (route.moduleSettingsOpen === next && enabledIds.has(next)) {
+        setModuleSettingsOpen(next);
+        setSettingsPage(route.page);
+      }
+      setViewReady(true);
+    };
+    if (hasExplicitView) {
+      apply(false);
+      return () => {
+        active = false;
+      };
+    }
+    // 兜底：个别环境里 tabs.query 迟迟不 settle 时，不能一直空着
+    const timer = setTimeout(() => apply(false), 400);
+    void Promise.resolve()
+      .then(() => browser.tabs.query({ active: true, currentWindow: true }))
+      .then((tabs) => apply(isProfileUrl(tabs[0]?.url)))
+      .catch(() => apply(false))
+      .finally(() => clearTimeout(timer));
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+    // route 是打开时固定的快照；只在模块开关第一次到达时决定落点
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modulesReady]);
+
+  // 从主页资料卡下的洞察行打开侧边栏：落到「主页」视图；侧边栏已经开着时跟着切过去
+  useEffect(() => {
+    const session = (browser.storage as { session?: typeof browser.storage.local }).session;
+    if (!session) return;
+    const apply = (value: unknown): void => {
+      if (readPanelViewRequest(value, Date.now()) === 'profile') setView('profile');
+    };
+    void session
+      .get(PANEL_VIEW_REQUEST_KEY)
+      .then((stored) => apply(stored[PANEL_VIEW_REQUEST_KEY]))
+      .catch(() => undefined);
+    const onChanged = (changes: Record<string, { newValue?: unknown }>, area: string): void => {
+      if (area === 'session' && changes[PANEL_VIEW_REQUEST_KEY]) {
+        apply(changes[PANEL_VIEW_REQUEST_KEY].newValue);
+      }
+    };
+    browser.storage.onChanged?.addListener(onChanged);
+    return () => browser.storage.onChanged?.removeListener(onChanged);
+  }, []);
 
   const applyCommunitySnapshotState = useCallback(
     (snapshot: Awaited<ReturnType<typeof getCommunitySnapshot>>): void => {
       setCommunityEntriesLoading(false);
-      if (!snapshot) {
+      const parsed = snapshot ? parseSnapshotBody(snapshot.body) : null;
+      if (!parsed?.ok) {
         setCommunityEntries([]);
         setRecommendList([]);
         return;
       }
-      const parsed = parseSnapshotBody(snapshot.body);
-      if (!parsed.ok) {
-        setCommunityEntries([]);
-        setRecommendList([]);
-        return;
-      }
-      // 展示与批量拉黑都用这个顺序：净票高的排前面（票面主序稳定，同人并列按 handle）
+      // 批量拉黑按这个顺序：净票高的先处理，同票按 handle
       const sorted = [...parsed.value.entries].sort(
         (a, b) => b.net_votes - a.net_votes || a.handle.localeCompare(b.handle),
       );
@@ -114,12 +349,19 @@ export default function App() {
     async (message: {
       type: string;
       handle?: string;
+      handles?: string[];
       force?: boolean;
       items?: Array<{ handle: string; xUserId?: string; category: string }>;
+      sort?: string;
+      postId?: string;
+      text?: string;
+      at?: number;
+      keyword?: string;
+      ids?: string[];
     }): Promise<unknown> => {
-      // Only target the active tab. Sending a destructive action to an arbitrary
-      // background X tab is surprising and can block the wrong account.
-      const activeTabs = await browser.tabs.query({ active: true, lastFocusedWindow: true });
+      // 只发给当前激活的 x.com 标签页：发给后台标签页可能拉黑错账号。
+      // 必须是弹窗 / 侧边栏所在窗口的（currentWindow），多窗口时 lastFocusedWindow 会指到别的窗口
+      const activeTabs = await browser.tabs.query({ active: true, currentWindow: true });
       const tab = activeTabs.find((candidate) => {
         const url = candidate.url ?? '';
         return (
@@ -192,13 +434,29 @@ export default function App() {
     void sendToXPage(PAGE_MARKED_MESSAGE)
       .then((result) => setPageMarked(asPageMarkedList(result)))
       .catch(() => setPageMarked([]));
-    // content script 在黄框集合变化时广播；popup 开着就自动跟进，刷新只剩兜底用途
+    // content script 在黄框集合变化时广播；popup 开着就自动跟进
     const onPageMarkedUpdated = (message: unknown): void => {
       if ((message as { type?: string } | null)?.type === 'feedsieve:page-marked-updated') {
         void refreshPageMarked();
       }
     };
     browser.runtime.onMessage.addListener(onPageMarkedUpdated);
+    // 伪人页的一键屏蔽要用社区 AI 号名单：进弹窗强制同步一次（失败保留旧值），
+    // 名单变化（后台同步 / 另一处触发）时跟着刷新
+    void syncAiList(true)
+      .then((state) => {
+        if (state) setAiEntries(state.entries);
+      })
+      .catch(() => undefined);
+    const onAiListChanged = (
+      changes: Record<string, { newValue?: unknown }>,
+      area: string,
+    ): void => {
+      if (area !== 'local' || !changes[AI_LIST_KEY]) return;
+      const next = changes[AI_LIST_KEY].newValue as { entries?: AiListEntry[] } | undefined;
+      setAiEntries(Array.isArray(next?.entries) ? next.entries : []);
+    };
+    browser.storage.onChanged.addListener(onAiListChanged);
     const unsubs = [
       subscribeUiLanguage(setLanguage),
       subscribeBlocked(setBlocked),
@@ -210,7 +468,6 @@ export default function App() {
         void getCommunityKillSwitch()
           .then((sw) => setKillSwitch(sw ?? null))
           .catch(() => setKillSwitch(null));
-        // 快照更新后同步重查实时官方暂停（popup 打开期间开关翻转也能尽快反映）
         void requestOfficialPauseCheck()
           .then((state) => setKillSwitch(state.destructive_actions_disabled ? state : null))
           .catch(() => undefined);
@@ -218,6 +475,7 @@ export default function App() {
     ];
     return () => {
       browser.runtime.onMessage.removeListener(onPageMarkedUpdated);
+      browser.storage.onChanged.removeListener(onAiListChanged);
       unsubs.forEach((unsub) => unsub());
     };
   }, [applyCommunitySnapshotState, refreshPageMarked, sendToXPage]);
@@ -226,46 +484,18 @@ export default function App() {
     document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en';
   }, [language]);
 
-  useEffect(() => {
-    if (!notice) return;
-    const timeout = window.setTimeout(() => setNotice(null), 4_000);
-    return () => window.clearTimeout(timeout);
-  }, [notice]);
-
-  const [isSidePanel, setIsSidePanel] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    return (
-      window.location.search.includes('panel') ||
-      window.location.hash.includes('sidepanel') ||
-      window.innerHeight > 650
-    );
-  });
-
-  const sidePanelApi = getSidePanel();
-  const canOpenSidePanel = Boolean(sidePanelApi?.open);
+  const [isSidePanel] = useState(detectSidePanel);
 
   useEffect(() => {
-    const syncMode = () => {
-      const isPanel =
-        window.location.search.includes('panel') ||
-        window.location.hash.includes('sidepanel') ||
-        window.innerHeight > 650;
-      setIsSidePanel(isPanel);
-      if (isPanel) {
-        document.body.classList.add('mode-sidepanel');
-      } else {
-        document.body.classList.remove('mode-sidepanel');
-      }
-    };
-    syncMode();
-    window.addEventListener('resize', syncMode);
-    return () => window.removeEventListener('resize', syncMode);
-  }, []);
+    document.body.classList.toggle('mode-sidepanel', isSidePanel);
+  }, [isSidePanel]);
+
+  const canOpenSidePanel = Boolean(getChromeSidePanel()?.open);
 
   // 弹窗 → 侧边栏。Chrome 152 实测：setOptions 不支持 windowId（同步 TypeError，
   // 会拦死后续代码），只允许全局 {enabled, path}；setOptions 独立捕获，绝不让它拦住 open
   const handleOpenSidePanel = async () => {
-    const api = getSidePanel();
+    const api = getChromeSidePanel();
     if (!api?.open) return;
     try {
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
@@ -282,171 +512,293 @@ export default function App() {
     }
   };
 
-  // 侧边栏模式不提供切回弹窗的按钮：关闭面板会连带杀掉刚打开的 action popup
-  // （Chromium 平台行为，实测含延迟收起均如此），且想用弹窗直接点工具栏图标即可。
-  // 弹窗 → 侧边栏方向是弹窗自己 window.close()，可对称收起，保留入口。
-  const modeToggle =
-    canOpenSidePanel && !isSidePanel ? (
-      <button
-        type="button"
-        className="sidepanel-toggle-btn"
-        title={t.openSidePanel}
-        aria-label={t.openSidePanel}
-        onClick={() => void handleOpenSidePanel()}
-      >
-        <AppIcon name="sidepanel" size={15} />
-        <span className="sidepanel-label-text">{t.openSidePanel}</span>
-      </button>
-    ) : null;
-
   // 破坏性操作降级：官方暂停开关优先，其次 X 能力快照（会话/Block 接口异常）
   const killSwitchActive = Boolean(killSwitch?.destructive_actions_disabled);
   const pauseDestructive =
     killSwitchActive || (capabilities ? shouldPauseDestructive(capabilities) : false);
   const pageCount = pageMarked?.length ?? null;
   // 名单数千条时的 Set 构建/过滤别跟 toast、计时器等无关渲染一起跑
-  const protectedHandles = useMemo(
-    () =>
-      new Set([
-        ...allowlist.map((item) => item.handle),
-        ...following.map((item) => item.handle),
-        ...blocked.map((item) => item.handle),
-      ]),
-    [allowlist, following, blocked],
+  const communityEligible = useMemo(() => {
+    const protectedHandles = new Set([
+      ...(allowlist ?? []).map((item) => item.handle),
+      ...(following ?? []).map((item) => item.handle),
+      ...(blocked ?? []).map((item) => item.handle),
+    ]);
+    return communityEntries.filter((entry) => !protectedHandles.has(entry.handle.toLowerCase()));
+  }, [communityEntries, allowlist, following, blocked]);
+
+  /**
+   * 伪人页「一键屏蔽」的候选：只取已进社区公共名单（listed=1）的账号，
+   * 再排掉个人白名单 / 关注中 / 本机已拉黑的——和白名单保护口径一致，
+   * 疑似号（listed=0）不进批量，避免误伤。
+   */
+  const aiEligible = useMemo(() => {
+    const protectedHandles = new Set([
+      ...(allowlist ?? []).map((item) => item.handle.toLowerCase()),
+      ...(following ?? []).map((item) => item.handle.toLowerCase()),
+      ...(blocked ?? []).map((item) => item.handle.toLowerCase()),
+    ]);
+    return aiEntries
+      .filter((entry) => entry[2] === 1)
+      .map((entry) => ({ handle: entry[0], score: entry[1] }))
+      .filter((entry) => !protectedHandles.has(entry.handle));
+  }, [aiEntries, allowlist, following, blocked]);
+
+  const updateModules = useCallback(
+    async (patch: Partial<ModuleSettings>): Promise<void> => {
+      setModules((prev) => (prev ? { ...prev, ...patch } : prev));
+      const next = await setModuleSettings(patch);
+      setModules(next);
+      // 当前正在看的模块被关掉：立即挪到还开着的同级视图，不留在已不存在的 tab 上
+      if (isModuleId(view) && !moduleById(view).enabled(next)) {
+        showView(fallbackViewFor(view, next));
+        setSettingsPage('global');
+        setModuleSettingsOpen(null);
+        return;
+      }
+      if (moduleSettingsOpen && !moduleById(moduleSettingsOpen).enabled(next)) {
+        setModuleSettingsOpen(null);
+        setSettingsPage('global');
+      }
+    },
+    [view, moduleSettingsOpen, showView],
   );
-  const communityTodoCount = useMemo(
-    () =>
-      communityEntries.filter(
-        (entry) => !protectedHandles.has(entry.handle.toLowerCase()),
-      ).length,
-    [communityEntries, protectedHandles],
-  );
+
+  // 顶栏：未分组的模块各占一格；分组的模块共用一格「降噪」。
+  // 即使组内模块全关掉，「降噪」也还在——关键词是常驻入口，不属于任何模块开关。
+  // 名字取得偏诗意，所以每一格都带一句 title：hover 时能落到具体功能上。
+  const tabs: Array<{ id: TopTabId; label: string; title: string }> = [];
+  const seenGroups = new Set<string>();
+  for (const module of MODULES) {
+    const group = groupOf(module.id);
+    if (group) {
+      if (seenGroups.has(group.id)) continue;
+      seenGroups.add(group.id);
+      tabs.push({ id: group.id, label: t[group.labelKey], title: t.noiseTabTitle });
+      continue;
+    }
+    if (modules && !module.enabled(modules)) continue;
+    tabs.push({
+      id: module.id,
+      label: t[module.labelKey],
+      title: module.titleKey ? t[module.titleKey] : t[module.labelKey],
+    });
+  }
+  // 拾穗与调校都是常驻入口，不属于模块开关；拾穗内容还没准备好，先不挂
+  if (WEEKLY_ENABLED) tabs.push({ id: 'weekly', label: t.weeklyNav, title: t.weeklyTabTitle });
+  tabs.push({ id: 'global', label: t.globalNav, title: t.globalTabTitle });
+
+  // 降噪下的二级 tab：组内模块按 MODULE_GROUPS 的顺序，关键词永远最后
+  const noiseTabs: Array<{ id: PopupView; label: string }> = [];
+  for (const group of MODULE_GROUPS) {
+    for (const id of group.moduleIds) {
+      const module = moduleById(id);
+      if (modules && !module.enabled(modules)) continue;
+      noiseTabs.push({ id, label: t[module.labelKey] });
+    }
+  }
+  noiseTabs.push({ id: 'mute', label: t.muteNav });
+
+  // 外部窗口关掉模块时也要立刻生效：不依赖 effect 里的 setState，直接派生当前可渲染的视图
+  const effectiveView: PopupView =
+    modules && isModuleId(view) && !moduleById(view).enabled(modules)
+      ? fallbackViewFor(view, modules)
+      : view;
+  const activeTab: TopTabId = inNoiseGroup(effectiveView) ? 'noise' : (effectiveView as TopTabId);
+
+  const effectiveModuleSettingsOpen =
+    moduleSettingsOpen &&
+    modules &&
+    effectiveView === moduleSettingsOpen &&
+    moduleById(moduleSettingsOpen).enabled(modules)
+      ? moduleSettingsOpen
+      : null;
+
+  function selectSection(section: TopTabId): void {
+    if (section === 'noise') {
+      // 回到上次停留的二级 tab；那个模块被关掉了就退到组里第一个
+      const remembered = lastNoiseView.current;
+      const target = noiseTabs.some((tab) => tab.id === remembered) ? remembered : noiseTabs[0]?.id;
+      if (!target) return;
+      showView(target);
+    } else {
+      showView(section);
+    }
+    setModuleSettingsOpen(null);
+    setSettingsPage('global');
+  }
+
+  function openModuleSettings(module: ModuleId): void {
+    setModuleSettingsOpen(module);
+    setSettingsPage(moduleById(module).settingsPage);
+  }
 
   return (
     <main className="popup">
-      {/* 侧边栏模式 Chrome 自带标题栏，应用内头部整行去掉 */}
-      {!isSidePanel ? (
-        <header className="popup-header">
-          <div className="brand-lockup">
-            <img src="/icon-64.png" alt="" className="brand-icon" />
-            <h1>{t.brand}</h1>
-          </div>
-          {modeToggle ? <div className="header-actions">{modeToggle}</div> : null}
-        </header>
-      ) : null}
+      <header className="masthead">
+        {/* 顶部只留栏目：不放商标和名字（侧边栏顶部 Chrome 已经显示了图标和名字，
+            弹窗里也不需要）。关于信息在设置最底下 */}
+        <nav className="section-nav" aria-label={t.primaryNavigation}>
+          {tabs.map((tab) => (
+            /* 设置也是普通一格（原来是个齿轮）：文字 tab 才和其余五格一致，
+               名字取得诗意，所以读屏名补上「设置」，title 给出里面有什么。 */
+            <button
+              key={tab.id}
+              type="button"
+              className={`${activeTab === tab.id ? 'is-active' : ''}${
+                tab.id === 'weekly' ? ' nav-weekly' : ''
+              }${tab.id === 'global' ? ' nav-settings' : ''}`.trim()}
+              aria-label={tab.id === 'global' ? `${tab.label}，${t.settings}` : undefined}
+              aria-current={activeTab === tab.id ? 'page' : undefined}
+              title={tab.title}
+              onClick={() => selectSection(tab.id)}
+            >
+              <span>{tab.label}</span>
+              {tab.id === 'noise' && activeTab !== 'noise' && pageCount ? (
+                <span className="nav-badge">{Math.min(pageCount, 99)}</span>
+              ) : null}
+            </button>
+          ))}
+          {canOpenSidePanel && !isSidePanel ? (
+            // 侧边栏模式不提供切回弹窗的按钮：关闭面板会连带杀掉刚打开的 action popup
+            <button
+              type="button"
+              className="icon-button masthead-tool"
+              title={t.openSidePanel}
+              aria-label={t.openSidePanel}
+              onClick={() => void handleOpenSidePanel()}
+            >
+              <AppIcon name="sidepanel" size={16} />
+            </button>
+          ) : null}
+        </nav>
+        {/* 「降噪」的二级 tab：水军 / 伪人 / 禁语 */}
+        {activeTab === 'noise' ? (
+          <nav className="section-subnav" aria-label={t.secondaryNavigation}>
+            {noiseTabs.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                className={effectiveView === tab.id ? 'is-active' : ''}
+                aria-current={effectiveView === tab.id ? 'page' : undefined}
+                /* 徽章里的数字不进可读名称：读屏念「水军，本页 5 条」而不是「水军5」 */
+                aria-label={
+                  tab.id === 'filter' && pageCount
+                    ? `${tab.label}，本页 ${Math.min(pageCount, 99)} 条`
+                    : undefined
+                }
+                onClick={() => selectSection(tab.id)}
+              >
+                <span>{tab.label}</span>
+                {tab.id === 'filter' && pageCount ? (
+                  <span className="nav-badge" aria-hidden="true">
+                    {Math.min(pageCount, 99)}
+                  </span>
+                ) : null}
+              </button>
+            ))}
+          </nav>
+        ) : null}
+      </header>
 
       <div className="popup-content">
-        {view === 'clean' ? (
-          <CleanView
-            language={language}
-            notify={notify}
-            sendToXPage={sendToXPage}
-            pageMarked={pageMarked}
-            refreshPageMarked={refreshPageMarked}
-            pauseDestructive={pauseDestructive}
-            killSwitchActive={killSwitchActive}
-            killSwitchReason={killSwitch?.reason}
-          />
-        ) : null}
-        {view === 'lists' ? (
-          <>
-            <ListsView
+        {/* 懒加载的视图读回来之前先占住位置，切换栏目时不闪空白 */}
+        <Suspense fallback={<SkeletonList />}>
+          {viewReady && effectiveView === 'hot' && !effectiveModuleSettingsOpen ? (
+            <HotView
+              language={language}
+              sendToXPage={sendToXPage}
+              onOpenSettings={() => openModuleSettings('hot')}
+            />
+          ) : null}
+          {viewReady && effectiveView === 'profile' && !effectiveModuleSettingsOpen ? (
+            <ProfileView
               language={language}
               notify={notify}
               sendToXPage={sendToXPage}
+              onOpenSettings={() => openModuleSettings('profile')}
+            />
+          ) : null}
+          {viewReady && effectiveView === 'write' && !effectiveModuleSettingsOpen ? (
+            <WriteView
+              language={language}
+              notify={notify}
+              sendToXPage={sendToXPage}
+              onOpenSettings={() => openModuleSettings('write')}
+            />
+          ) : null}
+          {viewReady && effectiveView === 'ai' && !effectiveModuleSettingsOpen ? (
+            <AiView
+              language={language}
+              notify={notify}
+              sendToXPage={sendToXPage}
+              onOpenSettings={() => openModuleSettings('ai')}
+              aiEligible={aiEligible}
+              aiListCount={aiEntries.length}
+            />
+          ) : null}
+          {viewReady && effectiveView === 'filter' && !effectiveModuleSettingsOpen ? (
+            <CleanView
+              language={language}
+              notify={notify}
+              sendToXPage={sendToXPage}
+              pageMarked={pageMarked}
               refreshPageMarked={refreshPageMarked}
               pauseDestructive={pauseDestructive}
-              communityEntries={communityEntries}
-              communityEntriesLoading={communityEntriesLoading}
+              killSwitchActive={killSwitchActive}
+              killSwitchReason={killSwitch?.reason}
+              communityEligible={communityEligible}
+              communityLoading={communityEntriesLoading}
+              onOpenSettings={() => openModuleSettings('filter')}
+            />
+          ) : null}
+          {viewReady && effectiveView === 'mute' ? (
+            <MuteView language={language} notify={notify} sendToXPage={sendToXPage} />
+          ) : null}
+          {viewReady && effectiveView === 'weekly' ? <WeeklyView language={language} /> : null}
+          {viewReady &&
+          effectiveModuleSettingsOpen &&
+          effectiveView === effectiveModuleSettingsOpen ? (
+            <ModuleSettingsView
+              module={moduleById(effectiveModuleSettingsOpen)}
+              page={settingsPage}
+              language={language}
+              notify={notify}
+              community={community}
+              onUpdateCommunity={updateCommunity}
+              modules={modules}
+              onUpdateModule={(patch) => void updateModules(patch)}
+              onNavigate={setSettingsPage}
+              onClose={() => setModuleSettingsOpen(null)}
+              sendToXPage={sendToXPage}
+              refreshPageMarked={refreshPageMarked}
+              pauseDestructive={pauseDestructive}
+              counts={{
+                blocked: blocked?.length ?? null,
+                allowlist: allowlist?.length ?? null,
+                following: following?.length ?? null,
+              }}
               recommendList={recommendList}
             />
-          </>
-        ) : null}
-        {view === 'hunting' ? (
-          <HuntingView language={language} notify={notify} />
-        ) : null}
-        {view === 'keywords' ? (
-          <KeywordsView language={language} notify={notify} />
-        ) : null}
-        {view === 'settings' ? (
-          <MeView
-            language={language}
-            notify={notify}
-            community={community}
-            onUpdateCommunity={updateCommunity}
-            onLanguageChange={setLanguage}
-            onSyncCommunity={refreshCommunitySnapshot}
-          />
-        ) : null}
+          ) : null}
+          {viewReady && effectiveView === 'global' ? (
+            <GlobalView
+              language={language}
+              notify={notify}
+              page={isGlobalPage(settingsPage) ? settingsPage : 'global'}
+              onNavigate={(page: GlobalPage) => setSettingsPage(page)}
+              community={community}
+              onUpdateCommunity={updateCommunity}
+              onLanguageChange={setLanguage}
+              onSyncCommunity={refreshCommunitySnapshot}
+              modules={modules}
+              onUpdateModule={(patch) => void updateModules(patch)}
+            />
+          ) : null}
+        </Suspense>
       </div>
 
-      {notice ? (
-        <p className="toast-notice" role="status">
-          {notice}
-        </p>
-      ) : null}
-
-      <nav className="bottom-nav" aria-label={t.primaryNavigation}>
-        <button
-          type="button"
-          className={view === 'clean' ? 'is-active' : ''}
-          aria-current={view === 'clean' ? 'page' : undefined}
-          onClick={() => setView('clean')}
-        >
-          <span className="nav-icon-wrap">
-            <AppIcon name="clean" />
-            {pageCount ? <span className="nav-badge">{Math.min(pageCount, 99)}</span> : null}
-          </span>
-          <span>{t.home}</span>
-        </button>
-        <button
-          type="button"
-          className={view === 'lists' ? 'is-active' : ''}
-          aria-current={view === 'lists' ? 'page' : undefined}
-          onClick={() => setView('lists')}
-        >
-          <span className="nav-icon-wrap">
-            <AppIcon name="lists" />
-            {communityTodoCount ? (
-              <span className="nav-badge">{Math.min(communityTodoCount, 99)}</span>
-            ) : null}
-          </span>
-          <span>{t.lists}</span>
-        </button>
-        <button
-          type="button"
-          className={view === 'keywords' ? 'is-active' : ''}
-          aria-current={view === 'keywords' ? 'page' : undefined}
-          onClick={() => setView('keywords')}
-        >
-          <span className="nav-icon-wrap">
-            <AppIcon name="detect" />
-          </span>
-          <span>{t.keywords}</span>
-        </button>
-        <button
-          type="button"
-          className={view === 'hunting' ? 'is-active' : ''}
-          aria-current={view === 'hunting' ? 'page' : undefined}
-          onClick={() => setView('hunting')}
-        >
-          <span className="nav-icon-wrap">
-            <AppIcon name="hunt" />
-          </span>
-          <span>{t.hunting}</span>
-        </button>
-        <button
-          type="button"
-          className={view === 'settings' ? 'is-active' : ''}
-          aria-current={view === 'settings' ? 'page' : undefined}
-          onClick={() => setView('settings')}
-        >
-          <span className="nav-icon-wrap">
-            <AppIcon name="settings" />
-          </span>
-          <span>{t.settingsSub}</span>
-        </button>
-      </nav>
+      <ToastHost />
     </main>
   );
 }

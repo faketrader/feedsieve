@@ -43,17 +43,17 @@ describe('远程关键词包契约', () => {
     // 构建期含拼音代字展开（pinyinVariants），产物条数 = build(source) 的条数。
     const { readFile } = await import('node:fs/promises');
     const { resolve } = await import('node:path');
-    const sourcePath = resolve(
-      process.cwd(),
-      'community/keyword-packs/source.json',
-    );
+    const sourcePath = resolve(process.cwd(), 'community/keyword-packs/source.json');
     const sourceRaw = await readFile(sourcePath, 'utf8');
     const source = JSON.parse(sourceRaw) as {
       pack_version: string;
       packs: Array<{ rules: unknown[] }>;
     };
     // scripts/build-keyword-packs.mjs 与 source.json 同仓定位（根跑 / 应用目录跑都兼容）
-    const scriptPath = [resolve(process.cwd(), 'scripts/build-keyword-packs.mjs'), resolve(process.cwd(), '../scripts/build-keyword-packs.mjs')].find((p) => existsSync(p));
+    const scriptPath = [
+      resolve(process.cwd(), 'scripts/build-keyword-packs.mjs'),
+      resolve(process.cwd(), '../scripts/build-keyword-packs.mjs'),
+    ].find((p) => existsSync(p));
     if (!scriptPath) throw new Error('build-keyword-packs.mjs not found');
     const { build } = await import(scriptPath);
     // build 从 .mjs 导入无类型，这里对产物形状做最小注解
@@ -110,11 +110,10 @@ async function testKey(keyId = 'test-key-1'): Promise<{
   trustedKeys: TrustedKey[];
   sign: (message: string) => Promise<ManifestSignature>;
 }> {
-  const { publicKey, privateKey } = await crypto.subtle.generateKey(
-    { name: 'Ed25519' },
-    true,
-    ['sign', 'verify'],
-  );
+  const { publicKey, privateKey } = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, [
+    'sign',
+    'verify',
+  ]);
   const pubRaw = new Uint8Array(await crypto.subtle.exportKey('raw', publicKey));
   return {
     trustedKeys: [{ key_id: keyId, publicKeyBase64: bytesToBase64(pubRaw) }],
@@ -182,7 +181,10 @@ async function signedManifest(
 }
 
 describe('关键字词库同步与发布者签名', () => {
-  async function setup(key: { trustedKeys: TrustedKey[]; sign: (m: string) => Promise<ManifestSignature> }, body = catalogBody()) {
+  async function setup(
+    key: { trustedKeys: TrustedKey[]; sign: (m: string) => Promise<ManifestSignature> },
+    body = catalogBody(),
+  ) {
     const fetchImpl = vi.fn(async (url: string) => {
       if (url.endsWith('/v1/keyword-packs/latest')) {
         return new Response(JSON.stringify(await signedManifest(body, key)), { status: 200 });
@@ -315,7 +317,9 @@ describe('detector_config 覆写契约', () => {
     expect(clean?.packs.length).toBe(BUNDLED_KEYWORD_PACK_CATALOG.packs.length);
     const withoutConfig = parseKeywordPackCatalog(
       (() => {
-        const raw: Record<string, unknown> = JSON.parse(JSON.stringify(BUNDLED_KEYWORD_PACK_CATALOG));
+        const raw: Record<string, unknown> = JSON.parse(
+          JSON.stringify(BUNDLED_KEYWORD_PACK_CATALOG),
+        );
         delete raw.detector_config;
         return raw;
       })(),
@@ -325,7 +329,10 @@ describe('detector_config 覆写契约', () => {
   });
 
   it('detector_config 非法（未知 key / 越界）时整包拒收', () => {
-    const base = JSON.parse(JSON.stringify(BUNDLED_KEYWORD_PACK_CATALOG)) as Record<string, unknown>;
+    const base = JSON.parse(JSON.stringify(BUNDLED_KEYWORD_PACK_CATALOG)) as Record<
+      string,
+      unknown
+    >;
     base.detector_config = { combo: { unknownKey: 1 } };
     expect(parseKeywordPackCatalog(base)).toBeNull();
     base.detector_config = { wordSalad: { maxTokens: 999 } };

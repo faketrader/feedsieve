@@ -3,6 +3,7 @@
  * - 一键拉黑 / 社区批量入队 / 撤销 / 手动拉黑 / 关注同步
  * - 队列 resume / pause / cancel 与能力快照
  * - 页面黄框清单快照查询
+ * - 热帖定位（滚动到页面上的帖子；热帖列表本身由后台汇总，见 shared-insight.ts）
  */
 
 import { readCapabilities } from '@feedsieve/x-adapter';
@@ -13,8 +14,11 @@ import type { QueueSupervisor } from '../queue/queue-supervisor';
 import type { FollowingSync } from '../community/following-sync';
 import type { ContentState } from './page-state';
 import { communityVoteForDetection } from './block-core';
+import { isManualReportReason } from '../community/manual-reasons';
 import type { BlockQueueRunner } from './block-queue';
 import type { ManualActions } from './manual-actions';
+import type { ProfileFill } from './profile-fill';
+import { scrollToPost } from '../insight/locate';
 
 export function registerContentMessageHandlers(deps: {
   state: ContentState;
@@ -22,8 +26,22 @@ export function registerContentMessageHandlers(deps: {
   followingSync: FollowingSync;
   startPersistentQueue: BlockQueueRunner['startPersistentQueue'];
   runManualSpamBlock: ManualActions['runManualSpamBlock'];
+  profileFill: ProfileFill;
+  /** 过滤模块关闭后，拉黑 / 名单 / 关注同步入口直接拒绝 */
+  isFilterEnabled?: () => boolean;
+  /** 主页模块关闭后，补全入口直接拒绝 */
+  isProfileEnabled?: () => boolean;
 }): void {
-  const { state, queueSupervisor, followingSync, startPersistentQueue, runManualSpamBlock } = deps;
+  const {
+    state,
+    queueSupervisor,
+    followingSync,
+    startPersistentQueue,
+    runManualSpamBlock,
+    profileFill,
+  } = deps;
+  const filterOn = (): boolean => deps.isFilterEnabled?.() ?? true;
+  const profileOn = (): boolean => deps.isProfileEnabled?.() ?? true;
 
   /**
    * popup「一键拉黑 / 一键撤销」入口：这里执行需要页面会话的原生操作，
@@ -34,6 +52,7 @@ export function registerContentMessageHandlers(deps: {
       type?: string;
       handle?: string;
       handles?: string[];
+      reason?: unknown;
       targetTabId?: number;
       items?: Array<{ handle: string; xUserId?: string; category: string }>;
     } | null;
@@ -71,12 +90,33 @@ export function registerContentMessageHandlers(deps: {
       });
     }
     if (type === 'feedsieve:manual-spam-block' && msg?.handle) {
-      return runManualSpamBlock(msg.handle);
+      if (!filterOn()) return Promise.resolve({ ok: false, code: 'module-disabled' });
+      // reason=null 是用户明确选择「仅拉黑」；缺字段/非法值不能悄悄当成 other 投票。
+      const rawReason = msg.reason;
+      const reason =
+        rawReason === null ? null : isManualReportReason(rawReason) ? rawReason : undefined;
+      if (reason === undefined) {
+        return Promise.resolve({ ok: false, code: 'invalid-reason' });
+      }
+      return runManualSpamBlock(msg.handle, {}, reason);
+    }
+    if (type === 'feedsieve:profile-fill' && typeof msg?.handle === 'string') {
+      // 用户点「补全」：向下滚动让 X 自己加载更多帖子（不额外请求 X）
+      if (!profileOn()) return Promise.resolve({ ok: false, code: 'module-disabled' });
+      return profileFill.fill(msg.handle.toLowerCase());
+    }
+    if (type === 'feedsieve:profile-fill-stop') {
+      profileFill.stop();
+      return Promise.resolve({ ok: true });
     }
     if (type === 'feedsieve:following-sync-start') {
+      if (!filterOn()) return Promise.resolve({ status: 'error', error: 'module-disabled' });
       return followingSync.start();
     }
     if (type === 'feedsieve:community-block-start' && Array.isArray(msg?.items)) {
+      if (!filterOn()) {
+        return { status: 'error', error: 'module-disabled', id: '', count: 0 };
+      }
       // 消息通道可跨上下文伪造/携带畸形条目（review F1/F6）：逐条严格校验后才入队
       const items = (msg.items as unknown[])
         .map(sanitizeQueueItem)
@@ -85,6 +125,22 @@ export function registerContentMessageHandlers(deps: {
         return { status: 'error', error: 'invalid-items', id: '', count: 0 };
       }
       return startPersistentQueue('community-batch', items, msg.targetTabId);
+    }
+    // 伪人页「一键屏蔽 AI 号」：与社区黑名单共用同一套入队 / 执行 / 额度链路，只换队列 source，
+    // 这样进度、暂停、取消、失败重试都不用另写一套。
+    if (type === 'feedsieve:ai-block-start' && Array.isArray(msg?.items)) {
+      if (!filterOn()) {
+        return { status: 'error', error: 'module-disabled', id: '', count: 0 };
+      }
+      const items = (msg.items as unknown[])
+        .map(sanitizeQueueItem)
+        .filter((item): item is NonNullable<typeof item> => item !== null)
+        // 拉黑 AI 号不是「给黑名单投票」：这批不写 communityVote，避免污染黑名单票数与训练样本
+        .map((item) => ({ ...item, communityVote: false }));
+      if (items.length === 0) {
+        return { status: 'error', error: 'invalid-items', id: '', count: 0 };
+      }
+      return startPersistentQueue('ai-batch', items, msg.targetTabId);
     }
     if (type === 'feedsieve:capabilities') {
       // popup 用：当前 X 会话 / Block 接口 / 解析 / 扫描的能力快照（非破坏性观测）
@@ -102,12 +158,19 @@ export function registerContentMessageHandlers(deps: {
     return undefined;
   });
 
-  /** popup「一键拉黑」需要的页面黄框快照（发往活动 tab 实时查询）。 */
+  /** popup「一键拉黑」需要的页面黄框快照与热帖定位（发往活动 tab 实时查询）。 */
   browser.runtime.onMessage.addListener((message: unknown) => {
     const type = (message as { type?: string } | null)?.type;
+    if (type === 'feedsieve:scroll-to-post') {
+      const postId = (message as { postId?: unknown }).postId;
+      return Promise.resolve({
+        found: typeof postId === 'string' && /^\d{1,20}$/.test(postId) && scrollToPost(postId),
+      });
+    }
     if (type === 'feedsieve:page-marked-list') {
       // 必须 Promise：Chrome 原生 onMessage 只认 true / Promise 作为异步响应，
       // 同步返回数组会被忽略，popup 收到 undefined（v0.7.0 真机回归捕获）
+      if (!filterOn()) return Promise.resolve([]);
       return Promise.resolve(
         [...state.pageMarked.values()].map((m) => ({
           handle: m.handle,

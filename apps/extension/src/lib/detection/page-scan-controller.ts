@@ -7,6 +7,13 @@
  */
 
 import { contextFromPath, extractFeedItem, tweetSelectors } from '@feedsieve/x-adapter';
+import { INSIGHT_DECORATION_SELECTOR } from '../insight/decorations';
+
+/**
+ * 插件自己插进页面的节点：Observer 必须忽略它们的增删与内部变化，
+ * 否则每次插入都会把所在推文标脏、触发重扫，形成反馈环。
+ */
+const OWN_DECORATION_SELECTOR = `.fs-badge, .fs-manual-mark, [data-fs-action], .fs-ai-mark, .fs-ai-foldbar, [data-fs-ai-tab], ${INSIGHT_DECORATION_SELECTOR}`;
 
 /** mutation 停止后到扫描的固定间隔。 */
 export const SCAN_DEBOUNCE_MS = 300;
@@ -27,6 +34,14 @@ export interface ScanCallbacks {
   ): void;
   /** 批量插入待插徽章（DOM 批量插入减少滚动锚定抖动）。 */
   flushBadges(pendingBadges: PendingBadge[]): void;
+  /**
+   * 这一轮脏节点扫完了。给「要按整页顺序判断」的装饰用（AI 味：主帖 / 楼上祖先帖 /
+   * 主帖作者要靠遍历顺序区分），它们不必自己再起一个全页轮询。
+   *
+   * scanned 是本轮 processDirty 实际处理过的 article（跨分片、跨 while 轮次累积；
+   * 没有脏节点时是空数组）。调用方只装饰这批节点即可，不必再整页重新解析。
+   */
+  scanDone?(scanned: readonly Element[]): void;
   /** 扫描正常 / 失败的心跳（X 能力快照 timelineParsing 的输入）。 */
   noteHealth(ok: boolean, reason?: string): void;
 }
@@ -75,6 +90,9 @@ export class PageScanController {
 
   /** 显式全页重扫：启动、SPA 路由切换、设置/名单/语言变化。 */
   fullRescan(): void {
+    // 先清掉上一轮已经被虚拟列表回收的节点；全页重扫是长会话里
+    // 最稳定的「顺带回收」时机（路由/设置变化之外很少触发）
+    this.pruneDisconnected();
     this.fullRescanArticles();
     this.schedule();
   }
@@ -96,8 +114,8 @@ export class PageScanController {
     if (!indexed) return;
     for (const article of indexed) {
       if (article.isConnected) this.dirtyArticles.add(article);
-      else indexed.delete(article);
     }
+    this.pruneHandle(handle);
   }
 
   /** Evidence for a template changed: invalidate only its currently rendered authors. */
@@ -107,32 +125,60 @@ export class PageScanController {
       this.snapshots.delete(article);
       this.dirtyArticles.add(article);
     }
+    this.pruneHandle(handle);
     this.schedule();
   }
 
-  /** handle ↔ 节点索引维护（scanOne 提取后登记）。 */
-  remember(article: Element, handle: string): void {
+  /** handle ↔ 节点索引维护（scanOne 提取后登记）。返回被复用前的 handle。 */
+  remember(article: Element, handle: string): string | undefined {
     const previous = this.articleHandles.get(article);
     if (previous && previous !== handle) {
       const previousSet = this.articlesByHandle.get(previous);
       previousSet?.delete(article);
       if (previousSet?.size === 0) this.articlesByHandle.delete(previous);
+      // 节点被复用成另一条推文：旧 revision 必须作废，否则同作者同文本会被当成「已标注」跳过。
+      this.snapshots.delete(article);
     }
     this.articleHandles.set(article, handle);
+    // 同一 handle 之前渲染的卡片里可能已有被回收的：顺手清掉再登记
+    this.pruneHandle(handle);
     const set = this.articlesByHandle.get(handle) ?? new Set<Element>();
     set.add(article);
     this.articlesByHandle.set(handle, set);
+    return previous && previous !== handle ? previous : undefined;
   }
 
   /** 节点被虚拟列表回收 / 提取失败：清理快照与索引。 */
   forget(article: Element): void {
     this.snapshots.delete(article);
+    // 已经断开连接的节点不必再排进下一轮扫描
+    this.dirtyArticles.delete(article);
     const stale = this.articleHandles.get(article);
-    if (stale) {
-      const set = this.articlesByHandle.get(stale);
-      set?.delete(article);
-      if (set?.size === 0) this.articlesByHandle.delete(stale);
+    if (!stale) return;
+    const set = this.articlesByHandle.get(stale);
+    set?.delete(article);
+    if (set?.size === 0) this.articlesByHandle.delete(stale);
+  }
+
+  /**
+   * 剔除某个 handle 名下已被虚拟列表回收的卡片。
+   *
+   * articlesByHandle 的 Set 持有 Element 强引用：cell 被虚拟列表移出 DOM 后
+   * 没有任何自动清理路径，长会话（无限滚动）里索引只增不减。这里在所有
+   * 「本来就要遍历这个 handle」的入口顺手清理，不额外增加遍历成本。
+   */
+  private pruneHandle(handle: string): void {
+    const indexed = this.articlesByHandle.get(handle);
+    if (!indexed) return;
+    for (const article of indexed) {
+      if (!article.isConnected) indexed.delete(article);
     }
+    if (indexed.size === 0) this.articlesByHandle.delete(handle);
+  }
+
+  /** 全量清理回收节点：之后没人再扫到的 handle 也要能随 GC 释放。 */
+  private pruneDisconnected(): void {
+    for (const handle of [...this.articlesByHandle.keys()]) this.pruneHandle(handle);
   }
 
   /** 只清 revision 快照（提取失败路径：索引保持）。 */
@@ -160,6 +206,8 @@ export class PageScanController {
   cellsForHandle(handle: string): Element[] {
     const normalized = handle.trim().replace(/^@+/, '').toLowerCase();
     if (!normalized) return [];
+    // 批量队列每个 handle 都会调到这里：索引里的回收节点顺手清掉
+    this.pruneHandle(normalized);
     const context = contextFromPath(location.pathname);
     const candidates = new Set<Element>();
     for (const article of this.articlesByHandle.get(normalized) ?? []) {
@@ -184,13 +232,12 @@ export class PageScanController {
       for (const mutation of mutations) {
         const target =
           mutation.target instanceof Element ? mutation.target : mutation.target.parentElement;
-        if (target?.closest('.fs-badge, .fs-manual-mark')) continue;
+        if (target?.closest(OWN_DECORATION_SELECTOR)) continue;
         let touched = false;
         for (const node of mutation.addedNodes) {
           if (
             node instanceof Element &&
-            (node.matches('.fs-badge, .fs-manual-mark') ||
-              node.closest('.fs-badge, .fs-manual-mark'))
+            (node.matches(OWN_DECORATION_SELECTOR) || node.closest(OWN_DECORATION_SELECTOR))
           ) {
             continue;
           }
@@ -205,8 +252,7 @@ export class PageScanController {
           for (const node of mutation.removedNodes) {
             if (
               node instanceof Element &&
-              (node.matches('.fs-badge, .fs-manual-mark') ||
-                node.closest('.fs-badge, .fs-manual-mark'))
+              (node.matches(OWN_DECORATION_SELECTOR) || node.closest(OWN_DECORATION_SELECTOR))
             ) {
               continue;
             }
@@ -249,6 +295,8 @@ export class PageScanController {
   }
 
   private async processDirty(): Promise<void> {
+    /** 本轮真正过了一遍 processOne 的节点（跨分片累积），随 scanDone 交给整页装饰。 */
+    const scanned: Element[] = [];
     while (this.dirtyArticles.size > 0) {
       const batch = [...this.dirtyArticles];
       this.dirtyArticles.clear();
@@ -256,7 +304,9 @@ export class PageScanController {
       const pendingBadges: PendingBadge[] = [];
       let chunkStartedAt = performance.now();
       for (let index = 0; index < batch.length; index++) {
-        this.callbacks.processOne(batch[index]!, context, pendingBadges);
+        const article = batch[index]!;
+        this.callbacks.processOne(article, context, pendingBadges);
+        scanned.push(article);
         // 每片不超过单帧预算，之间让出主线程：长评论区的一次扫描
         // 不再整块卡住滚动与输入。
         if (
@@ -271,5 +321,9 @@ export class PageScanController {
       }
       this.callbacks.flushBadges(pendingBadges);
     }
+    // 本轮处理完再清一遍索引：剩下的 !isConnected 都是虚拟列表已经回收的节点，
+    // 不会再被扫到，留着只会占内存
+    this.pruneDisconnected();
+    this.callbacks.scanDone?.(scanned);
   }
 }

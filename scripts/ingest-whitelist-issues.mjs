@@ -4,7 +4,7 @@
  * community/lists/whitelist.yaml**，同时给 issue 回帖并打 `whitelist-ingested` 标签。
  * 自动化红线：绝不自动拉取、绝不自动提交入库——此文件是「永不标注」的强豁免名单，
  * 最终收录人是仓库所有者：跑完看 yaml diff，确认后再亲手跑
- * scripts/publish-community-whitelist.sh（D1 写入，发布即生效）。
+ * scripts/publish-community-whitelist.sh（写入数据库，发布即生效）。
  *
  * 解析/校验规则与发布链同口径：常量/上限统一取自 scripts/lib/whitelist-schema.mjs
  * （原 publish-community-whitelist.sh 校验器的单一 JS 实现），消灭双份实现
@@ -106,7 +106,7 @@ function gh(args, opts = {}) {
 
 /**
  * 主流程：拉当前合规 Issue → 写进本地 whitelist.yaml → 你看 diff →
- * `sh scripts/publish-community-whitelist.sh` 才真正进 D1（发布仍亲手执行）。
+ * `sh scripts/publish-community-whitelist.sh` 才真正入库（发布仍亲手执行）。
  */
 export async function run({ dryRun = false } = {}) {
   gh(['label', 'create', SOURCE_LABEL, '--force', '--repo', ghRepo(), '--description', '推荐白名单申请（维护者手动拉取评审）']);

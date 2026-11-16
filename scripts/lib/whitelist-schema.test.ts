@@ -1,7 +1,7 @@
 /**
  * 白名单发布链单一实现（scripts/lib/whitelist-schema.mjs）的测试：
  * 行式 YAML 解析（原 publish-community-whitelist.sh 内嵌 Python 的忠实移植）
- * + 规则校验 + D1 SQL 生成（固定 now/stamp 的逐字节快照）。
+ * + 规则校验 + SQL 生成（固定 now/stamp 的逐字节快照）。
  */
 import { describe, expect, it } from 'vitest';
 import {

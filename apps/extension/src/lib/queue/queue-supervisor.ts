@@ -15,10 +15,7 @@
  *   「新页面启动必然重新走本函数」覆盖，定时复查本身不再自续，避免常驻轮询。
  */
 
-import {
-  decideQueueResume,
-  type PersistentBlockQueueState,
-} from './block-queue-store';
+import { decideQueueResume, type PersistentBlockQueueState } from './block-queue-store';
 
 /** 队列 owner 心跳键：运行中每 QUEUE_HEARTBEAT_INTERVAL_MS 写一次。 */
 export const QUEUE_HEARTBEAT_KEY = 'blockQueueHeartbeatAt';
@@ -31,6 +28,7 @@ export const QUEUE_HEARTBEAT_INTERVAL_MS = 3000;
 const RESUME_RETRYABLE_FAILURE_CODES = [
   'rate_limited',
   'auth_required',
+  'challenge',
   'missing_csrf',
   'network_error',
   'kill_switch',
@@ -106,11 +104,14 @@ export function applyCancel(state: PersistentBlockQueueState): void {
   }
 }
 
+/** 定时器句柄：Node 类型下是 Timeout，浏览器（含 WXT 的 ctx.setInterval）是 number。 */
+type TimerHandle = ReturnType<typeof setInterval> | number;
+
 export interface QueueSupervisorTimers {
-  setInterval: (fn: () => void, ms: number) => ReturnType<typeof setInterval>;
-  clearInterval: (handle: ReturnType<typeof setInterval>) => void;
-  setTimeout: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
-  clearTimeout: (handle: ReturnType<typeof setTimeout>) => void;
+  setInterval: (fn: () => void, ms: number) => TimerHandle;
+  clearInterval: (handle: TimerHandle) => void;
+  setTimeout: (fn: () => void, ms: number) => TimerHandle;
+  clearTimeout: (handle: TimerHandle) => void;
 }
 
 export interface QueueSupervisorDeps {
@@ -201,13 +202,8 @@ export function createQueueSupervisor(deps: QueueSupervisorDeps): QueueSuperviso
     // 再开第二个 runner（同一任务双执行、写状态互踩）。
     const heartbeat = await deps.readHeartbeat();
     if (
-      decideQueueResume(
-        state.status,
-        heartbeat,
-        now(),
-        QUEUE_HEARTBEAT_TTL_MS,
-        ownedByThisTab,
-      ) === 'already-running'
+      decideQueueResume(state.status, heartbeat, now(), QUEUE_HEARTBEAT_TTL_MS, ownedByThisTab) ===
+      'already-running'
     ) {
       // 队列确实在跑（别的 tab）：对 popup 返回 running（协议语义不变），但不启动
       return { status: 'running' };

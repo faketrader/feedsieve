@@ -31,7 +31,7 @@ describe('扩展检测安全政策', () => {
     );
     expect(
       classifyDetection({
-        detection: { ...detection('heuristic'), ruleId: 'keyword:official:adult-fu-not-black' },
+        detection: { ...detection('heuristic'), ruleId: 'keyword:official:adult-profile-collect-benefits' },
         strength: 'standard',
       }),
     ).toBe('review');
@@ -47,7 +47,13 @@ describe('扩展检测安全政策', () => {
       ).toBe('review');
     }
     // 范围钉死：单信号内置规则不随组合层升档，升档需逐条单独评审
-    for (const ruleId of ['word-salad', 'porn-bait-zh', 'templated-text', 'default-name-digits', 'spam-link-hint']) {
+    for (const ruleId of [
+      'word-salad',
+      'porn-bait-zh',
+      'templated-text',
+      'default-name-digits',
+      'spam-link-hint',
+    ]) {
       expect(
         classifyDetection({
           detection: { ...detection('heuristic'), ruleId },

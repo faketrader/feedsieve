@@ -6,16 +6,20 @@
  * （whitelist.yaml / 草稿发布），不因申请直改名单。
  *
  * 邮箱验证码复用 email_codes 表：申请通道没有安装语义，写入占位哈希标识通道；
- * 验证只凭邮箱 + 码（同一个收件箱持有者才收得到码，与玩家档案通道同为邮箱所有权
- * 证明；同邮箱被另一通道重发码时以最后一次为准）。
+ * 验证只凭邮箱 + 码（同一个收件箱持有者才收得到码，即邮箱所有权
+ * 证明；同邮箱重发码时以最后一次为准）。
  * 限流：每 IP 每日提交上限（application_ip_usage，条件 UPSERT 即门禁，同 ip_usage）
- * + 每邮箱每小时发码上限（email_codes.send_count，同 player）。
+ * + 每邮箱每小时发码上限（email_codes.send_count）。
  * 同 handle + kind 已有未决申请时不重复建行：pending 重新提交视为重发验证码。
  */
 import { normalizeHandle, isApplicationKind } from '@feedsieve/shared';
+import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm';
+import { getDb } from './db/client';
+import { applicationIpUsage, applications, emailCodes } from './db/schema';
 import { hashIp, sha256Hex } from './lib/hash';
+import { stripNul } from './lib/sql';
 import { emailCodeHash, generateEmailCode } from './lib/email-code';
-import { hashEmail, isValidEmail, normalizeEmail, sendMail } from './player';
+import { hashEmail, isValidEmail, normalizeEmail, sendMail } from './mail';
 
 export const APPLICATION = {
   statementMin: 8,
@@ -43,8 +47,7 @@ export interface ApplicationResult {
 }
 
 type ApplicationCallResult<T> =
-  | { ok: true; value: T }
-  | { ok: false; httpStatus: 400 | 404 | 409 | 429 | 503; error: string };
+  { ok: true; value: T } | { ok: false; httpStatus: 400 | 404 | 409 | 429 | 503; error: string };
 
 interface ApplicationRow {
   id: number;
@@ -64,7 +67,9 @@ export async function submitApplication(
   env: Cloudflare.Env,
   body: unknown,
   ip: string | undefined,
-): Promise<ApplicationCallResult<{ sent: boolean; dev_code?: string; application: ApplicationResult }>> {
+): Promise<
+  ApplicationCallResult<{ sent: boolean; dev_code?: string; application: ApplicationResult }>
+> {
   const b = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
   const handle = typeof b.handle === 'string' ? normalizeHandle(b.handle.trim()) : null;
   if (!handle) return { ok: false, httpStatus: 400, error: 'invalid_handle' };
@@ -73,7 +78,7 @@ export async function submitApplication(
   }
   const kind = b.kind as string;
   if (!isValidEmail(b.email)) return { ok: false, httpStatus: 400, error: 'invalid_email' };
-  const statement = typeof b.statement === 'string' ? b.statement.trim() : '';
+  const statement = typeof b.statement === 'string' ? stripNul(b.statement).trim() : '';
   if (statement.length < APPLICATION.statementMin || statement.length > APPLICATION.statementMax) {
     return { ok: false, httpStatus: 400, error: 'invalid_statement' };
   }
@@ -85,35 +90,40 @@ export async function submitApplication(
   const now = Math.floor(Date.now() / 1000);
   const today = new Date().toISOString().slice(0, 10);
 
+  const db = getDb(env);
+
   // IP 门禁：条件 UPSERT 本身即闸口，并发请求无法同时通过
-  const reserved = await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO application_ip_usage (ip_hash, day, submissions_today)
-       VALUES (?1, ?2, 1)
-       ON CONFLICT(ip_hash) DO UPDATE SET
-         submissions_today = CASE
-           WHEN application_ip_usage.day = excluded.day THEN application_ip_usage.submissions_today + 1
-           ELSE 1
-         END,
-         day = excluded.day
-       WHERE (
-         CASE WHEN application_ip_usage.day = excluded.day THEN application_ip_usage.submissions_today ELSE 0 END
-       ) < ?3`,
-    ).bind(ipHash, today, APPLICATION.submissionsPerIpPerDay),
-    env.DB.prepare('DELETE FROM application_ip_usage WHERE day < ?1').bind(today),
-  ]);
-  if ((reserved[0]?.meta.changes ?? 0) === 0) {
+  const usedToday = sql`CASE WHEN ${applicationIpUsage.day} = excluded.day THEN ${applicationIpUsage.submissionsToday} ELSE 0 END`;
+  const reserved = await db
+    .insert(applicationIpUsage)
+    .values({ ipHash, day: today, submissionsToday: 1 })
+    .onConflictDoUpdate({
+      target: applicationIpUsage.ipHash,
+      set: {
+        submissionsToday: sql`${usedToday} + 1`,
+        day: sql`excluded.day`,
+      },
+      setWhere: sql`${usedToday} < ${APPLICATION.submissionsPerIpPerDay}`,
+    })
+    .returning({ ipHash: applicationIpUsage.ipHash });
+  await db.delete(applicationIpUsage).where(lt(applicationIpUsage.day, today));
+  if (reserved.length === 0) {
     return { ok: false, httpStatus: 429, error: 'too_many_submissions' };
   }
 
   // 幂等：同 handle + kind 已有未决申请 → 不重复建行；pending 视为重发验证码
-  const open = await env.DB.prepare(
-    `SELECT id, status FROM applications
-     WHERE handle = ?1 AND kind = ?2 AND status IN ('pending', 'verified')
-     ORDER BY created_at DESC LIMIT 1`,
-  )
-    .bind(handle, kind)
-    .first<{ id: number; status: string }>();
+  const [open] = await db
+    .select({ id: applications.id, status: applications.status })
+    .from(applications)
+    .where(
+      and(
+        eq(applications.handle, handle),
+        eq(applications.kind, kind),
+        inArray(applications.status, ['pending', 'verified']),
+      ),
+    )
+    .orderBy(desc(applications.createdAt))
+    .limit(1);
   if (open?.status === 'verified') {
     return { ok: false, httpStatus: 409, error: 'application_pending' };
   }
@@ -121,52 +131,50 @@ export async function submitApplication(
   let applicationId: number;
   if (open) {
     applicationId = open.id;
-    await env.DB.prepare(
-      `UPDATE applications
-       SET statement = ?2, email_hash = ?3, created_at = ?4
-       WHERE id = ?1`,
-    ).bind(applicationId, statement, emailHash, now).run();
+    await db
+      .update(applications)
+      .set({ statement, emailHash, createdAt: now })
+      .where(eq(applications.id, applicationId));
   } else {
-    const inserted = await env.DB.prepare(
-      `INSERT INTO applications (handle, kind, statement, email_hash, status, ip_hash, created_at)
-       VALUES (?1, ?2, ?3, ?4, 'pending', ?5, ?6)`,
-    )
-      .bind(handle, kind, statement, emailHash, ipHash, now)
-      .run();
-    applicationId = Number(inserted.meta.last_row_id);
+    const [inserted] = await db
+      .insert(applications)
+      .values({ handle, kind, statement, emailHash, status: 'pending', ipHash, createdAt: now })
+      .returning({ id: applications.id });
+    applicationId = inserted!.id;
   }
 
   // 发码限频（同邮箱滑动 1 小时窗口），复用 email_codes 行上的 send_count
-  const recent = await env.DB.prepare(
-    'SELECT send_count, created_at FROM email_codes WHERE email_hash = ?1',
-  )
-    .bind(emailHash)
-    .first<{ send_count: number; created_at: number }>();
-  if (recent && recent.created_at > now - 3600 && recent.send_count >= APPLICATION.sendsPerHour) {
+  const [recent] = await db
+    .select({ sendCount: emailCodes.sendCount, createdAt: emailCodes.createdAt })
+    .from(emailCodes)
+    .where(eq(emailCodes.emailHash, emailHash));
+  if (recent && recent.createdAt > now - 3600 && recent.sendCount >= APPLICATION.sendsPerHour) {
     return { ok: false, httpStatus: 429, error: 'too_many_code_requests' };
   }
 
   const code = generateEmailCode();
-  await env.DB.prepare(
-    `INSERT INTO email_codes (email_hash, installer_hash, code_hash, attempts, send_count, created_at, expires_at)
-     VALUES (?1, ?2, ?3, 0, 1, ?4, ?5)
-     ON CONFLICT(email_hash) DO UPDATE SET
-       installer_hash = excluded.installer_hash,
-       code_hash = excluded.code_hash,
-       attempts = 0,
-       send_count = CASE WHEN email_codes.created_at > ?6 THEN email_codes.send_count + 1 ELSE 1 END,
-       created_at = excluded.created_at,
-       expires_at = excluded.expires_at`,
-  )
-    .bind(
+  await db
+    .insert(emailCodes)
+    .values({
       emailHash,
-      await applicationChannelHash(env.INSTALLATION_SALT),
-      await emailCodeHash(env.INSTALLATION_SALT, emailHash, code),
-      now,
-      now + APPLICATION.codeTtlSeconds,
-      now - 3600,
-    )
-    .run();
+      installerHash: await applicationChannelHash(env.INSTALLATION_SALT),
+      codeHash: await emailCodeHash(env.INSTALLATION_SALT, emailHash, code),
+      attempts: 0,
+      sendCount: 1,
+      createdAt: now,
+      expiresAt: now + APPLICATION.codeTtlSeconds,
+    })
+    .onConflictDoUpdate({
+      target: emailCodes.emailHash,
+      set: {
+        installerHash: sql`excluded.installer_hash`,
+        codeHash: sql`excluded.code_hash`,
+        attempts: 0,
+        sendCount: sql`CASE WHEN ${emailCodes.createdAt} > ${now - 3600} THEN ${emailCodes.sendCount} + 1 ELSE 1 END`,
+        createdAt: sql`excluded.created_at`,
+        expiresAt: sql`excluded.expires_at`,
+      },
+    });
 
   const sent = await sendMail(env, {
     to: email,
@@ -208,49 +216,57 @@ export async function verifyApplication(
   const emailHash = await hashEmail(env.INSTALLATION_SALT, normalizeEmail(b.email as string));
   const now = Math.floor(Date.now() / 1000);
 
-  const row = await env.DB.prepare(
-    'SELECT code_hash, attempts, expires_at FROM email_codes WHERE email_hash = ?1',
-  )
-    .bind(emailHash)
-    .first<{ code_hash: string; attempts: number; expires_at: number }>();
-  if (!row || row.expires_at < now) {
-    await env.DB.prepare('DELETE FROM email_codes WHERE email_hash = ?1').bind(emailHash).run();
+  const db = getDb(env);
+  const clearCode = () => db.delete(emailCodes).where(eq(emailCodes.emailHash, emailHash));
+  const [row] = await db
+    .select({
+      codeHash: emailCodes.codeHash,
+      attempts: emailCodes.attempts,
+      expiresAt: emailCodes.expiresAt,
+    })
+    .from(emailCodes)
+    .where(eq(emailCodes.emailHash, emailHash));
+  if (!row || row.expiresAt < now) {
+    await clearCode();
     return { ok: false, httpStatus: 400, error: 'invalid_or_expired_code' };
   }
   if (row.attempts >= APPLICATION.codeMaxAttempts) {
-    await env.DB.prepare('DELETE FROM email_codes WHERE email_hash = ?1').bind(emailHash).run();
+    await clearCode();
     return { ok: false, httpStatus: 429, error: 'too_many_attempts' };
   }
-  if ((await emailCodeHash(env.INSTALLATION_SALT, emailHash, code)) !== row.code_hash) {
-    // 错码计数原子递增（并发错猜不能共享读数翻倍上限），同 player.verifyEmail
-    const bumped = await env.DB.prepare(
-      'UPDATE email_codes SET attempts = attempts + 1 WHERE email_hash = ?1 AND attempts < ?2',
-    )
-      .bind(emailHash, APPLICATION.codeMaxAttempts)
-      .run();
-    if ((bumped.meta.changes ?? 0) === 0) {
-      await env.DB.prepare('DELETE FROM email_codes WHERE email_hash = ?1').bind(emailHash).run();
+  if ((await emailCodeHash(env.INSTALLATION_SALT, emailHash, code)) !== row.codeHash) {
+    // 错码计数原子递增（并发错猜不能共享读数翻倍上限）
+    const bumped = await db
+      .update(emailCodes)
+      .set({ attempts: sql`${emailCodes.attempts} + 1` })
+      .where(
+        and(
+          eq(emailCodes.emailHash, emailHash),
+          lt(emailCodes.attempts, APPLICATION.codeMaxAttempts),
+        ),
+      )
+      .returning({ emailHash: emailCodes.emailHash });
+    if (bumped.length === 0) {
+      await clearCode();
       return { ok: false, httpStatus: 429, error: 'too_many_attempts' };
     }
     return { ok: false, httpStatus: 400, error: 'invalid_or_expired_code' };
   }
-  await env.DB.prepare('DELETE FROM email_codes WHERE email_hash = ?1').bind(emailHash).run();
+  await clearCode();
 
   // 一次验证只推进该邮箱最新的一份未决申请（防同邮箱批量灌队列）
-  const pending = await env.DB.prepare(
-    `SELECT id, handle, kind FROM applications
-     WHERE email_hash = ?1 AND status = 'pending'
-     ORDER BY created_at DESC LIMIT 1`,
-  )
-    .bind(emailHash)
-    .first<{ id: number; handle: string; kind: string }>();
+  const [pending] = await db
+    .select({ id: applications.id, handle: applications.handle, kind: applications.kind })
+    .from(applications)
+    .where(and(eq(applications.emailHash, emailHash), eq(applications.status, 'pending')))
+    .orderBy(desc(applications.createdAt))
+    .limit(1);
   if (!pending) return { ok: false, httpStatus: 400, error: 'application_not_found' };
 
-  await env.DB.prepare(
-    `UPDATE applications SET status = 'verified', verified_at = ?2 WHERE id = ?1 AND status = 'pending'`,
-  )
-    .bind(pending.id, now)
-    .run();
+  await db
+    .update(applications)
+    .set({ status: 'verified', verifiedAt: now })
+    .where(and(eq(applications.id, pending.id), eq(applications.status, 'pending')));
   return { ok: true, value: { handle: pending.handle, kind: pending.kind, status: 'verified' } };
 }
 
@@ -259,24 +275,26 @@ export async function listApplications(
   env: Cloudflare.Env,
   options: { status?: string; limit?: number } = {},
 ): Promise<{ entries: ApplicationRow[] }> {
-  const where: string[] = [];
-  const binds: Array<string | number> = [];
-  if (options.status) {
-    where.push(`status = ?${binds.length + 1}`);
-    binds.push(options.status);
-  }
   const limit = Math.min(Math.max(Math.trunc(options.limit ?? 200) || 200, 1), 1000);
-  const rows = await env.DB.prepare(
-    `SELECT id, handle, kind, statement, email_hash, status, created_at,
-            verified_at, decided_at, decided_by, decision_note
-     FROM applications
-     ${where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''}
-     ORDER BY created_at DESC, id DESC
-     LIMIT ${limit}`,
-  )
-    .bind(...binds)
-    .all<ApplicationRow>();
-  return { entries: rows.results };
+  const entries = await getDb(env)
+    .select({
+      id: applications.id,
+      handle: applications.handle,
+      kind: applications.kind,
+      statement: applications.statement,
+      email_hash: applications.emailHash,
+      status: applications.status,
+      created_at: applications.createdAt,
+      verified_at: applications.verifiedAt,
+      decided_at: applications.decidedAt,
+      decided_by: applications.decidedBy,
+      decision_note: applications.decisionNote,
+    })
+    .from(applications)
+    .where(options.status ? eq(applications.status, options.status) : undefined)
+    .orderBy(desc(applications.createdAt), desc(applications.id))
+    .limit(limit);
+  return { entries };
 }
 
 export async function decideApplication(
@@ -289,22 +307,27 @@ export async function decideApplication(
   if (decision !== 'approved' && decision !== 'rejected') {
     return { ok: false, error: 'invalid_decision' };
   }
-  const trimmedNote = note?.trim() ?? '';
+  const trimmedNote = note ? stripNul(note).trim() : '';
   if (trimmedNote.length > APPLICATION.decisionNoteMax) {
     return { ok: false, error: 'invalid_decision_note' };
   }
   const now = Math.floor(Date.now() / 1000);
-  const updated = await env.DB.prepare(
-    `UPDATE applications
-     SET status = ?2, decided_at = ?3, decided_by = ?4, decision_note = ?5
-     WHERE id = ?1 AND status IN ('pending', 'verified')`,
-  )
-    .bind(id, decision, now, maintainerEmail, trimmedNote || null)
-    .run();
-  if ((updated.meta.changes ?? 0) === 0) {
-    const exists = await env.DB.prepare('SELECT 1 AS x FROM applications WHERE id = ?1')
-      .bind(id)
-      .first();
+  const db = getDb(env);
+  const updated = await db
+    .update(applications)
+    .set({
+      status: decision,
+      decidedAt: now,
+      decidedBy: maintainerEmail,
+      decisionNote: trimmedNote || null,
+    })
+    .where(and(eq(applications.id, id), inArray(applications.status, ['pending', 'verified'])))
+    .returning({ id: applications.id });
+  if (updated.length === 0) {
+    const [exists] = await db
+      .select({ id: applications.id })
+      .from(applications)
+      .where(eq(applications.id, id));
     return exists
       ? { ok: false, error: 'application_already_decided' }
       : { ok: false, error: 'application_not_found' };

@@ -1,6 +1,9 @@
 import { env } from 'cloudflare:workers';
-import { afterAll, describe, expect, it } from 'vitest';
+import { and, count, eq } from 'drizzle-orm';
+import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
+import { getDb } from '../src/db/client';
+import { adminKeywordRules, keywordContributions } from '../src/db/schema';
 import { hashIp } from '../src/lib/hash';
 import { decideKeywordContributions, listKeywordContributions } from '../src/keyword-contributions';
 
@@ -28,10 +31,6 @@ async function postWebContributions(ip: string, phrases: unknown): Promise<Respo
     env,
   );
 }
-
-afterAll(async () => {
-  await env.DB.exec('DELETE FROM keyword_contributions');
-});
 
 describe('keyword contributions', () => {
   it('校验安装 ID 与短语载荷', async () => {
@@ -75,9 +74,7 @@ describe('keyword contributions', () => {
     );
     expect(admin.status).toBe(404); // 非管理域名拒绝（isAdminHost not_found）
 
-    const listed = await env.DB.prepare('SELECT COUNT(*) AS n FROM keyword_contributions').first<{
-      n: number;
-    }>();
+    const [listed] = await getDb(env).select({ n: count() }).from(keywordContributions);
     expect(listed?.n).toBe(2);
   });
 
@@ -128,11 +125,10 @@ describe('keyword contributions', () => {
     // 重复词幂等：不占额度、不算新提交
     expect((await postWebContributions('198.51.100.1', ['web-0-0'])).status).toBe(200);
 
-    const webRows = await env.DB.prepare(
-      'SELECT COUNT(*) AS n FROM keyword_contributions WHERE installation_id = ?1',
-    )
-      .bind(webKey)
-      .first<{ n: number }>();
+    const [webRows] = await getDb(env)
+      .select({ n: count() })
+      .from(keywordContributions)
+      .where(eq(keywordContributions.installationId, webKey));
     expect(webRows?.n).toBe(5);
   });
 
@@ -145,9 +141,16 @@ describe('keyword contributions', () => {
     expect(
       await decideKeywordContributions(env, '待审词甲', 'admitted', 'maintainer@example.com'),
     ).toEqual({ changed: 2 });
-    const admitted = await env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM keyword_contributions WHERE norm_phrase = '待审词甲' AND status = 'admitted' AND decided_by = 'maintainer@example.com'",
-    ).first<{ n: number }>();
+    const [admitted] = await getDb(env)
+      .select({ n: count() })
+      .from(keywordContributions)
+      .where(
+        and(
+          eq(keywordContributions.normPhrase, '待审词甲'),
+          eq(keywordContributions.status, 'admitted'),
+          eq(keywordContributions.decidedBy, 'maintainer@example.com'),
+        ),
+      );
     expect(admitted?.n).toBe(2);
     // 已决定的词再次 decide 是幂等 no-op（只作用于 new 行）
     expect(
@@ -160,9 +163,10 @@ describe('keyword contributions', () => {
     ).toEqual({ changed: 1 });
 
     // decide 只改状态：不自动写入官方词库、不进快照
-    const rule = await env.DB.prepare(
-      "SELECT COUNT(*) AS n FROM admin_keyword_rules WHERE phrase = '待审词甲'",
-    ).first<{ n: number }>();
+    const [rule] = await getDb(env)
+      .select({ n: count() })
+      .from(adminKeywordRules)
+      .where(eq(adminKeywordRules.phrase, '待审词甲'));
     expect(rule?.n).toBe(0);
   });
 

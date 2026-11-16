@@ -27,7 +27,7 @@ export interface UnblockBatchResult {
 /**
  * 相邻两次撤销请求的间隔（毫秒）。
  * 撤销成功已计入安全账本（recordSafetyEvent）；与批量拉黑共用 pace 的响应式
- * 预算改动留到新版后按生产数据再做（docs/BLOCK_SAFETY.md 撤销 PR2）。
+ * 预算改动留到新版后按生产数据再做。
  */
 const PACE_MS = 400;
 
@@ -75,10 +75,7 @@ export async function runUnblockBatch(handle?: string): Promise<UnblockBatchResu
   if (abortedBy) {
     // 未处理的余量条目也如实呈现为该失败码
     for (const account of targets) {
-      if (
-        unblocked.includes(account.handle) ||
-        failed.some((f) => f.handle === account.handle)
-      ) {
+      if (unblocked.includes(account.handle) || failed.some((f) => f.handle === account.handle)) {
         continue;
       }
       failed.push({ handle: account.handle, code: abortedBy });

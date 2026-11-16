@@ -30,6 +30,8 @@ export function createStateSync(deps: {
   state: ContentState;
   controller: PageScanController;
   fold: BlockedFold;
+  /** 过滤模块总开关：关掉后即使「自动标黄」子开关还开着也不检测 */
+  isFilterEnabled?: () => boolean;
 }) {
   const { state, controller, fold } = deps;
 
@@ -104,7 +106,7 @@ export function createStateSync(deps: {
   async function refreshCommunity(): Promise<void> {
     state.community = await buildRuntimeCommunity();
     const settings = await getCommunitySettings();
-    state.detectionEnabled = settings.enabled;
+    state.detectionEnabled = settings.enabled && (deps.isFilterEnabled?.() ?? true);
     state.strength = settings.strength;
     state.autoContribute = settings.autoContribute;
     controller.reset();
@@ -168,7 +170,7 @@ export function createStateSync(deps: {
     for (const cell of document.querySelectorAll(`[${MARK_ATTRIBUTE}]`)) {
       cell.removeAttribute(MARK_ATTRIBUTE);
     }
-    for (const element of document.querySelectorAll('.fs-badge, .fs-manual-mark')) {
+    for (const element of document.querySelectorAll('.fs-badge, [data-fs-action="block"]')) {
       element.remove();
     }
     controller.fullRescan();
@@ -213,7 +215,7 @@ export function createStateSync(deps: {
         for (const badge of cell.querySelectorAll('.fs-badge')) badge.remove();
       }
       for (const article of articles) {
-        for (const action of article.querySelectorAll('.fs-manual-mark')) action.remove();
+        for (const action of article.querySelectorAll('[data-fs-action="block"]')) action.remove();
       }
     });
     // 只把受影响的 article 重新入队：不再依赖「脏集合为空 -> 全页扫描」的旧路径

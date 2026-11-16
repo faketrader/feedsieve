@@ -1,12 +1,12 @@
 /**
  * 白名单（community/lists/whitelist.yaml）规则与发布 SQL 的单一事实源。
  * 原实现是 publish-community-whitelist.sh 里内嵌的一段 Python（行式解析 +
- * 规则校验 + D1 SQL 生成），现统一为本模块，供：
+ * 规则校验 + SQL 生成），现统一为本模块，供：
  * - scripts/publish-whitelist-sql.mjs（CLI 薄包装，发布脚本调用）
  * - scripts/ingest-whitelist-issues.mjs（复用常量/上限；面向 Issue 提交者的
  *   报错文案独立保留，不用本模块的 Python 文案）
  *
- * 这是发布链（D1 直写 + 快照触发），本文件是原 Python 的逐行忠实移植。
+ * 这是发布链（psql 直写 PostgreSQL + 快照触发），本文件是原 Python 的逐行忠实移植。
  * Python 与 JS 的语义差异全部用 py* 助手显式对齐，勿“顺手修正”：
  * - str.splitlines / str.strip 的字符集、len 的码点计数、str 的 repr、
  *   \d 的 Unicode Nd 语义，均与 JS 默认行为不同；
@@ -201,7 +201,7 @@ export function parseWhitelistYaml(text) {
 // ---- SQL 生成 ----
 
 /**
- * 生成发布 D1 的 SQL：先全量撤销（文件中删除的账号被撤销）+ 审计，再逐条
+ * 生成发布到 PostgreSQL 的 SQL（psql 单事务执行）：先全量撤销（文件中删除的账号被撤销）+ 审计，再逐条
  * upsert + 审计；文件为唯一事实。同一输入输出逐字节相同。
  * - now：10 位 unix 秒（int(datetime.now(utc).timestamp())）；
  * - stamp：Python isoformat 形如 `2026-09-13T00:57:22.276295+00:00`（头注释）；

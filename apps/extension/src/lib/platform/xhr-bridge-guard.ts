@@ -98,10 +98,205 @@ export interface SanitizedBridgeData {
   /** 当前登录账号（严格校验后的小写 handle） */
   selfHandle?: string;
   isFollowingPage: boolean;
+  /** 内容脚本启动后桥补发的旧数据（只给 AI 味检测用，流速等统计不重复计） */
+  replay?: boolean;
   /** Following 页全量账号（分页同步用） */
   following: Array<{ handle: string; xUserId?: string }>;
   followingCursor?: string;
   sourceUrl?: string;
+  /** 推文指标（流速徽标、本页热帖）：只在本地内存使用，不上传。 */
+  tweetStats: SanitizedTweetStat[];
+  /** 作者公开统计（量级标签）：来自推文作者与资料端点。 */
+  authorStats: SanitizedAuthorStat[];
+}
+
+export interface SanitizedTweetStat {
+  postId: string;
+  handle: string;
+  displayName?: string;
+  /** 正文前 SNIPPET_MAX 字（本页热帖展示用）。 */
+  snippet?: string;
+  createdAt?: number;
+  views?: number;
+  likes?: number;
+  retweets?: number;
+  replies?: number;
+  quotes?: number;
+  bookmarks?: number;
+  /** 作者头像（只接受 pbs.twimg.com 的地址）。 */
+  avatarUrl?: string;
+  /** 作者是否有蓝标。 */
+  verified?: boolean;
+  /** 作者是受保护账号（只对关注者可见）：这类帖子绝不进全站热榜。 */
+  protected?: boolean;
+  /** 第一张图片或视频封面（只接受 pbs.twimg.com）。 */
+  mediaUrl?: string;
+  /** 帖子语言（X 给的 BCP-47 简写，如 zh / en / ja；纯图片是 zxx / qme）。 */
+  lang?: string;
+  /** 原创 / 回复 / 引用（主页洞察的基线只算原创和引用）。 */
+  kind?: PostKind;
+  /** 回复的那条帖子 / 那个账号（AI 味检测配对原帖用，不上传）。 */
+  inReplyToId?: string;
+  inReplyToHandle?: string;
+  /** 主页置顶条目（TimelinePinEntry）。 */
+  pinned?: true;
+  /** X 标记的可能敏感内容（多为成人图片/视频）：不进热帖、不上报全站热榜。 */
+  sensitive?: true;
+  media?: PostMedia;
+}
+
+export type PostKind = 'original' | 'reply' | 'quote';
+export type PostMedia = 'none' | 'photo' | 'video' | 'gif' | 'mixed';
+const POST_MEDIA = new Set<PostMedia>(['none', 'photo', 'video', 'gif', 'mixed']);
+
+export interface SanitizedAuthorStat {
+  handle: string;
+  followers?: number;
+  followingCount?: number;
+  tweets?: number;
+  createdAt?: number;
+  /** 以下三项只来自资料端点（UserByScreenName），主页洞察的账号卡用。 */
+  displayName?: string;
+  avatarUrl?: string;
+  verified?: boolean;
+}
+
+/** 弹窗热帖要能读完整条帖子：长帖也只截到这么长（3000 条 × 1000 字，内存仍在几 MB 内）。 */
+const SNIPPET_MAX = 1000;
+const DISPLAY_NAME_MAX = 64;
+/** 计数上限：远超任何真实值，挡住伪造事件塞进来的巨大数字。 */
+const COUNT_MAX = 1e13;
+/** 时间戳合法区间：X 上线（2006）到 2100 年。 */
+const TIMESTAMP_MIN = Date.UTC(2006, 0, 1);
+const TIMESTAMP_MAX = Date.UTC(2100, 0, 1);
+
+function sanitizeCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= COUNT_MAX
+    ? value
+    : undefined;
+}
+
+function sanitizeTimestamp(value: unknown): number | undefined {
+  return typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= TIMESTAMP_MIN &&
+    value <= TIMESTAMP_MAX
+    ? value
+    : undefined;
+}
+
+/** 图片地址只认 X 自己的图床，防止伪造事件让弹窗去加载任意站点。 */
+const TWIMG_URL = /^https:\/\/pbs\.twimg\.com\/[\w./-]{1,300}$/;
+
+function sanitizeLang(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[a-z]{2,3}(-[a-z]{2,4})?$/i.test(value)
+    ? value.toLowerCase()
+    : undefined;
+}
+
+function sanitizeImageUrl(value: unknown): string | undefined {
+  return typeof value === 'string' && TWIMG_URL.test(value) ? value : undefined;
+}
+
+function sanitizeText(value: unknown, max: number): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, max) : undefined;
+}
+
+/** 只保留合法字段的浅层对象；全部字段都非法时返回空对象。 */
+function pickDefined<T extends Record<string, unknown>>(record: T): Partial<T> {
+  const out: Partial<T> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (value !== undefined) (out as Record<string, unknown>)[key] = value;
+  }
+  return out;
+}
+
+function sanitizeAuthorStat(
+  handle: string,
+  raw: unknown,
+  profile: Record<string, unknown> | null = null,
+): SanitizedAuthorStat | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const stats = raw as Record<string, unknown>;
+  const picked = pickDefined({
+    followers: sanitizeCount(stats.followers),
+    followingCount: sanitizeCount(stats.followingCount),
+    tweets: sanitizeCount(stats.tweets),
+    createdAt: sanitizeTimestamp(stats.createdAt),
+    ...(profile
+      ? {
+          displayName: sanitizeText(profile.displayName, DISPLAY_NAME_MAX),
+          avatarUrl: sanitizeImageUrl(profile.avatarUrl),
+          verified:
+            typeof stats.isBlueVerified === 'boolean'
+              ? (stats.isBlueVerified as boolean)
+              : undefined,
+        }
+      : {}),
+  });
+  return Object.keys(picked).length > 0 ? { handle, ...picked } : null;
+}
+
+function sanitizeTweetStat(
+  handle: string,
+  tweet: Record<string, unknown>,
+): SanitizedTweetStat | null {
+  const postId = sanitizeXUserId(tweet.postId);
+  if (!postId) return null;
+  const metrics =
+    tweet.metrics && typeof tweet.metrics === 'object'
+      ? (tweet.metrics as Record<string, unknown>)
+      : {};
+  const author =
+    tweet.author && typeof tweet.author === 'object'
+      ? (tweet.author as Record<string, unknown>)
+      : {};
+  return {
+    postId,
+    handle,
+    ...pickDefined({
+      displayName: sanitizeText(author.displayName, DISPLAY_NAME_MAX),
+      snippet: sanitizeText(tweet.text, SNIPPET_MAX),
+      createdAt: sanitizeTimestamp(tweet.createdAt),
+      views: sanitizeCount(metrics.views),
+      likes: sanitizeCount(metrics.likes),
+      retweets: sanitizeCount(metrics.retweets),
+      replies: sanitizeCount(metrics.replies),
+      quotes: sanitizeCount(metrics.quotes),
+      bookmarks: sanitizeCount(metrics.bookmarks),
+      avatarUrl: sanitizeImageUrl(author.avatarUrl),
+      verified:
+        author.stats && typeof author.stats === 'object'
+          ? typeof (author.stats as Record<string, unknown>).isBlueVerified === 'boolean'
+            ? ((author.stats as Record<string, unknown>).isBlueVerified as boolean)
+            : undefined
+          : undefined,
+      mediaUrl: sanitizeImageUrl(tweet.mediaUrl),
+      // 解析器历史原因把推文语言放在 author.lang（见 x-adapter ParsedTweetAuthor）
+      lang: sanitizeLang(author.lang),
+      protected:
+        author.stats && typeof author.stats === 'object'
+          ? typeof (author.stats as Record<string, unknown>).isProtected === 'boolean'
+            ? ((author.stats as Record<string, unknown>).isProtected as boolean)
+            : undefined
+          : undefined,
+      kind:
+        tweet.isReply === true
+          ? ('reply' as const)
+          : tweet.isQuote === true
+            ? ('quote' as const)
+            : tweet.isReply === false && tweet.isQuote === false
+              ? ('original' as const)
+              : undefined,
+      pinned: tweet.isPinned === true ? (true as const) : undefined,
+      sensitive: tweet.possiblySensitive === true ? (true as const) : undefined,
+      inReplyToId: sanitizeXUserId(tweet.inReplyToId),
+      inReplyToHandle: normalizeStrictHandle(tweet.inReplyToHandle) ?? undefined,
+      media: POST_MEDIA.has(tweet.media as PostMedia) ? (tweet.media as PostMedia) : undefined,
+    }),
+  };
 }
 
 /**
@@ -120,6 +315,8 @@ export function sanitizeBridgePayload(raw: unknown): SanitizedBridgeData | null 
   const followedEntries: SanitizedBridgeData['followedEntries'] = [];
   const bios: SanitizedBridgeData['bios'] = [];
   const seenBios = new Set<string>();
+  const tweetStats: SanitizedTweetStat[] = [];
+  const authorStats: SanitizedAuthorStat[] = [];
 
   // timeline 响应：作者字段逐个校验，任一字段非法只丢该账号，不影响其余数据
   const tweets = Array.isArray(data.tweets) ? data.tweets : [];
@@ -146,6 +343,20 @@ export function sanitizeBridgePayload(raw: unknown): SanitizedBridgeData | null 
       seenBios.add(handle);
       bios.push({ handle, bio: raw.bio });
     }
+    const tweetStat = sanitizeTweetStat(handle, tweet as Record<string, unknown>);
+    if (tweetStat) tweetStats.push(tweetStat);
+    const authorStat = sanitizeAuthorStat(handle, (author as { stats?: unknown }).stats);
+    if (authorStat) authorStats.push(authorStat);
+  }
+
+  // 资料端点（UserByScreenName）：只取公开统计
+  const users = Array.isArray(data.users) ? data.users : [];
+  for (const user of users) {
+    const raw = user && typeof user === 'object' ? (user as Record<string, unknown>) : {};
+    const handle = normalizeStrictHandle(raw.handle);
+    if (!handle) continue;
+    const authorStat = sanitizeAuthorStat(handle, raw.stats, raw);
+    if (authorStat) authorStats.push(authorStat);
   }
 
   // list 成员：rest_id 必需（idEntries 的存量来源之一），非法成员整条丢弃
@@ -183,6 +394,7 @@ export function sanitizeBridgePayload(raw: unknown): SanitizedBridgeData | null 
     typeof data.sourceUrl === 'string' && data.sourceUrl.length > 0 ? data.sourceUrl : undefined;
 
   return {
+    ...(data.replay === true ? { replay: true } : {}),
     idEntries,
     followedEntries,
     bios,
@@ -191,5 +403,7 @@ export function sanitizeBridgePayload(raw: unknown): SanitizedBridgeData | null 
     following,
     ...(followingCursor ? { followingCursor } : {}),
     ...(sourceUrl ? { sourceUrl } : {}),
+    tweetStats,
+    authorStats,
   };
 }

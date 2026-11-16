@@ -1,4 +1,5 @@
 import { CATEGORIES, HANDLE_INPUT_RE } from '@feedsieve/shared';
+import { stripNul } from './sql';
 
 // 分类词表唯一权威源在 @feedsieve/shared（客户端/服务端/后台共用）；这里保留历史导出名。
 export const REPORT_REASONS = CATEGORIES;
@@ -198,14 +199,15 @@ function validateEvidenceText(value: unknown, max: number, field: string): strin
   if (typeof value !== 'string') {
     return `invalid_${field}`;
   }
-  if (value.trim().length === 0 || value.length > max) {
+  const text = stripNul(value);
+  if (text.trim().length === 0 || text.length > max) {
     return `invalid_${field}`;
   }
   return null;
 }
 
 function asTrimmedOrNull(value: unknown): string | null {
-  const trimmed = typeof value === 'string' ? value.trim() : '';
+  const trimmed = typeof value === 'string' ? stripNul(value).trim() : '';
   return trimmed ? trimmed : null;
 }
 
@@ -280,14 +282,11 @@ export function validateRescue(raw: unknown): RescueValidation {
   }
   let detectionReason: string | null = null;
   if (r.detection_reason !== undefined && r.detection_reason !== null) {
-    if (
-      typeof r.detection_reason !== 'string' ||
-      r.detection_reason.length === 0 ||
-      r.detection_reason.length > MAX_DETECTION_REASON_LENGTH
-    ) {
+    const reason = typeof r.detection_reason === 'string' ? stripNul(r.detection_reason) : '';
+    if (reason.length === 0 || reason.length > MAX_DETECTION_REASON_LENGTH) {
       return { ok: false, error: 'invalid_detection_reason' };
     }
-    detectionReason = r.detection_reason;
+    detectionReason = reason;
   }
   return {
     ok: true,

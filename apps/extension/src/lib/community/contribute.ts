@@ -29,7 +29,7 @@ export interface ContributionItem {
   ruleId?: string;
   signalIds?: string[];
   evidencePostId?: string;
-  /** 击杀时刻探活结果（#2）：现场 UserByScreenName 解析得来的存活观测；缓存命中时缺省 */
+  /** 拉黑时刻探活结果（#2）：现场 UserByScreenName 解析得来的存活观测；缓存命中时缺省 */
   liveness?: 'alive' | 'dead';
   /** 判定材料（2026-09-12 用户拍板随票上报）：推文原文 / 拉黑时刻作者昵称 / 简介原文。 */
   tweetText?: string;
@@ -165,6 +165,7 @@ export function categoryFromDetection(
     case 'templated-text':
       return 'copy_paste';
     case 'weak-signal-combo':
+    case 'fresh-account-combo':
       // 佐证跨分类（擦边偏黄推、纯 emoji/复读偏机器号），不冒充具体分类，
       // 证据细节在 reason 文本里，分类升级留给后续数据
       return 'other';

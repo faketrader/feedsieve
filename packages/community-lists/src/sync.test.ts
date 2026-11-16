@@ -340,7 +340,7 @@ describe('syncCommunitySnapshot', () => {
       sources: [workerSource(API)],
       fetchImpl,
       store,
-      now: () => 1000 + 60 * 60 * 1000,
+      now: () => 1000 + 20 * 60 * 1000,
     });
 
     expect(outcome).toEqual({ status: 'skipped' });

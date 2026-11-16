@@ -1,6 +1,8 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
+import { getDb } from '../src/db/client';
+import { accounts } from '../src/db/schema';
 import { listCommunityCandidates } from '../src/candidates';
 
 const ORIGIN = 'https://api.example.com';
@@ -41,12 +43,14 @@ describe('社区候选池（只读）', () => {
     await report('ffffffff-4006-4006-8006-ffffffffffff', 'cand_gamma');
     // delta：0 票（仅档案，无有效拉黑票）
     const now = Math.floor(Date.now() / 1000);
-    await env.DB.prepare(
-      `INSERT INTO accounts (handle, category, status, report_count, first_report_at, updated_at)
-       VALUES (?1, 'other', 'candidate', 0, ?2, ?2)`,
-    )
-      .bind('cand_delta', now)
-      .run();
+    await getDb(env).insert(accounts).values({
+      handle: 'cand_delta',
+      category: 'other',
+      status: 'candidate',
+      reportCount: 0,
+      firstReportAt: now,
+      updatedAt: now,
+    });
 
     const all = await listCommunityCandidates(env, { limit: 50 });
     expect(all.entries.map((entry) => entry.handle)).toEqual([
@@ -79,7 +83,10 @@ describe('社区候选池（只读）', () => {
     // 键集分页：按 handle 游标翻页，页间无重复无遗漏
     const page1 = await listCommunityCandidates(env, { limit: 2 });
     expect(page1.entries.map((e) => e.handle)).toEqual(['cand_alpha', 'cand_beta']);
-    const page2 = await listCommunityCandidates(env, { limit: 2, cursor: page1.next_cursor ?? undefined });
+    const page2 = await listCommunityCandidates(env, {
+      limit: 2,
+      cursor: page1.next_cursor ?? undefined,
+    });
     expect(page2.entries.map((e) => e.handle)).toEqual(['cand_delta', 'cand_gamma']);
     expect(page2.next_cursor).toBeNull();
 

@@ -1,7 +1,7 @@
 /**
  * 判定参数集中配置（计分制基座：引擎与证据分离）。
  *
- * 分层换血纪律（见 docs/ARCHITECTURE.md §6.1）：本文件只是**天级**层的内置
+ * 分层换血纪律：本文件只是**天级**层的内置
  * 兜底值；线上热更版随签名词库包的 `detector_config` 段下发（小时级节奏），
  * 由消费端（extension keyword-packs 同步）在严格校验后覆写。校验失败或
  * 缺省一律回退内置值——引擎代码（heuristics 的解释器逻辑）不随参数发版。
@@ -40,6 +40,12 @@ export const DETECTOR_CONFIG = {
   combo: {
     minNameEmoji: 2,
   },
+  /** 新注册小号锚点（fresh-account-combo）：注册天数、粉丝数上限、关注 ÷ 粉丝倍数 */
+  freshAccount: {
+    maxAgeDays: 30,
+    maxFollowers: 50,
+    followRatio: 10,
+  },
 } as const;
 
 type MutableConfig = {
@@ -58,6 +64,7 @@ export const detectorConfig: MutableConfig = {
   digitAnchorWeights: { ...DETECTOR_CONFIG.digitAnchorWeights },
   wordSalad: { ...DETECTOR_CONFIG.wordSalad },
   combo: { ...DETECTOR_CONFIG.combo },
+  freshAccount: { ...DETECTOR_CONFIG.freshAccount },
 };
 
 const SECTION_KEYS: Record<keyof typeof DETECTOR_CONFIG, readonly string[]> = {
@@ -80,6 +87,7 @@ const SECTION_KEYS: Record<keyof typeof DETECTOR_CONFIG, readonly string[]> = {
     'weakMaxTokens',
   ],
   combo: ['minNameEmoji'],
+  freshAccount: ['maxAgeDays', 'maxFollowers', 'followRatio'],
 };
 
 /**

@@ -1,17 +1,19 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
+import { sql } from 'drizzle-orm';
+import { getDb } from '../src/db/client';
 
 const ORIGIN = 'https://api.example.com';
 
-interface HealthRow {
+type HealthRow = {
   handle: string;
   state: string;
   source: string;
   probe_count: number;
   confirmed_alive_at: number | null;
   terminal_checked_at: number | null;
-}
+};
 
 async function reportWithLiveness(
   installationId: string,
@@ -35,12 +37,10 @@ async function reportWithLiveness(
 }
 
 async function readHealth(handle: string): Promise<HealthRow | null> {
-  const res = await env.DB.prepare(
-    'SELECT handle, state, source, probe_count, confirmed_alive_at, terminal_checked_at FROM account_health WHERE handle = ?1',
-  )
-    .bind(handle)
-    .all<HealthRow>();
-  return res.results[0] ?? null;
+  const rows = await getDb(env).execute<HealthRow>(
+    sql`SELECT handle, state, source, probe_count, confirmed_alive_at, terminal_checked_at FROM account_health WHERE handle = ${handle}`,
+  );
+  return (rows[0] ?? null) as HealthRow | null;
 }
 
 describe('击杀时刻探活入库（account_health）', () => {

@@ -30,4 +30,36 @@ export const tweetSelectors = {
 export const menuSelectors = {
   /** 推文右上的 ... 操作菜单触发按钮。 */
   caretButton: '[data-testid="caret"]',
+  /** X 的弹出菜单容器（分享菜单、... 菜单共用；2026-10-30 真机确认）。 */
+  dropdown: '[data-testid="Dropdown"]',
+  menuItem: '[role="menuitem"]',
+} as const;
+
+/**
+ * 动作栏里有 data-testid 的固定按钮。分享按钮没有 data-testid，
+ * 只能按「动作栏里不属于这些的按钮」识别（2026-10-30 真机确认）。
+ */
+export const KNOWN_ACTION_TEST_IDS = [
+  'reply',
+  'retweet',
+  'unretweet',
+  'like',
+  'unlike',
+  'bookmark',
+  'removeBookmark',
+] as const;
+
+/** 引用帖卡片：X 用可点击的 div[role=link] 包住被引用的推文。 */
+export const QUOTE_CARD_SELECTOR = 'div[role="link"]';
+
+/**
+ * 个人主页资料卡。洞察行插在资料卡信息行（地点 / 加入时间那一行）后面；
+ * 找不到时依次退回到简介、名字区域之后（未抓包确认，X 改版时按这里的顺序降级）。
+ */
+export const profileSelectors = {
+  headerAnchors: [
+    '[data-testid="UserProfileHeader_Items"]',
+    '[data-testid="UserDescription"]',
+    '[data-testid="UserName"]',
+  ],
 } as const;

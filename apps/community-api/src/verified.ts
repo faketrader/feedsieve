@@ -6,7 +6,10 @@
  * 读写边界同候选池：只读浏览，不提供改写入口。
  */
 import { POLICY } from './reports';
-import { escapeLike } from './lib/d1';
+import { and, asc, desc, gte, ilike, sql, type SQL } from 'drizzle-orm';
+import { getDb } from './db/client';
+import { accounts } from './db/schema';
+import { collateC, escapeLike } from './lib/sql';
 
 export interface VerifiedAccount {
   handle: string;
@@ -22,29 +25,31 @@ export async function listVerifiedAccounts(
   env: Cloudflare.Env,
   options: { q?: string; limit?: number } = {},
 ): Promise<{ entries: VerifiedAccount[] }> {
-  const where: string[] = ['(a.rescue_count - a.report_count) >= ?1'];
-  const binds: Array<string | number> = [POLICY.communityNetThreshold];
+  const netVotes = sql`(${accounts.rescueCount} - ${accounts.reportCount})`;
+  const where: SQL[] = [gte(netVotes, POLICY.communityNetThreshold)];
 
   const q = options.q?.trim().toLowerCase();
   if (q) {
-    where.push(`a.handle LIKE ?${binds.length + 1} ESCAPE '\\'`);
-    binds.push(`%${escapeLike(q)}%`);
+    where.push(ilike(accounts.handle, `%${escapeLike(q)}%`));
   }
 
   const limit = Math.min(Math.max(Math.trunc(options.limit ?? 500) || 500, 1), 1000);
-  const rows = await env.DB.prepare(
-    `SELECT a.handle, a.x_user_id, a.report_count, a.rescue_count,
-            a.first_report_at, a.updated_at
-     FROM accounts a
-     WHERE ${where.join(' AND ')}
-     ORDER BY (a.rescue_count - a.report_count) DESC, a.handle ASC
-     LIMIT ${limit}`,
-  )
-    .bind(...binds)
-    .all<Omit<VerifiedAccount, 'net_votes'>>();
+  const rows = await getDb(env)
+    .select({
+      handle: accounts.handle,
+      x_user_id: accounts.xUserId,
+      report_count: accounts.reportCount,
+      rescue_count: accounts.rescueCount,
+      first_report_at: accounts.firstReportAt,
+      updated_at: accounts.updatedAt,
+    })
+    .from(accounts)
+    .where(and(...where))
+    .orderBy(desc(netVotes), asc(collateC(accounts.handle)))
+    .limit(limit);
 
   return {
-    entries: rows.results.map((row) => ({
+    entries: rows.map((row) => ({
       ...row,
       net_votes: row.rescue_count - row.report_count,
     })),

@@ -9,8 +9,10 @@
  *   熔断状态在 meta 表持久化，宁可名单晚刷新也不能让 X 风控看到数据中心的bots。
  * - 注销/冻结一律按 UserUnavailable 判 dead（终态），不会产生重复检查成本。
  */
+import { and, asc, eq, isNull, ne } from 'drizzle-orm';
+import { getDb } from './db/client';
+import { accountHealth, consensusEvents, meta } from './db/schema';
 import { recordHealthObservations, type HealthObservation } from './lib/account-health';
-import { batchStatements } from './labels';
 
 const META_KEY = 'account_health_probe';
 
@@ -37,7 +39,8 @@ const USER_FEATURES = encodeURIComponent(
 );
 const FIELD_TOGGLES = encodeURIComponent('{"withAuxiliaryUserLabels":false}');
 /** 网页客户端公开匿名 bearer（与 x-adapter block.ts 同源；纯只读，凭据面为空） */
-const X_WEB_BEARER = 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
+const X_WEB_BEARER =
+  'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
 
 type ProbeResult = 'alive' | 'dead' | 'unknown';
 
@@ -60,11 +63,11 @@ const wait = (ms: number) =>
     setTimeout(resolve, ms);
   });
 
-
 async function readBreaker(env: Cloudflare.Env): Promise<ProbeBreakerState> {
-  const row = await env.DB.prepare('SELECT value FROM meta WHERE key = ?1')
-    .bind(META_KEY)
-    .first<{ value: string }>();
+  const [row] = await getDb(env)
+    .select({ value: meta.value })
+    .from(meta)
+    .where(eq(meta.key, META_KEY));
   if (!row?.value) return {};
   try {
     return JSON.parse(row.value) as ProbeBreakerState;
@@ -74,12 +77,11 @@ async function readBreaker(env: Cloudflare.Env): Promise<ProbeBreakerState> {
 }
 
 async function writeBreaker(env: Cloudflare.Env, state: ProbeBreakerState): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO meta (key, value) VALUES (?1, ?2)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-  )
-    .bind(META_KEY, JSON.stringify(state))
-    .run();
+  const value = JSON.stringify(state);
+  await getDb(env)
+    .insert(meta)
+    .values({ key: META_KEY, value })
+    .onConflictDoUpdate({ target: meta.key, set: { value } });
 }
 
 async function activateGuestToken(): Promise<string | null> {
@@ -198,29 +200,31 @@ export async function probeAccountHealthScheduled(env: Cloudflare.Env): Promise<
   // updated_at 会刷新回到队尾）；目标二：共识内还没有健康记录的新账号；
   // 目标三：kill-report 上报疑似 dead 的待复核单（单笔客户端上报不进终态，
   // 必须由服务端探活背书后才落 dead，见 reports.ts 的 kill-report 映射）。
-  const stale = await env.DB.prepare(
-    `SELECT handle, x_user_id AS xUserId FROM account_health
-     WHERE state != 'dead' ORDER BY updated_at ASC LIMIT ?1`,
-  )
-    .bind(PROBER_POLICY.staleLimit)
-    .all<ProbeTarget>();
-  const missing = await env.DB.prepare(
-    `SELECT c.handle AS handle, c.x_user_id AS xUserId FROM consensus_events c
-     LEFT JOIN account_health h ON h.handle = c.handle
-     WHERE h.handle IS NULL LIMIT ?1`,
-  )
-    .bind(PROBER_POLICY.missingLimit)
-    .all<ProbeTarget>();
-  const killReportRecheck = await env.DB.prepare(
-    `SELECT handle, x_user_id AS xUserId FROM account_health
-     WHERE state = 'unknown' AND source = 'kill-report' ORDER BY updated_at ASC LIMIT ?1`,
-  )
-    .bind(PROBER_POLICY.killReportRecheckLimit)
-    .all<ProbeTarget>();
+  const db = getDb(env);
+  const [stale, missing, killReportRecheck] = await Promise.all([
+    db
+      .select({ handle: accountHealth.handle, xUserId: accountHealth.xUserId })
+      .from(accountHealth)
+      .where(ne(accountHealth.state, 'dead'))
+      .orderBy(asc(accountHealth.updatedAt))
+      .limit(PROBER_POLICY.staleLimit),
+    db
+      .select({ handle: consensusEvents.handle, xUserId: consensusEvents.xUserId })
+      .from(consensusEvents)
+      .leftJoin(accountHealth, eq(accountHealth.handle, consensusEvents.handle))
+      .where(isNull(accountHealth.handle))
+      .limit(PROBER_POLICY.missingLimit),
+    db
+      .select({ handle: accountHealth.handle, xUserId: accountHealth.xUserId })
+      .from(accountHealth)
+      .where(and(eq(accountHealth.state, 'unknown'), eq(accountHealth.source, 'kill-report')))
+      .orderBy(asc(accountHealth.updatedAt))
+      .limit(PROBER_POLICY.killReportRecheckLimit),
+  ]);
 
   const targets: ProbeTarget[] = [];
   const seen = new Set<string>();
-  for (const target of [...stale.results, ...killReportRecheck.results, ...missing.results]) {
+  for (const target of [...stale, ...killReportRecheck, ...missing]) {
     if (!seen.has(target.handle)) {
       seen.add(target.handle);
       targets.push(target);
@@ -259,7 +263,8 @@ export async function probeAccountHealthScheduled(env: Cloudflare.Env): Promise<
   }
 
   if (observations.length > 0) {
-    await batchStatements(env, recordHealthObservations(env, observations, now));
+    // account_health 的时间列是 Unix 秒（和上报路径一致）；now 是毫秒，只给熔断计时用
+    await recordHealthObservations(env, observations, Math.floor(now / 1000));
   }
 
   const failures = stats.unknown;

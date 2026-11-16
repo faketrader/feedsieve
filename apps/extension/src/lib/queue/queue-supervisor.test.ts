@@ -79,7 +79,13 @@ describe('applyResumeMutations（纯变更）', () => {
   it('retryable failed 放回 pending 并清失败标记；非 retryable failed 保留终态', () => {
     const state = makeState({
       tasks: [
-        { handle: 'a', category: 'bot_spam', status: 'failed', failureCode: 'rate_limited', retryAt: 1 },
+        {
+          handle: 'a',
+          category: 'bot_spam',
+          status: 'failed',
+          failureCode: 'rate_limited',
+          retryAt: 1,
+        },
         { handle: 'b', category: 'bot_spam', status: 'failed', failureCode: 'user' },
       ],
     });
@@ -195,7 +201,9 @@ describe('createQueueSupervisor', () => {
     const supervisor = createQueueSupervisor(deps);
     const firstRun = supervisor.run();
     // 本 tab 正在跑：resume 应 adopt（重置 running 任务）而不是 already-running
-    storage['queue'] = makeState({ tasks: [{ handle: 'a', category: 'bot_spam', status: 'running' }] });
+    storage['queue'] = makeState({
+      tasks: [{ handle: 'a', category: 'bot_spam', status: 'running' }],
+    });
     await expect(supervisor.resume()).resolves.toEqual({ status: 'running' });
     expect(deps.save).toHaveBeenCalledTimes(1);
     expect(deps.runExecutor).toHaveBeenCalledTimes(1);
@@ -261,7 +269,7 @@ describe('createQueueSupervisor', () => {
     });
     storage['hb'] = clock - 1_000;
     await supervisor.pauseOrphaned(true);
-    clock = storage['hb'] as number + TTL + 2_000; // 复查时刻心跳早已过期
+    clock = (storage['hb'] as number) + TTL + 2_000; // 复查时刻心跳早已过期
     await vi.advanceTimersByTimeAsync(TTL + 1_000);
     expect(deps.save).toHaveBeenCalledTimes(1);
     const after = storage['queue'] as PersistentBlockQueueState;

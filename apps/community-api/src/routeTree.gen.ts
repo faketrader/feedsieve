@@ -12,11 +12,12 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as ShellRouteImport } from './routes/_shell'
 import { Route as ShellIndexRouteImport } from './routes/_shell/index'
 import { Route as ShellGuideRouteImport } from './routes/_shell/guide'
+import { Route as ShellAiIndexRouteImport } from './routes/_shell/ai.index'
+import { Route as ShellAiHandleRouteImport } from './routes/_shell/ai.$handle'
 import { Route as ShellListsIndexRouteImport } from './routes/_shell/lists.index'
 import { Route as ShellListsApplyRouteImport } from './routes/_shell/lists/apply'
 import { Route as ShellListsBlacklistRouteImport } from './routes/_shell/lists/blacklist'
 import { Route as ShellListsKeywordsRouteImport } from './routes/_shell/lists/keywords'
-import { Route as ShellListsRankedRouteImport } from './routes/_shell/lists/ranked'
 import { Route as ShellListsRescueRouteImport } from './routes/_shell/lists/rescue'
 import { Route as ShellListsWhitelistRouteImport } from './routes/_shell/lists/whitelist'
 
@@ -32,6 +33,16 @@ const ShellIndexRoute = ShellIndexRouteImport.update({
 const ShellGuideRoute = ShellGuideRouteImport.update({
   id: '/guide',
   path: '/guide',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellAiIndexRoute = ShellAiIndexRouteImport.update({
+  id: '/ai/',
+  path: '/ai/',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellAiHandleRoute = ShellAiHandleRouteImport.update({
+  id: '/ai/$handle',
+  path: '/ai/$handle',
   getParentRoute: () => ShellRoute,
 } as any)
 const ShellListsIndexRoute = ShellListsIndexRouteImport.update({
@@ -54,11 +65,6 @@ const ShellListsKeywordsRoute = ShellListsKeywordsRouteImport.update({
   path: '/lists/keywords',
   getParentRoute: () => ShellRoute,
 } as any)
-const ShellListsRankedRoute = ShellListsRankedRouteImport.update({
-  id: '/lists/ranked',
-  path: '/lists/ranked',
-  getParentRoute: () => ShellRoute,
-} as any)
 const ShellListsRescueRoute = ShellListsRescueRouteImport.update({
   id: '/lists/rescue',
   path: '/lists/rescue',
@@ -73,23 +79,25 @@ const ShellListsWhitelistRoute = ShellListsWhitelistRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof ShellIndexRoute
   '/guide': typeof ShellGuideRoute
+  '/ai/$handle': typeof ShellAiHandleRoute
   '/lists/apply': typeof ShellListsApplyRoute
   '/lists/blacklist': typeof ShellListsBlacklistRoute
   '/lists/keywords': typeof ShellListsKeywordsRoute
-  '/lists/ranked': typeof ShellListsRankedRoute
   '/lists/rescue': typeof ShellListsRescueRoute
   '/lists/whitelist': typeof ShellListsWhitelistRoute
+  '/ai/': typeof ShellAiIndexRoute
   '/lists/': typeof ShellListsIndexRoute
 }
 export interface FileRoutesByTo {
   '/guide': typeof ShellGuideRoute
   '/': typeof ShellIndexRoute
+  '/ai/$handle': typeof ShellAiHandleRoute
   '/lists/apply': typeof ShellListsApplyRoute
   '/lists/blacklist': typeof ShellListsBlacklistRoute
   '/lists/keywords': typeof ShellListsKeywordsRoute
-  '/lists/ranked': typeof ShellListsRankedRoute
   '/lists/rescue': typeof ShellListsRescueRoute
   '/lists/whitelist': typeof ShellListsWhitelistRoute
+  '/ai': typeof ShellAiIndexRoute
   '/lists': typeof ShellListsIndexRoute
 }
 export interface FileRoutesById {
@@ -97,12 +105,13 @@ export interface FileRoutesById {
   '/_shell': typeof ShellRouteWithChildren
   '/_shell/guide': typeof ShellGuideRoute
   '/_shell/': typeof ShellIndexRoute
+  '/_shell/ai/$handle': typeof ShellAiHandleRoute
   '/_shell/lists/apply': typeof ShellListsApplyRoute
   '/_shell/lists/blacklist': typeof ShellListsBlacklistRoute
   '/_shell/lists/keywords': typeof ShellListsKeywordsRoute
-  '/_shell/lists/ranked': typeof ShellListsRankedRoute
   '/_shell/lists/rescue': typeof ShellListsRescueRoute
   '/_shell/lists/whitelist': typeof ShellListsWhitelistRoute
+  '/_shell/ai/': typeof ShellAiIndexRoute
   '/_shell/lists/': typeof ShellListsIndexRoute
 }
 export interface FileRouteTypes {
@@ -110,35 +119,38 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/guide'
+    | '/ai/$handle'
     | '/lists/apply'
     | '/lists/blacklist'
     | '/lists/keywords'
-    | '/lists/ranked'
     | '/lists/rescue'
     | '/lists/whitelist'
+    | '/ai/'
     | '/lists/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/guide'
     | '/'
+    | '/ai/$handle'
     | '/lists/apply'
     | '/lists/blacklist'
     | '/lists/keywords'
-    | '/lists/ranked'
     | '/lists/rescue'
     | '/lists/whitelist'
+    | '/ai'
     | '/lists'
   id:
     | '__root__'
     | '/_shell'
     | '/_shell/guide'
     | '/_shell/'
+    | '/_shell/ai/$handle'
     | '/_shell/lists/apply'
     | '/_shell/lists/blacklist'
     | '/_shell/lists/keywords'
-    | '/_shell/lists/ranked'
     | '/_shell/lists/rescue'
     | '/_shell/lists/whitelist'
+    | '/_shell/ai/'
     | '/_shell/lists/'
   fileRoutesById: FileRoutesById
 }
@@ -169,6 +181,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellGuideRouteImport
       parentRoute: typeof ShellRoute
     }
+    '/_shell/ai/': {
+      id: '/_shell/ai/'
+      path: '/ai'
+      fullPath: '/ai/'
+      preLoaderRoute: typeof ShellAiIndexRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/ai/$handle': {
+      id: '/_shell/ai/$handle'
+      path: '/ai/$handle'
+      fullPath: '/ai/$handle'
+      preLoaderRoute: typeof ShellAiHandleRouteImport
+      parentRoute: typeof ShellRoute
+    }
     '/_shell/lists/': {
       id: '/_shell/lists/'
       path: '/lists'
@@ -197,13 +223,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellListsKeywordsRouteImport
       parentRoute: typeof ShellRoute
     }
-    '/_shell/lists/ranked': {
-      id: '/_shell/lists/ranked'
-      path: '/lists/ranked'
-      fullPath: '/lists/ranked'
-      preLoaderRoute: typeof ShellListsRankedRouteImport
-      parentRoute: typeof ShellRoute
-    }
     '/_shell/lists/rescue': {
       id: '/_shell/lists/rescue'
       path: '/lists/rescue'
@@ -224,24 +243,26 @@ declare module '@tanstack/react-router' {
 interface ShellRouteChildren {
   ShellGuideRoute: typeof ShellGuideRoute
   ShellIndexRoute: typeof ShellIndexRoute
+  ShellAiHandleRoute: typeof ShellAiHandleRoute
   ShellListsApplyRoute: typeof ShellListsApplyRoute
   ShellListsBlacklistRoute: typeof ShellListsBlacklistRoute
   ShellListsKeywordsRoute: typeof ShellListsKeywordsRoute
-  ShellListsRankedRoute: typeof ShellListsRankedRoute
   ShellListsRescueRoute: typeof ShellListsRescueRoute
   ShellListsWhitelistRoute: typeof ShellListsWhitelistRoute
+  ShellAiIndexRoute: typeof ShellAiIndexRoute
   ShellListsIndexRoute: typeof ShellListsIndexRoute
 }
 
 const ShellRouteChildren: ShellRouteChildren = {
   ShellGuideRoute: ShellGuideRoute,
   ShellIndexRoute: ShellIndexRoute,
+  ShellAiHandleRoute: ShellAiHandleRoute,
   ShellListsApplyRoute: ShellListsApplyRoute,
   ShellListsBlacklistRoute: ShellListsBlacklistRoute,
   ShellListsKeywordsRoute: ShellListsKeywordsRoute,
-  ShellListsRankedRoute: ShellListsRankedRoute,
   ShellListsRescueRoute: ShellListsRescueRoute,
   ShellListsWhitelistRoute: ShellListsWhitelistRoute,
+  ShellAiIndexRoute: ShellAiIndexRoute,
   ShellListsIndexRoute: ShellListsIndexRoute,
 }
 

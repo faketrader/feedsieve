@@ -48,7 +48,9 @@ export function classifyDetection(input: DetectionPolicyInput): DetectionPresent
   // 过泛、porn-bait-zh 已由词包通道覆盖更合适），升档属产品扩权，逐条单独评审。
   if (
     detection.source === 'heuristic' &&
-    (detection.ruleId === 'weak-signal-combo' || detection.ruleId === 'contact-number-bait')
+    (detection.ruleId === 'weak-signal-combo' ||
+      detection.ruleId === 'fresh-account-combo' ||
+      detection.ruleId === 'contact-number-bait')
   ) {
     return 'review';
   }

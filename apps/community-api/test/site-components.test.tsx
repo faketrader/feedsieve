@@ -6,6 +6,8 @@
  */
 
 import { renderToString } from 'react-dom/server';
+import { handlesToClipboard } from '../src/site/pages/AiSquarePage';
+import { InstallButtons, StoreLinks } from '../src/site/components/InstallButtons';
 import { describe, expect, it } from 'vitest';
 
 import { BlacklistPanel } from '../src/site/pages/lists/BlacklistPanel';
@@ -131,3 +133,47 @@ describe('文案与错误码', () => {
   });
 });
 
+/** 广场页「复制全部」的剪贴板口径：每行一个 @handle，顺序即当前列表顺序 */
+describe('AI 号广场页 · 复制全部 handle', () => {
+  it('每行一个 @handle', () => {
+    expect(handlesToClipboard(['ai_one', 'ai_two', 'maybe_three'])).toBe(
+      '@ai_one\n@ai_two\n@maybe_three',
+    );
+  });
+
+  it('空列表复制为空串（页面按钮此时禁用）', () => {
+    expect(handlesToClipboard([])).toBe('');
+  });
+});
+
+/** 安装入口必须双商店并列：页面只给 Chrome 一个按钮时，Firefox 用户只能自己去 AMO 搜 */
+describe('安装入口 · Chrome 与 Firefox 并列', () => {
+  it('InstallButtons 同时给出两个商店的链接', () => {
+    const html = renderToString(<InstallButtons />);
+    expect(html).toContain('chromewebstore.google.com');
+    expect(html).toContain('addons.mozilla.org/zh-CN/firefox/addon/feedsieve-fuluwa');
+    expect(html).toContain('Chrome 商店一键安装');
+    expect(html).toContain('Firefox 商店一键安装');
+  });
+
+  it('InstallButtons 允许按语境改文案，两个链接仍然都在', () => {
+    const html = renderToString(
+      <InstallButtons
+        size="sm"
+        chromeLabel="装福滤娃，参与投票"
+        firefoxLabel="装福滤娃（Firefox 版）"
+      />,
+    );
+    expect(html).toContain('装福滤娃，参与投票');
+    expect(html).toContain('装福滤娃（Firefox 版）');
+    expect(html).toContain('chromewebstore.google.com');
+    expect(html).toContain('addons.mozilla.org');
+  });
+
+  it('StoreLinks 行内小入口同样双商店', () => {
+    const html = renderToString(<StoreLinks label="装福滤娃自动折叠" />);
+    expect(html).toContain('装福滤娃自动折叠');
+    expect(html).toContain('chromewebstore.google.com');
+    expect(html).toContain('addons.mozilla.org');
+  });
+});

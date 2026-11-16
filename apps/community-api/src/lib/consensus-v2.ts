@@ -1,8 +1,9 @@
 /**
- * consensus v2（影子）：对社区入榜的 Sybil 加固候选公式。
+ * consensus v2：对社区入榜的 Sybil 加固公式。
  *
- * 只写入 accounts.status_v2 / consensus_v2 供影子对比与后续切换，不参与入榜：
- * deriveStatus 与快照 SQL 一律仍用 v1（report_count - rescue_count >= 3）。
+ * 结果写入 accounts.status_v2 / consensus_v2。自政策 v4 起，status_v2 = strong 是入榜的
+ * 独立性条件之一（另两条是拉黑票横跨 ≥ 2 天、净票 ≥ 5，见 lib/listing.ts）；
+ * 净票门槛本身仍是 v1（report_count - rescue_count >= 3）。
  *
  * 与 v1 的差别：
  * - 每张票按「安装信任 × 安装成熟度」加权：新安装（< probationDays）权重被压低，
@@ -11,7 +12,11 @@
  *   举报横跨多个日期，或存在 ≥2 个独立安装一致上报的内容指纹/域名。
  */
 
+import { and, asc, count, eq, inArray, isNotNull, sql } from 'drizzle-orm';
+import { collateC } from './sql';
 import type { CategoryVoteRow } from '../category-inference';
+import { getDb } from '../db/client';
+import { activeLabels, installations, reports } from '../db/schema';
 
 export const CONSENSUS_V2_POLICY = {
   /** 新安装观察期天数：此期内投票权重从 minWeight 向 1 线性爬升 */
@@ -102,54 +107,57 @@ export const EMPTY_CONSENSUS_V2_INPUT: ConsensusV2Input = {
   evidenceIndependent: false,
 };
 
+/** reports 行 ⋈ 该安装对该账号的当前 blocked 标签：reports 唯一索引保证一行 = 一个安装的当前票 */
+const blockedReportOn = and(
+  eq(activeLabels.installationId, reports.installationId),
+  eq(activeLabels.handle, reports.handle),
+  eq(activeLabels.label, 'blocked'),
+);
+
+/** 按 UTC 日历日去重计数（created_at 是 Unix 秒） */
+const distinctDays = sql<number>`count(distinct ${reports.createdAt} / 86400)`.mapWith(Number);
+
 /**
  * 全表批量载入 v2 输入（影子重算用）。
  *
- * autoRateAccounts 对全表做影子重算时，逐账号 loadConsensusV2Input 会放大成
- * N×6 次 D1 请求，账号多了会撞单次 invocation 的请求上限（1000）；
+ * autoRateAccounts 对全表做影子重算时，逐账号加载会放大成 N×6 次往返；
  * 这里用 4 条聚合 SQL 一次取回全部输入，在内存里组装。
  */
 export async function loadAllConsensusV2Inputs(
   env: Cloudflare.Env,
 ): Promise<Map<string, ConsensusV2Input>> {
+  const db = getDb(env);
   const [labelRows, dayRows, fpRows, domainRows] = await Promise.all([
-    env.DB.prepare(
-      `SELECT l.handle, l.label, i.trust, i.first_seen_at
-       FROM active_labels l
-       JOIN installations i ON i.id = l.installation_id`,
-    ).all<{ handle: string; label: 'blocked' | 'allowed'; trust: number; first_seen_at: number }>(),
-    env.DB.prepare(
-      `SELECT r.handle, COUNT(DISTINCT date(r.created_at, 'unixepoch')) AS days
-       FROM reports r
-       JOIN active_labels l
-         ON l.installation_id = r.installation_id
-        AND l.handle = r.handle
-        AND l.label = 'blocked'
-       GROUP BY r.handle`,
-    ).all<{ handle: string; days: number }>(),
-    env.DB.prepare(
-      `SELECT r.handle
-       FROM reports r
-       JOIN active_labels l
-         ON l.installation_id = r.installation_id
-        AND l.handle = r.handle
-        AND l.label = 'blocked'
-       WHERE r.content_fingerprint IS NOT NULL
-       GROUP BY r.handle, r.content_fingerprint
-       HAVING COUNT(*) >= 2`,
-    ).all<{ handle: string }>(),
-    env.DB.prepare(
-      `SELECT r.handle
-       FROM reports r
-       JOIN active_labels l
-         ON l.installation_id = r.installation_id
-        AND l.handle = r.handle
-        AND l.label = 'blocked'
-       JOIN json_each(r.link_domains) AS d
-       WHERE r.link_domains IS NOT NULL
-       GROUP BY r.handle, d.value
-       HAVING COUNT(DISTINCT r.installation_id) >= 2`,
-    ).all<{ handle: string }>(),
+    db
+      .select({
+        handle: activeLabels.handle,
+        label: activeLabels.label,
+        trust: installations.trust,
+        first_seen_at: installations.firstSeenAt,
+      })
+      .from(activeLabels)
+      .innerJoin(installations, eq(installations.id, activeLabels.installationId)),
+    db
+      .select({ handle: reports.handle, days: distinctDays })
+      .from(reports)
+      .innerJoin(activeLabels, blockedReportOn)
+      .groupBy(reports.handle),
+    db
+      .select({ handle: reports.handle })
+      .from(reports)
+      .innerJoin(activeLabels, blockedReportOn)
+      .where(isNotNull(reports.contentFingerprint))
+      .groupBy(reports.handle, reports.contentFingerprint)
+      .having(sql`count(*) >= 2`),
+    db.execute<{ handle: string }>(sql`
+      SELECT r.handle
+      FROM ${reports} r
+      JOIN ${activeLabels} l
+        ON l.installation_id = r.installation_id AND l.handle = r.handle AND l.label = 'blocked'
+      CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.link_domains::jsonb) = 'array' THEN r.link_domains::jsonb ELSE '[]'::jsonb END) AS d(value)
+      WHERE r.link_domains IS NOT NULL
+      GROUP BY r.handle, d.value
+      HAVING COUNT(DISTINCT r.installation_id) >= 2`),
   ]);
 
   const now = Math.floor(Date.now() / 1000);
@@ -158,7 +166,7 @@ export async function loadAllConsensusV2Inputs(
   // 按 handle 聚合权重
   const blockedWeights = new Map<string, number[]>();
   const allowedWeights = new Map<string, number[]>();
-  for (const row of labelRows.results ?? []) {
+  for (const row of labelRows) {
     const weight = voteWeight(row.trust, ageDays(row.first_seen_at));
     const bucket = row.label === 'blocked' ? blockedWeights : allowedWeights;
     const list = bucket.get(row.handle) ?? [];
@@ -166,17 +174,17 @@ export async function loadAllConsensusV2Inputs(
     bucket.set(row.handle, list);
   }
 
-  const distinctDays = new Map<string, number>();
-  for (const row of dayRows.results ?? []) distinctDays.set(row.handle, row.days);
+  const daysByHandle = new Map<string, number>();
+  for (const row of dayRows) daysByHandle.set(row.handle, row.days);
 
   const independentHandles = new Set<string>();
-  for (const row of fpRows.results ?? []) independentHandles.add(row.handle);
-  for (const row of domainRows.results ?? []) independentHandles.add(row.handle);
+  for (const row of fpRows) independentHandles.add(row.handle);
+  for (const row of domainRows) independentHandles.add(row.handle);
 
   const handles = new Set([
     ...blockedWeights.keys(),
     ...allowedWeights.keys(),
-    ...distinctDays.keys(),
+    ...daysByHandle.keys(),
     ...independentHandles,
   ]);
   const inputs = new Map<string, ConsensusV2Input>();
@@ -184,7 +192,7 @@ export async function loadAllConsensusV2Inputs(
     inputs.set(handle, {
       blockedWeights: blockedWeights.get(handle) ?? [],
       allowedWeights: allowedWeights.get(handle) ?? [],
-      distinctDays: distinctDays.get(handle) ?? 0,
+      distinctDays: daysByHandle.get(handle) ?? 0,
       evidenceIndependent: independentHandles.has(handle),
     });
   }
@@ -195,8 +203,8 @@ export async function loadAllConsensusV2Inputs(
  * 按 handle 集合批量载入 v2 输入。
  *
  * labels.ts 的 refreshAccountsFromLabels 对一批标签变更收敛计数时使用：
- * 逐账号 loadConsensusV2Input（N×5 次 D1 请求）会撞单次 invocation 的请求上限，
- * 这里用 5 条 IN 聚合 SQL 一次取回全部输入，在内存里组装。
+ * 逐账号加载会放大往返次数，这里用 4 条 IN 聚合 SQL（并发发出）一次取回全部输入，
+ * 在内存里组装。
  */
 export async function loadConsensusV2InputsByHandles(
   env: Cloudflare.Env,
@@ -210,64 +218,41 @@ export async function loadConsensusV2InputsByHandles(
       domainEvidenceHandles: new Set(),
     };
   }
-  const inClause = unique.map((_, index) => `?${index + 1}`).join(', ');
+  const db = getDb(env);
 
-  const [blockedRows, allowedRows, dayRows, fpRows, domainRows] = await Promise.all([
-    env.DB.prepare(
-      `SELECT l.handle, i.trust, i.first_seen_at
-       FROM active_labels l
-       JOIN installations i ON i.id = l.installation_id
-       WHERE l.handle IN (${inClause}) AND l.label = 'blocked'`,
-    )
-      .bind(...unique)
-      .all<{ handle: string; trust: number; first_seen_at: number }>(),
-    env.DB.prepare(
-      `SELECT l.handle, i.trust, i.first_seen_at
-       FROM active_labels l
-       JOIN installations i ON i.id = l.installation_id
-       WHERE l.handle IN (${inClause}) AND l.label = 'allowed'`,
-    )
-      .bind(...unique)
-      .all<{ handle: string; trust: number; first_seen_at: number }>(),
-    env.DB.prepare(
-      `SELECT r.handle, COUNT(DISTINCT date(r.created_at, 'unixepoch')) AS days
-       FROM reports r
-       JOIN active_labels l
-         ON l.installation_id = r.installation_id
-        AND l.handle = r.handle
-        AND l.label = 'blocked'
-       WHERE r.handle IN (${inClause})
-       GROUP BY r.handle`,
-    )
-      .bind(...unique)
-      .all<{ handle: string; days: number }>(),
-    env.DB.prepare(
-      `SELECT r.handle
-       FROM reports r
-       JOIN active_labels l
-         ON l.installation_id = r.installation_id
-        AND l.handle = r.handle
-        AND l.label = 'blocked'
-       WHERE r.handle IN (${inClause}) AND r.content_fingerprint IS NOT NULL
-       GROUP BY r.handle, r.content_fingerprint
-       HAVING COUNT(*) >= 2`,
-    )
-      .bind(...unique)
-      .all<{ handle: string }>(),
-    env.DB.prepare(
-      `SELECT r.handle
-       FROM reports r
-       JOIN active_labels l
-         ON l.installation_id = r.installation_id
-        AND l.handle = r.handle
-        AND l.label = 'blocked'
-       JOIN json_each(r.link_domains) AS d
-       WHERE r.handle IN (${inClause}) AND r.link_domains IS NOT NULL
-       GROUP BY r.handle, d.value
-       HAVING COUNT(DISTINCT r.installation_id) >= 2`,
-    )
-      .bind(...unique)
-      .all<{ handle: string }>(),
+  const [labelRows, dayRows, fpRows, domainRows] = await Promise.all([
+    db
+      .select({
+        handle: activeLabels.handle,
+        label: activeLabels.label,
+        trust: installations.trust,
+        first_seen_at: installations.firstSeenAt,
+      })
+      .from(activeLabels)
+      .innerJoin(installations, eq(installations.id, activeLabels.installationId))
+      .where(inArray(activeLabels.handle, unique)),
+    db
+      .select({ handle: reports.handle, days: distinctDays })
+      .from(reports)
+      .innerJoin(activeLabels, blockedReportOn)
+      .where(inArray(reports.handle, unique))
+      .groupBy(reports.handle),
+    db
+      .select({ handle: reports.handle })
+      .from(reports)
+      .innerJoin(activeLabels, blockedReportOn)
+      .where(and(inArray(reports.handle, unique), isNotNull(reports.contentFingerprint)))
+      .groupBy(reports.handle, reports.contentFingerprint)
+      .having(sql`count(*) >= 2`),
+    db.execute<{ handle: string }>(sql`
+      SELECT r.handle
+      FROM ${reports} r
+      JOIN ${activeLabels} l
+        ON l.installation_id = r.installation_id AND l.handle = r.handle AND l.label = 'blocked'
+      CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(r.link_domains::jsonb) = 'array' THEN r.link_domains::jsonb ELSE '[]'::jsonb END) AS d(value)
+      WHERE r.handle IN ${unique} AND r.link_domains IS NOT NULL
+      GROUP BY r.handle, d.value
+      HAVING COUNT(DISTINCT r.installation_id) >= 2`),
   ]);
 
   const now = Math.floor(Date.now() / 1000);
@@ -276,28 +261,24 @@ export async function loadConsensusV2InputsByHandles(
   // 按 handle 聚合权重
   const blockedWeights = new Map<string, number[]>();
   const allowedWeights = new Map<string, number[]>();
-  for (const row of blockedRows.results ?? []) {
-    const list = blockedWeights.get(row.handle) ?? [];
+  for (const row of labelRows) {
+    const bucket = row.label === 'blocked' ? blockedWeights : allowedWeights;
+    const list = bucket.get(row.handle) ?? [];
     list.push(voteWeight(row.trust, ageDays(row.first_seen_at)));
-    blockedWeights.set(row.handle, list);
-  }
-  for (const row of allowedRows.results ?? []) {
-    const list = allowedWeights.get(row.handle) ?? [];
-    list.push(voteWeight(row.trust, ageDays(row.first_seen_at)));
-    allowedWeights.set(row.handle, list);
+    bucket.set(row.handle, list);
   }
 
-  const distinctDays = new Map<string, number>();
-  for (const row of dayRows.results ?? []) distinctDays.set(row.handle, row.days);
+  const daysByHandle = new Map<string, number>();
+  for (const row of dayRows) daysByHandle.set(row.handle, row.days);
 
   const independentHandles = new Set<string>();
   const fingerprintEvidenceHandles = new Set<string>();
   const domainEvidenceHandles = new Set<string>();
-  for (const row of fpRows.results ?? []) {
+  for (const row of fpRows) {
     independentHandles.add(row.handle);
     fingerprintEvidenceHandles.add(row.handle);
   }
-  for (const row of domainRows.results ?? []) {
+  for (const row of domainRows) {
     independentHandles.add(row.handle);
     domainEvidenceHandles.add(row.handle);
   }
@@ -307,7 +288,7 @@ export async function loadConsensusV2InputsByHandles(
     inputs.set(handle, {
       blockedWeights: blockedWeights.get(handle) ?? [],
       allowedWeights: allowedWeights.get(handle) ?? [],
-      distinctDays: distinctDays.get(handle) ?? 0,
+      distinctDays: daysByHandle.get(handle) ?? 0,
       evidenceIndependent: independentHandles.has(handle),
     });
   }
@@ -338,82 +319,77 @@ export const SNAPSHOT_EVIDENCE = {
 } as const;
 
 export async function loadCommunityAggregates(env: Cloudflare.Env): Promise<CommunityAggregates> {
+  const db = getDb(env);
   const [labelRows, dayRows, fpRows, domainRows, evidenceRows, voteRows] = await Promise.all([
     // v2 权重：每张当前票对应的安装 trust 与成熟度
-    env.DB.prepare(
-      `SELECT l.handle, l.label, i.trust, i.first_seen_at
-       FROM active_labels l
-       JOIN installations i ON i.id = l.installation_id`,
-    ).all<{ handle: string; label: 'blocked' | 'allowed'; trust: number; first_seen_at: number }>(),
+    db
+      .select({
+        handle: activeLabels.handle,
+        label: activeLabels.label,
+        trust: installations.trust,
+        first_seen_at: installations.firstSeenAt,
+      })
+      .from(activeLabels)
+      .innerJoin(installations, eq(installations.id, activeLabels.installationId)),
     // 日去重（快照 days + v2 distinctDays 共用）
-    env.DB.prepare(
-      `SELECT r.handle, COUNT(DISTINCT date(r.created_at, 'unixepoch')) AS days
-       FROM reports r
-       JOIN active_labels l
-         ON l.installation_id = r.installation_id
-        AND l.handle = r.handle
-        AND l.label = 'blocked'
-       GROUP BY r.handle`,
-    ).all<{ handle: string; days: number }>(),
-    // 内容指纹（快照前 N + v2 独立性共用；reports 唯一索引保证一行 = 独立安装）
-    env.DB.prepare(
-      `SELECT r.handle, r.content_fingerprint AS fp
-       FROM reports r
-       JOIN active_labels l
-         ON l.installation_id = r.installation_id
-        AND l.handle = r.handle
-        AND l.label = 'blocked'
-       WHERE r.content_fingerprint IS NOT NULL
-       GROUP BY r.handle, r.content_fingerprint
-       HAVING COUNT(*) >= ?1
-       ORDER BY r.handle ASC, COUNT(*) DESC, r.content_fingerprint ASC`,
-    )
-      .bind(SNAPSHOT_EVIDENCE.minInstalls)
-      .all<{ handle: string; fp: string }>(),
+    db
+      .select({ handle: reports.handle, days: distinctDays })
+      .from(reports)
+      .innerJoin(activeLabels, blockedReportOn)
+      .groupBy(reports.handle),
+    // 内容指纹（快照前 N + v2 独立性共用；reports 唯一索引保证一行 = 独立安装）。
+    // 指纹按字节序比较（collate "C"），与 SQLite 的 BINARY 排序一致。
+    db
+      .select({ handle: reports.handle, fp: sql<string>`${reports.contentFingerprint}` })
+      .from(reports)
+      .innerJoin(activeLabels, blockedReportOn)
+      .where(isNotNull(reports.contentFingerprint))
+      .groupBy(reports.handle, reports.contentFingerprint)
+      .having(sql`count(*) >= ${SNAPSHOT_EVIDENCE.minInstalls}`)
+      .orderBy(
+        asc(collateC(reports.handle)),
+        sql`count(*) desc`,
+        sql`${reports.contentFingerprint} collate "C" asc`,
+      ),
     // 域名（快照前 N + v2 独立性共用）：link_domains JSON 文本 + JS 计数，
     // 与 v0.4 的 collectContentEvidence 语义保持一致
-    env.DB.prepare(
-      `SELECT r.handle, r.link_domains
-       FROM reports r
-       JOIN active_labels l
-         ON l.installation_id = r.installation_id
-        AND l.handle = r.handle
-        AND l.label = 'blocked'
-       WHERE r.link_domains IS NOT NULL`,
-    ).all<{ handle: string; link_domains: string }>(),
-    // 内容证据帖（每账号至多前 N 条，按证据帖字典序取，产出确定）
-    env.DB.prepare(
-      `SELECT handle, evidence_post_id FROM (
-         SELECT d.handle, d.evidence_post_id,
-                ROW_NUMBER() OVER (
-                  PARTITION BY d.handle
-                  ORDER BY d.evidence_post_id ASC
-                ) AS rn
-         FROM (
-           SELECT DISTINCT r.handle, r.evidence_post_id
-           FROM reports r
-           JOIN active_labels l
-             ON l.installation_id = r.installation_id
-            AND l.handle = r.handle
-            AND l.label = 'blocked'
-           WHERE r.evidence_post_id IS NOT NULL
-         ) AS d
-       ) WHERE rn <= ?1
-       ORDER BY handle ASC`,
-    )
-      .bind(SNAPSHOT_EVIDENCE.maxPerEntry)
-      .all<{ handle: string; evidence_post_id: string }>(),
+    db
+      .select({ handle: reports.handle, link_domains: sql<string>`${reports.linkDomains}` })
+      .from(reports)
+      .innerJoin(activeLabels, blockedReportOn)
+      .where(isNotNull(reports.linkDomains)),
+    // 内容证据帖（每账号至多前 N 条，按证据帖字节序取，产出确定）
+    db.execute<{ handle: string; evidence_post_id: string }>(sql`
+      SELECT handle, evidence_post_id FROM (
+        SELECT d.handle, d.evidence_post_id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY d.handle
+                 ORDER BY d.evidence_post_id COLLATE "C" ASC
+               ) AS rn
+        FROM (
+          SELECT DISTINCT r.handle, r.evidence_post_id
+          FROM ${reports} r
+          JOIN ${activeLabels} l
+            ON l.installation_id = r.installation_id
+           AND l.handle = r.handle
+           AND l.label = 'blocked'
+          WHERE r.evidence_post_id IS NOT NULL
+        ) AS d
+      ) AS ranked
+      WHERE rn <= ${SNAPSHOT_EVIDENCE.maxPerEntry}
+      ORDER BY handle COLLATE "C" ASC, rn ASC`),
     // 票型分布（分类推理输入）：reports 唯一索引保证一行 = 一个安装的当前票，
     // reason/detection_source 为该票最新值，与「one_current_vote_per_installation」一致
-    env.DB.prepare(
-      `SELECT r.handle, r.reason, r.detection_source, COUNT(*) AS n
-       FROM reports r
-       JOIN active_labels l
-         ON l.installation_id = r.installation_id
-        AND l.handle = r.handle
-        AND l.label = 'blocked'
-       GROUP BY r.handle, r.reason, r.detection_source`,
-    ).all<{ handle: string; reason: string; detection_source: string | null; n: number }>(),
+    db
+      .select({
+        handle: reports.handle,
+        reason: reports.reason,
+        detection_source: reports.detectionSource,
+        n: count(),
+      })
+      .from(reports)
+      .innerJoin(activeLabels, blockedReportOn)
+      .groupBy(reports.handle, reports.reason, reports.detectionSource),
   ]);
 
   const now = Math.floor(Date.now() / 1000);
@@ -422,7 +398,7 @@ export async function loadCommunityAggregates(env: Cloudflare.Env): Promise<Comm
   // v2 输入组装
   const blockedWeights = new Map<string, number[]>();
   const allowedWeights = new Map<string, number[]>();
-  for (const row of labelRows.results ?? []) {
+  for (const row of labelRows) {
     const weight = voteWeight(row.trust, ageDays(row.first_seen_at));
     const bucket = row.label === 'blocked' ? blockedWeights : allowedWeights;
     const list = bucket.get(row.handle) ?? [];
@@ -430,11 +406,11 @@ export async function loadCommunityAggregates(env: Cloudflare.Env): Promise<Comm
     bucket.set(row.handle, list);
   }
   const daysByHandle = new Map<string, number>();
-  for (const row of dayRows.results ?? []) daysByHandle.set(row.handle, row.days);
+  for (const row of dayRows) daysByHandle.set(row.handle, row.days);
 
   // 指纹：按安装数降序取前 N，最终字典序排序保证确定性 JSON（快照原语义）
   const fingerprintsByHandle = new Map<string, string[]>();
-  for (const row of fpRows.results ?? []) {
+  for (const row of fpRows) {
     const list = fingerprintsByHandle.get(row.handle) ?? [];
     if (list.length < SNAPSHOT_EVIDENCE.maxPerEntry) {
       list.push(row.fp);
@@ -445,7 +421,7 @@ export async function loadCommunityAggregates(env: Cloudflare.Env): Promise<Comm
 
   // 域名：每 (handle, domain) 按安装数计数，>=2 的取前 N，字典序排序（快照原语义）
   const domainCounts = new Map<string, Map<string, number>>();
-  for (const row of domainRows.results ?? []) {
+  for (const row of domainRows) {
     try {
       const parsed = JSON.parse(row.link_domains) as unknown;
       if (!Array.isArray(parsed)) continue;
@@ -471,13 +447,18 @@ export async function loadCommunityAggregates(env: Cloudflare.Env): Promise<Comm
 
   // v2 独立性：存在 ≥1 个 ≥2 安装一致的指纹或域名即满足
   const independentHandles = new Set<string>();
-  for (const row of fpRows.results ?? []) independentHandles.add(row.handle);
+  for (const row of fpRows) independentHandles.add(row.handle);
   for (const [handle, domains] of domainsByHandle) {
     if (domains.length > 0) independentHandles.add(handle);
   }
 
   const v2Inputs = new Map<string, ConsensusV2Input>();
-  for (const handle of new Set([...blockedWeights.keys(), ...allowedWeights.keys(), ...daysByHandle.keys(), ...independentHandles])) {
+  for (const handle of new Set([
+    ...blockedWeights.keys(),
+    ...allowedWeights.keys(),
+    ...daysByHandle.keys(),
+    ...independentHandles,
+  ])) {
     v2Inputs.set(handle, {
       blockedWeights: blockedWeights.get(handle) ?? [],
       allowedWeights: allowedWeights.get(handle) ?? [],
@@ -487,14 +468,14 @@ export async function loadCommunityAggregates(env: Cloudflare.Env): Promise<Comm
   }
 
   const evidenceByHandle = new Map<string, string[]>();
-  for (const row of evidenceRows.results ?? []) {
+  for (const row of evidenceRows) {
     const list = evidenceByHandle.get(row.handle) ?? [];
     list.push(row.evidence_post_id);
     evidenceByHandle.set(row.handle, list);
   }
 
   const votesByHandle = new Map<string, CategoryVoteRow[]>();
-  for (const row of voteRows.results ?? []) {
+  for (const row of voteRows) {
     const list = votesByHandle.get(row.handle) ?? [];
     list.push({ reason: row.reason, detectionSource: row.detection_source, count: row.n });
     votesByHandle.set(row.handle, list);

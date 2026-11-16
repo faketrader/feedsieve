@@ -29,11 +29,19 @@ const fail = (msg) => { console.error(`✗ ${msg}`); process.exit(1); };
 const ok = (msg) => console.log(`✓ ${msg}`);
 m.manifest_version === 3 || fail('manifest_version != 3');
 m.version === version || fail(`版本不一致: manifest=${m.version} package=${version}`);
+// 社区 API 走 CORS，不占主机权限；新增任何主机都会让 Chrome 升级时停用扩展
 const hosts = [...(m.host_permissions ?? [])].sort();
-const expected = [`${apiBase}/*`, 'https://x.com/*'].sort();
-JSON.stringify(hosts) === JSON.stringify(expected) ||
-  fail(`host_permissions 异常: ${hosts.join(', ')}`);
-ok(`MV3 · v${m.version} · host_permissions = x.com + 官方 API`);
+JSON.stringify(hosts) === JSON.stringify(['https://x.com/*']) ||
+  fail(`host_permissions 异常（只允许 x.com）: ${hosts.join(', ')}`);
+ok(`MV3 · v${m.version} · host_permissions = x.com`);
+// 构建产物里的 API 地址必须是官方实例（防 dev 覆盖泄进生产包）
+const { execSync } = require('node:child_process');
+const dir = require('node:path').dirname(manifestPath);
+const hit = execSync(`grep -rlF ${JSON.stringify(apiBase)} ${JSON.stringify(dir)} || true`).toString().trim();
+hit || fail(`构建产物里找不到 API 地址 ${apiBase}`);
+const local = execSync(`grep -rlE "https?://(localhost|127\\.0\\.0\\.1)" ${JSON.stringify(dir)} --include=*.js || true`).toString().trim();
+local && fail(`构建产物含本地地址: ${local}`);
+ok(`API 地址 = ${apiBase}`);
 const war = m.web_accessible_resources ?? [];
 if (war.some(e => (e.resources ?? []).some(p => p.includes('community') || p === '*' || p === '**'))) {
   fail('随包检测数据不得通过 WAR 暴露；必须走后台缓存');
@@ -93,4 +101,4 @@ echo "==> SHA-256"
 
 echo ""
 echo "商店包就绪：$ZIP"
-echo "上传前：把 checksum 记入 docs/RELEASES.md，并确认构建自 v${VERSION} tag。"
+echo "上传前：确认构建自 v${VERSION} tag；校验和随 GitHub Release 附件（*.sha256）发布，无需另记。"

@@ -1,189 +1,246 @@
 <p align="center">
-  <img src="assets/brand/avatar.png" width="96" alt="福滤娃 FeedSieve" />
+  <img src="assets/brand/avatar-hires.png" width="100" alt="福滤娃 FeedSieve" />
 </p>
 
 <h1 align="center">福滤娃 FeedSieve</h1>
 
 <p align="center">
-  <strong>不信你看。看不见就对了。</strong><br>
-  X（Twitter）赛博清洁工：高置信垃圾账号黄框标注，一键原生拉黑，全端同步消失。
+  <strong>用了福滤娃，评论区不骚了，好帖也不漏了。</strong><br>
+  开源的中文 X（Twitter）副驾驶：清评论、看热帖、挖博主、排发帖、辨 AI 味——一个装全，本地优先，不拿账号冒险。
 </p>
 
 <p align="center">
   <a href="https://chromewebstore.google.com/detail/feedsieve/amhdjglnonjaoenddnifpnljgmocfdph"><img src="https://img.shields.io/chrome-web-store/v/amhdjglnonjaoenddnifpnljgmocfdph?logo=googlechrome&logoColor=white&label=Chrome%20Web%20Store" alt="Chrome Web Store 版本" /></a>
+  <a href="https://addons.mozilla.org/zh-CN/firefox/addon/feedsieve-fuluwa/"><img src="https://img.shields.io/amo/v/feedsieve-fuluwa?logo=firefoxbrowser&logoColor=white&label=Firefox%20Add-ons" alt="Firefox Add-ons 版本" /></a>
   <a href="https://chromewebstore.google.com/detail/feedsieve/amhdjglnonjaoenddnifpnljgmocfdph"><img src="https://img.shields.io/chrome-web-store/users/amhdjglnonjaoenddnifpnljgmocfdph?label=users" alt="商店用户数" /></a>
+  <a href="https://github.com/realchendahuang/feedsieve/stargazers"><img src="https://img.shields.io/github/stars/realchendahuang/feedsieve?logo=github&color=gold" alt="GitHub Stars" /></a>
   <a href="https://github.com/realchendahuang/feedsieve/releases"><img src="https://img.shields.io/github/v/release/realchendahuang/feedsieve?logo=github" alt="最新 Release" /></a>
-  <a href="https://github.com/realchendahuang/feedsieve/stargazers"><img src="https://img.shields.io/github/stars/realchendahuang/feedsieve?logo=github" alt="GitHub Stars" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/realchendahuang/feedsieve" alt="MIT License" /></a>
   <a href="https://github.com/realchendahuang/feedsieve/commits/main"><img src="https://img.shields.io/github/commit-activity/m/realchendahuang/feedsieve?label=commits" alt="提交活跃度" /></a>
   <a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs welcome" /></a>
 </p>
 
 <p align="center">
-  <a href="https://chromewebstore.google.com/detail/feedsieve/amhdjglnonjaoenddnifpnljgmocfdph"><strong>⬇️ Chrome 应用商店安装</strong></a>
+  <a href="https://chromewebstore.google.com/detail/feedsieve/amhdjglnonjaoenddnifpnljgmocfdph"><strong>⬇️ Chrome 商店一键安装</strong></a>
   ·
-  <a href="#安装">本地构建</a>
+  <a href="https://addons.mozilla.org/zh-CN/firefox/addon/feedsieve-fuluwa/"><strong>🦊 Firefox 商店一键安装</strong></a>
   ·
-  <a href="#使用教程">使用教程</a>
+  <a href="https://feedsieve.win"><strong>🌐 官网与公示</strong></a>
+  ·
+  <a href="https://feedsieve.win/guide">使用教程</a>
+  ·
+  <a href="https://feedsieve.win/lists/blacklist">黑名单公示</a>
+  ·
+  <a href="https://feedsieve.win/lists/keywords">开源词库</a>
   ·
   <a href="CHANGELOG.md">更新日志</a>
-  ·
-  <a href="CONTRIBUTING.md">参与贡献</a>
-  ·
-  <a href="PRIVACY.md">隐私政策</a>
-  ·
-  <a href="https://feedsieve.win">官网</a>
 </p>
+
+---
+
+## 它能做什么
+
+|            | 清干净                                          | 看得准                                                                                   | 挖得深                                                             | 发得顺                                                                    | 辨得清                                                         |
+| ---------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| **解决**   | 评论区的黄推、引流号、水军                      | 刷了一晚上，不知道哪条正在火                                                             | 想研究一个博主，X 只给你按时间排的帖子                             | 手动卡点发帖、Markdown 排版来回折腾                                       | 分不清对面是真人还是 AI 复读机                                 |
+| **做法**   | 黄框标出写明理由，点一下走 X 原生拉黑，全端同步 | 每条帖子显示每小时浏览数和作者量级；「热帖」汇总你刷到的火帖，「全站」汇总所有用户刷到的 | 打开任意博主主页：每条帖子是他中位数的几倍，哪种形式、哪个时段最好 | 发帖节奏 + 每小时容量 + 草稿队列；文章编辑器直接粘 Markdown、自动本机备份 | 读最近回复给 AI 味百分比；多人重合才公开，够票进社区 AI 号名单 |
+| **在哪看** | 时间线上、弹窗「清理」                          | 推文右上角、弹窗 / 侧边栏「热帖」                                                        | 博主资料卡下、侧边栏「主页」                                       | 弹窗 / 侧边栏「发帖」、X 发帖框与文章编辑器                               | 评论区机器人图标、主页「AI 味」Tab、弹窗「AI 味」              |
+
+除了你主动点的「AI 味」检测和「补全这个博主」会往下滚动，扩展**不替你滚动页面、不额外请求 X、不上传你的登录凭证**，详见下文「[数据从哪来](#数据从哪来)」。
+
+---
+
+## 清干净：只框不藏，拉黑交给你
+
+中文 X 的评论区，黄推复读机、币圈引流怪、洗稿僵尸号比真人还勤快。常见的自救工具走两个极端：本地隐藏只骗得了这一个浏览器，手机上照样骑脸；黑盒拉黑脚本规则不公开、误杀没人知道，还会因为狂刷接口把你自己的号送进风控。
+
+福滤娃的做法：
+
+- **只框不藏**：命中的账号打黄框，写明理由（`命中黑名单: 3人标记`、`全角变形: 那一夜你没有拒绝我`），推文原样保留，要不要送走由你决定。
+- **原生拉黑**：用你已登录的 X 会话调用原生 Block，手机、平板、电脑同步生效，对方再也不能回复、@、私信你。
+- **不连累你的号**：批量拉黑每 24 小时最多 400 个，带随机间隔；X 一返回 429 就停下休眠。
+- **误伤能救**：关注的人自动保护；拉错了在「已拉黑」里一键放回；社区抢救票能让误标账号全网解封。
+- **规则公开**：[社区黑名单](https://feedsieve.win/lists/blacklist)、[开源词库](https://feedsieve.win/lists/keywords)、[推荐白名单](https://feedsieve.win/lists/whitelist)全部公示；名单快照带 Ed25519 签名，本地验签后才生效。
+
+|              | 本地隐藏       | 黑盒拉黑脚本       | **福滤娃**                          |
+| ------------ | -------------- | ------------------ | ----------------------------------- |
+| 生效范围     | 只有这个浏览器 | 全端               | **全端**                            |
+| 你看得到什么 | 内容直接消失   | 后台静默拉黑       | **黄框 + 理由，内容原样**           |
+| 谁来决定     | 插件           | 插件               | **你点了才拉黑**                    |
+| 误伤         | 不知道         | 申诉无门           | **一键放回 + 社区抢救**             |
+| 账号安全     | 不调接口       | 并发狂刷，容易 429 | **400 个/天 + 随机间隔 + 限流熔断** |
+
+---
+
+## 看得准：哪条正在火，一眼可见
+
+- **流速**：推文右上角显示当前每小时浏览数，`1K/h` 以上变红，`10K/h` 以上实心红。算法和 X 推荐系统的浏览衰减模型一致，见 [docs/03](docs/03-X推荐算法与指标设计.md)。
+- **量级**：作者名旁显示微光 / 新芽 / 新锐 / 星火 / 人气 / 达人 / 知名 / 影响力 / 头部 / 顶流和粉丝数；悬停看关注比、注册时间、疑似互关号等提示。
+- **热帖**：弹窗或侧边栏里汇总你最近 2 小时在所有 X 标签页刷到的火帖。
+  - 可按热度、回复机会、粉丝数、收藏数、最近刷到排序。
+  - 没在看的时候新帖直接插到顶部，正在看的时候只出提示条，列表不会在你手底下跳。
+  - 可以隐藏单条帖子或某个作者，同一作者的多条自动合并，支持 j / k 键盘操作。
+- **全站热榜**：汇总所有福滤娃用户刷到的火帖，至少 3 个人看到才上榜。只上报正在火的公开帖子指标，不带你的账号，可在设置里关闭。
+
+---
+
+## 挖得深：打开任意博主主页
 
 <p align="center">
-  <img src="assets/store/screenshot-1-marked.png" width="820" alt="FeedSieve 在时间线上用黄框标注垃圾账号" />
+  <img src="assets/screens/profile.png" width="420" alt="博主主页洞察：中位浏览、爆款率、内容形式与发帖时段" />
 </p>
 
-> [!TIP]
-> **为什么是拉黑，而不是隐藏？** 本地隐藏只骗过你自己这一个浏览器；X 原生 Block 全端生效——手机同步消失，被拉黑的号再也无法回复你、@ 你、关注你。误伤也不怕，一键 Unblock 放回来。
+X 的主页只按时间排帖子，想找一个博主最好的那几条，只能一直往下翻。福滤娃在博主资料卡下加一行概况，侧边栏「主页」给出完整分析：
 
-## 这是什么
+- **爆款倍数**：每条帖子的浏览 ÷ 他自己帖子浏览的中位数。用中位数不用平均数，一两条大爆款不会把基线拉偏；3 倍以上标金色。博主主页上，主人自己的帖子右上角也会直接显示倍数。
+- **爆款率与基线**：只算原创和引用、发出满 24 小时的帖子；刚发的帖子按预计 24 小时浏览估算，标 `~`。
+- **规律**：纯文字 / 图片 / 视频 / 引用各自的中位倍数；7 天 × 6 个时段的发帖热力图。
+- **补数据**：一键在 X 搜他的高赞帖（`from:他 min_faves:N`，N 按他的中位点赞自动选）；或者用 Google 站内搜索他的帖子，按关键词和时间范围找。
+- **带走**：复制 Top 20 爆款给 AI 分析钩子和结构；导出 CSV。
 
-**FeedSieve / 福滤娃** 是一个开源的 X（Twitter）垃圾账号清理工具：高置信社区名单会在你已登录的 `x.com` 页面上用黄框提示；扩展没认出的账号，你可以随手点「标记垃圾并拉黑」。所有拉黑都由你明确触发，并真实写入 X 黑名单。
+---
 
-色情引流、机器人刷屏、广告轰炸、互动钓鱼，信号各不相同，处置只有一种：**写入 X 黑名单——手机端同步消失，被拉黑的号再也无法回复你、@ 你、关注你。**
+## 发得顺：排期、草稿、文章，都在 X 里完成
 
-| 方案 | 生效范围 | 阻断互动 |
-| --- | --- | --- |
-| 本地隐藏（多数同类工具） | 只有装了扩展的这个浏览器 | ❌ |
-| **X 原生 Block（FeedSieve）** | 全端，手机同步消失 | ✅ 无法再回复 / @ / 关注 |
+不发帖的人用不上，天天发的人省半小时。所有填写都发生在 X 自己的发帖框和文章编辑器里，**最后一下永远由你点**。
 
-> **可见优先，拉黑唯一。Local detect. Community list. AI last. Native Block through the page.**
+- **发帖节奏**：先设集中时段（可以多段，比如工作日早上 + 晚上）、每小时最多几条；分钟在小时内随机，分配后固定。可选星期、最小间隔、最早提前量和最多提前几天。设置页直接显示「本周最多 N 条」，能按你自己主页的「发帖时段表现」一键推荐 3 个时段。
+- **排下一条**：发帖框日历旁加一个按钮（快捷键 `Alt+N`），自动找下一个还有名额的小时，填好随机分钟；X 安排表顶部还有 +1 小时、+3 小时、明天此时、同上一条、±15 分钟，选得太近或已经过了会提示。
+- **草稿队列**：在面板里先写好几条（按 X 规则计字，超 280 标黄），可上下排序；点日历按钮把正文贴进当前 X 页面的发帖框、填好时间，你检查后点 X 的「确认」「预排期」。排好后同样正文的草稿自动拿掉；发帖框里有没写完的内容时不动它。
+- **容量一眼看清**：面板按天列出已排期的帖子、待确认的排期，以及本周每个小时的「已排 / 上限」；点一个还有空位的小时，会把队列里的下一条排进去。数据读 X 自己的「草稿 › 预排期」页，你在 X 里新建、修改、删除也会自动更新。
+- **Markdown 直接粘**：在 X 文章编辑器里粘贴 Markdown 自动排版——标题、列表、任务列表、引用、加粗 / 斜体 / 删除线、链接保留，代码块变引用并保留缩进，表格逐行展开；开头的 `# 标题` 或 frontmatter 的 `title` 自动填进文章标题。`⌘Z` 可撤销，`⌘⇧V` 粘贴原文。
+- **写作小面板**：正文字数 / 英文词数、预计阅读时长、小标题大纲（点击跳转）；可导入 `.md` 文件接在正文末尾；右下角一键「复制为 Markdown」。
+- **本机备份**：写作时标题和正文按 Markdown 存在本机，每篇留 5 个版本（10 分钟内的修改合并成一版），最多 30 篇；在「发帖 › 文章备份」里选版本复制回去，或回到 X 打开那篇。
 
-黄框标注永不隐藏内容；社区公开名单提供识别弹药；AI 只处理模糊案例；所有拉黑通过你已登录 X 会话的内部 Block 接口执行，无需 X Developer API / OAuth 应用。
+发帖节奏、草稿、本机占好的排期、读到的预排期和文章备份都只存本机（`storage.local`），不上传，也不为此额外请求 X。
 
-## 安装
+---
 
-| 方式 | 步骤 |
-| --- | --- |
-| **Chrome 应用商店（推荐）** | 前往[商店页面](https://chromewebstore.google.com/detail/feedsieve/amhdjglnonjaoenddnifpnljgmocfdph)点「添加至 Chrome」，自动接收更新 |
-| **GitHub Releases** | 从 [Releases](https://github.com/realchendahuang/feedsieve/releases) 下载 `feedsieve-*-chrome.zip` 并解压 → 打开 `chrome://extensions` 开启「开发者模式」→「加载已解压的扩展程序」 |
-| **从源码构建** | `git clone https://github.com/realchendahuang/feedsieve.git && pnpm install && pnpm build:extension`，然后加载 `apps/extension/.output/chrome-mv3`（需要 Node ≥ 22 与 pnpm） |
+## 辨得清：这条回复是不是 AI 写的
 
-**Edge / Brave 等 Chromium 浏览器可直接装商店版**：Edge 打开商店页面时会提示「允许来自其他商店的扩展」，允许后点「添加至 Chrome」即可，无需单独上架 Edge Add-ons（也不用后两种方式）。
+中文 X 的评论区正在被 AI 复读机占领：语气客气、结构工整、说了一屏等于没说。福滤娃给账号算一个「AI 味」，但**不搞单人审判**。
 
-## 使用教程
+- **AI 味百分比**：读这个账号最近 6–20 条公开回复，给出 AI 味百分比、档位和一句锐评。入口：评论区回复上的机器人图标、博主主页「AI 味」Tab、面板「AI 味」（含「测测我自己」）。
+- **一个人测不算数**：你测出的结论先只给你本人看；另一个安装测到重合的回复、或独立重判落在同一侧，才对所有人公开。
+- **投票定论，不再人工复核**：至少 3 个不同安装投「是 AI」且多于「是真人」，进社区 AI 号名单；「是真人」票 ≥ 3 且领先，公开为真人并撤下名单；两边都 ≥ 3 且持平则显示「社区争议中」。Jev 只给初始判断和分数，票数领先的一方优先。
+- **AI 号广场**：官网 [`feedsieve.win/ai`](https://feedsieve.win/ai) 汇总可以公示的 AI / 疑似账号——判定依据、主页公开数据和最近几条公开回复，方便你决定要不要屏蔽；疑似账号单独标注，误判可申诉。拉黑仍由你自己在 X 上点。
+- **评论区标记**：已有结论的号在评论区和时间线显示「AI 味 N%」，可折叠；整块「AI 味标注」（含回复上的检测入口）可在设置 › 功能里关掉。识别范围可选全部 / 仅蓝V / 跳过蓝V；已关注和个人白名单默认不处理，已关注可在面板里单独打开自动标记。
+- **能带走**：生成带头像的分享图、分享带预览的链接；结论过期或你想重测，都能从面板重新打开。
+- **代价说清楚**：这一步会把截断后的回复（每条 200 字、去掉短链）交给第三方语言模型判定一次；被判为 AI / 疑似 AI 的账号会保存最多 20 条参与判定的回复样本（含原帖摘要、回复间隔），用于官网 AI 号广场公示，判为真人时删除。「仅本地运行」时不可用，每个安装每天最多 20 次。详见 [`PRIVACY.md`](PRIVACY.md) 第 9 条。
 
-分步教程（含打野排位、设置项逐条、常见问题）见 [docs/USAGE.md](docs/USAGE.md)，或读[网页版教程](https://feedsieve.win/guide)。核心就四步：
+---
 
-1. **刷 X，看黄框** — 高置信垃圾账号被黄框标出，带判定理由，内容不隐藏。
-2. **单个送走** — 黄框上点「顺手拉黑」，走你已登录 X 会话的内部 Block 接口，手机端同步消失。
-3. **攒一批** — 黄标账号自动进待拉黑列表，点「一键拉黑 N 个」逐个执行；成功移除，失败如实保留原因。
-4. **漏网的自己补** — 任意推文操作栏点「标记垃圾并拉黑」，你的动作就是最高质量的判断；误伤点「放回来」一键撤销。
+## 数据从哪来
 
-进阶两件事：弹窗「打野」tab 看本周战报与榜单速览（完整周榜在[官网](https://feedsieve.win/leaderboard)，想露脸需认领档案并邮箱验证）；首次使用建议在设置里**同步关注列表**（存为本地保护名单）并按需开启词库包。
+同类工具拿数据的方式差别很大，这直接关系到你的 X 账号安不安全：
 
-## 工作原理
+| 做法                          | 谁在用                          | 能看多少         | 对你账号的风险                 |
+| ----------------------------- | ------------------------------- | ---------------- | ------------------------------ |
+| 读页面已经加载的数据          | **福滤娃**、Polaris、X-Insights | 你看到多少算多少 | 无                             |
+| 扩展自动滚动页面              | X Sort                          | 几百条           | 大号会触发验证码、限流         |
+| 用你的登录会话直接请求 X 接口 | XOutlier、TweetDigger           | 一年甚至全部     | X 条款禁止爬取，风控算在你头上 |
+
+福滤娃只做第一种：只读 X 已经给页面的数据，不替你滚动、不翻页、不额外请求 X。只有三个例外，都由你主动触发：
+
+- **AI 味检测**：会在那个账号的「回复」页往下翻几屏，读取 X 已经加载的内容；不会替你刷新或请求新数据。
+- **补全这个博主**：在博主主页上一路滚到底，让 X 自己加载更多帖子；正常几十秒，再点一次随时停，不额外请求 X。
+- **在 X 搜高赞帖**：打开一次普通的 X 搜索，和你自己搜完全一样。
+
+本地数据（热帖、博主主页帖子库、发帖节奏、草稿、本机占好的排期、文章备份）只存在你的浏览器里，可在设置里一键清空。会离开设备的只有：你明确拉黑 / 加白的账号（「名单上传」）、正在火的公开帖子指标（「全站热榜」）、你主动发起 AI 味检测时截断后的回复文本（交给第三方模型判定一次），三者都能关；打开「仅本地运行」后什么都不上传，AI 味检测也不可用。完整说明见 [`PRIVACY.md`](PRIVACY.md)。
+
+---
+
+## 上手
+
+1. **装好就能用**：打开 `x.com` 正常刷，黄推自动打黄框，帖子右上角出现流速。
+2. **顺手送走**：黄框右上角点「顺手拉黑」；攒多了打开弹窗「清理」一键批量。
+3. **看热帖**：点扩展图标，或者打开侧边栏一直挂着，「热帖」会跟着你的浏览自动更新。
+4. **研究博主**：打开他的主页往下滚一点，资料卡下出现概况；侧边栏「主页」看完整分析。
+5. **排发帖**：设置 › 发帖辅助，设好集中时段和每小时条数；在面板「发帖」写草稿、点「排下一条」，或下次打开 X 发帖框点日历旁的「排下一条」（`Alt+N`）。
+6. **测 AI 味**：评论区点回复上的机器人图标，或面板「AI 味」→「测测我自己」。
+
+更多见 [网页版使用指南](https://feedsieve.win/guide)。
+
+---
+
+## 安装方式
+
+| 安装途径                                  | 说明与步骤                                                                                                                                                                                                                                                                                             |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Chrome 应用商店**                       | 打开 [Chrome 商店页面](https://chromewebstore.google.com/detail/feedsieve/amhdjglnonjaoenddnifpnljgmocfdph) 点「添加至 Chrome」，自动接收更新                                                                                                                                                          |
+| **Firefox 附加组件（AMO）**               | 打开 [Firefox 商店页面](https://addons.mozilla.org/zh-CN/firefox/addon/feedsieve-fuluwa/) 点「添加到 Firefox」，自动接收更新。AMO 上另有第三方转载的 0.8.2 `feedsieve` 条目（GUID `feedsieve@feedsieve.local`），不是本项目发布，请认准「FeedSieve 福滤娃」；详见 [`docs/FIREFOX.md`](docs/FIREFOX.md) |
+| **Edge / Brave / Arc 等 Chromium 浏览器** | 用上面的 Chrome 商店链接，允许来自其他商店的扩展即可                                                                                                                                                                                                                                                   |
+| **离线包（GitHub Releases）**             | Chrome / Chromium：下载 `feedsieve-*-chrome.zip` 解压 → `chrome://extensions` 打开开发者模式 → 加载已解压的扩展程序。Firefox：下载 `feedsieve-*-firefox.zip` → `about:debugging#/runtime/this-firefox` → 临时载入附加组件                                                                              |
+| **从源码构建**                            | 见下方本地开发（Node ≥ 22、pnpm）                                                                                                                                                                                                                                                                      |
+
+---
+
+## 系统工作流程
 
 ```text
-x.com
+x.com 页面
   │
-  ├── X Reader Adapter ──> FeedItem
-  │                           │
-  │                           v
-  │                      Safety Policy
-  │                 ┌─────────┼─────────┐
-  │                 │         │         │
-  │          Community   Manual mark   Weak evidence
-  │                 │
-  │            黄框标注（带理由，不隐藏）
-  │                 │
-  │            待拉黑列表（持久，可增删）
-  │                 │
-  └── X Action Adapter <── Block Queue（用户按下「一键拉黑」）
-                            │
-                      原生 Block / Unblock
-                      全端生效 + 阻断互动
+  ├── [MAIN World] XHR Bridge：只读 X 自己的 GraphQL 响应（不发请求、不改请求）
+  │        │
+  │        ▼
+  │   [ISOLATED World] 严格消毒后分五路
+  │        │
+  │        ├─ 检测：社区签名黑名单 + 开源词库 + 模糊指纹
+  │        │        → 自己、关注、白名单一票豁免 → 黄框 + 理由
+  │        │        → 用户点击 → 拉黑队列（400/24h、随机间隔、429 熔断）→ X 原生 Block
+  │        │
+  │        ├─ 热度：流速与量级徽标 → 后台汇总所有 X 标签页（storage.session）
+  │        │        → 弹窗 / 侧边栏「热帖」
+  │        │        → 正在火的公开帖子指标 → 全站热榜（可关）
+  │        │
+  │        ├─ 主页：打开过的博主各建一份本地帖子库（storage.local，可清空）
+  │        │        → 资料卡概况 + 帖子倍数 → 侧边栏「主页」
+  │        │        → 匿名帖子数字众包 → 官方 API（可关）
+  │        │
+  │        ├─ 发帖：读 X「草稿 › 预排期」→ 本地节奏算每小时名额 → 填进 X 发帖框 / 安排表
+  │        │        → 文章编辑器：Markdown 转 X 格式 + 本机备份（都不自动提交）
+  │        │
+  │        └─ AI 味：你点检测 → 读回复页已加载内容 → 官方 API → 第三方模型判一次
+  │                 → 一人结论仅本人可见，多人重合才公开 → 评论区标记 / 主页 Tab
+  │
+  └── 扩展后台 ──> 官方 API：签名名单与词库下载、名单上传、全站热榜、AI 味判定
 ```
 
-### 判断来源分层
+---
 
-- **Layer 1 — 用户明确动作**：主动「标记垃圾并拉黑」是最高质量判断；扩展漏识别时始终有入口。
-- **Layer 2 — 社区名单**：公开名单命中即黄框；只有至少 3 个独立标记且没有抢救票的账号能进入批量候选。
-- **Layer 3 — 本地词库与弱证据复核**：关键词命中给人工确认黄框，永不自动进入批量动作、也不回灌社区；相似内容、可疑域名只在「彻底」档提示复核。
-- **本地保护层**：关注列表和个人白名单优先级最高，自动从一切清理中排除。
+## 本地开发与贡献
 
-批量拉黑动作走持久化队列，绝不做 `for (...) click()`。架构边界见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，X 原生操作见 [`docs/X_ACTION_ADAPTER.md`](docs/X_ACTION_ADAPTER.md)。
+本项目采用 Monorepo 架构管理：
 
-> [!WARNING]
-> **批量拉黑请节制。** FeedSieve 走的是你已登录 X 会话的内部 Block 接口，和手动点屏蔽是同一条请求。X 不公布每日上限，但社区实测大约每天 400–500 个之后容易被强制登出或要求验证。扩展默认按 400/24h 自动停，剩余队列会留到你下次点继续。这不是永久封号，但连续硬打会把临时锁定拖长。大名单先入队，不要指望一个晚上跑完。策略细节见 [`docs/BLOCK_SAFETY.md`](docs/BLOCK_SAFETY.md)。
+| 模块路径                   | 职责与技术栈                                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `apps/extension`           | 扩展本体：**WXT + React 19 + TypeScript**，Manifest V3；弹窗与侧边栏共用一套界面                        |
+| `apps/community-api`       | 社区后端：**Cloudflare Workers + Hono + PostgreSQL（Drizzle + Hyperdrive）+ R2**，支持 Ed25519 签名分发 |
+| `apps/admin`               | 维护后台：React + Tailwind，受 Cloudflare Access 身份断言保护                                           |
+| `packages/detector`        | 独立检测器纯逻辑与金标测试语料库（Golden Corpus）                                                       |
+| `packages/block-queue`     | 具备自适应退避与熔断特性的拉黑队列状态机                                                                |
+| `packages/x-adapter`       | X 页面 DOM/网络读取与原生动作适配层                                                                     |
+| `packages/metrics`         | 流速、量级、热度分、爆款倍数与博主基线等指标的纯函数                                                    |
+| `packages/community-lists` | 共享的社区名单序列化、解析与 Ed25519 验签契约                                                           |
+| `community/`               | 规范的 YAML 名单源文件、Schema 与每日镜像快照                                                           |
 
-## 社区名单，晒在阳光下
-
-> **Open Code + Open Rules + Open Lists + Open Governance**
-
-- 每个安装对每个账号只有一张当前票，`净票数 = 拉黑票 − 误标票`，净票数达到 3 自动进入最终名单，低于 3 自动退出。
-- 维护者通过受 Cloudflare Access 保护的 [React 管理后台](apps/admin)维护草稿、显式发布或回退条目。
-- **YAML for humans, JSON for machines**：[`community/lists/blocklist.yaml`](community/lists/blocklist.yaml) 供审计 / Diff / Fork；[`community/lists/official.json`](community/lists/official.json) + [`community/lists/manifest.json`](community/lists/manifest.json) 供扩展下载与校验。
-- 扩展刷 X 时**零实时请求**：快照在本地建索引，滚动时间线不逐号查询服务器。
-- **误伤有解药**：社区「验证正常」白名单（净抢救票 ≥3，与黑名单镜像）随签名快照一并下发，命中即一票豁免；另有维护者人工筛选的[推荐白名单](community/lists/whitelist.yaml)（含博主简介），两处白名单账号永不标注。想进推荐白名单？填 [Issue 模板「推荐白名单申请」](.github/ISSUE_TEMPLATE/whitelist-request.yml)，仓库所有者手动拉取复核后入册。
-- **打野排位**：拉黑按共识击杀计分，周赛季排名公开可看；玩法见 [`docs/HUNTING.md`](docs/HUNTING.md)。
-
-完整机制与字段见 [`community/README.md`](community/README.md) 与 [`docs/OPEN_SOURCE_GOVERNANCE.md`](docs/OPEN_SOURCE_GOVERNANCE.md)。
-
-## 隐私
-
-- 判断优先在本地完成；社区上报仅限 handle / 分类 / 话术指纹哈希 / 外链域名与拉黑时的判定材料（命中那条推文的原文、昵称、简介——均为该账号公开发布的内容，用于反滥用分析与纠错），以及你在关键词页主动提交的短语（匿名，进人工审阅），绝无浏览历史。
-- 拉黑通过你已登录 X 会话的内部 Block 接口执行，FeedSieve 服务器碰不到你的 X 账号。
-- 自定义关键词、白名单、统计只存在本机（备份文件除外，见[隐私政策](PRIVACY.md)）。
-
-双语隐私政策：[PRIVACY.md](PRIVACY.md)。
-
-## 更新日志
-
-- 完整版本历史：[CHANGELOG.md](CHANGELOG.md)
-- 各版本详细工程记录：[docs/RELEASES.md](docs/RELEASES.md)
-- 二进制产物：[GitHub Releases](https://github.com/realchendahuang/feedsieve/releases)
-
-## 路线图
-
-当前：v0.8.x 已上架 Chrome 应用商店，社区名单、行业词库、维护后台、名单公示页、打野排位赛均已上线（最新功能随各版本陆续推送，见更新日志）。
-
-- [x] v0.1 能真正拉黑 · v0.2 社区名单闭环 · v0.4 / 0.5 垃圾网络识别 · v0.6 今日战报与分享 · v0.7 商店上架与词库生态 · v0.8 批量拉黑安全预算与公示申请
-- [ ] Optional AI（最后一层增强，不是基础依赖）
-
-完整路线见 [`docs/ROADMAP.md`](docs/ROADMAP.md)，长期定位见 [`docs/VISION.md`](docs/VISION.md)，品牌语言见 [`docs/BRAND.md`](docs/BRAND.md)，打野玩法见 [`docs/HUNTING.md`](docs/HUNTING.md)。
-
-## 参与贡献
-
-欢迎 Issue 反馈漏识别 / 误标，提交垃圾话术样本与规则建议，以及 X DOM 兼容修复、UI / UX 改进。
+### 常用命令
 
 ```sh
 git clone https://github.com/realchendahuang/feedsieve.git
 cd feedsieve
 pnpm install
-git config core.hooksPath .githooks   # 启用 pre-push 本地质量门禁
+git config core.hooksPath .githooks     # 启用本地 pre-push 质量门禁
+
+pnpm verify                   # 执行全量质量门禁（Lint + Typecheck + 全量单测 + 扩展构建）
+pnpm build:extension          # 编译扩展，产物位于 apps/extension/.output/chrome-mv3
+pnpm keyword-packs:build      # 由公开 YAML 词库构建签名官方词库 JSON
+pnpm release 0.12.3         # 发版：校验 CHANGELOG → verify → tag → GitHub Release
 ```
 
-PR 与 push 由 GitHub Actions 验证（`.github/workflows/verify.yml`：lint / 词库校验 / typecheck / 测试 / 扩展构建 / 依赖审计）；pre-push 钩子执行 `pnpm verify`（lint + 词库校验 + typecheck + 全部测试 + community-api workerd 测试 + 扩展构建）作为提交前的本地门禁。贡献规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+贡献准则见 [`CONTRIBUTING.md`](CONTRIBUTING.md)；设计文档在 [`docs/`](docs/README.md)。
 
-## 本地开发
-
-| 目录 | 内容 |
-| --- | --- |
-| `packages/detector` | 检测器纯逻辑，可独立单测 |
-| `packages/x-adapter` | X 页面读取与原生动作适配 |
-| `packages/block-queue` | 持久化拉黑队列 |
-| `packages/community-lists` | 社区名单消费协议 |
-| `apps/extension` | WXT + React 19 扩展本体（Manifest V3） |
-| `apps/community-api` | Cloudflare Workers + Hono + D1 社区后端 |
-| `apps/admin` | React + Tailwind 维护后台 |
-| `community/` | YAML 名单、词库源、Schema、快照镜像 |
-
-常用命令：
-
-```sh
-pnpm verify                 # lint + 词库校验 + typecheck + 全部测试 + 扩展构建
-pnpm build:extension        # 构建扩展，产物在 apps/extension/.output/chrome-mv3
-pnpm keyword-packs:build    # 由公开词库源构建官方词库 JSON
-```
-
-技术栈：WXT · React 19 · TypeScript · Manifest V3 · Vitest · Cloudflare Workers + Hono + D1 + R2（E2E 层 Playwright 规划中，尚未引入）。
+---
 
 ## Star History
 
@@ -195,6 +252,18 @@ pnpm keyword-packs:build    # 由公开词库源构建官方词库 JSON
   </picture>
 </p>
 
-## License
+---
 
-[MIT](LICENSE)
+## 开源许可
+
+本项目依据 [MIT License](LICENSE) 开源。
+
+### 开源范围
+
+- **开源**：浏览器扩展、检测器、拉黑队列、X 适配层、社区 API、名单评分算法、名单 Schema、公开名单与词库、生成脚本。
+- **闭源**：小筛子周刊（作者的另一款产品，独立仓库、独立服务）。它不依赖本仓库代码，也不接触本仓库的用户数据。
+- **商标不在许可范围内**：FeedSieve、福滤娃、小筛子周刊 的名称与图标归作者所有。fork 可以改代码，但上架商店时请换名称与图标——商店要求唯一名称，也避免用户混淆。
+
+### 开源不等于没有门禁
+
+只接受 PR；名单改动必须过 Schema 校验与净票阈值；商店包由维护者本机签名发布，PR 不打包。

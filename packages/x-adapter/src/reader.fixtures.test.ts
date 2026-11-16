@@ -20,11 +20,7 @@ describe('fixtures/x reader 契约', () => {
       extractFeedItem(a, contextFromPath('/home')),
     );
 
-    expect(items.map((i) => i?.author.handle)).toEqual([
-      'normaluser',
-      'spamking88',
-      'cndon91',
-    ]);
+    expect(items.map((i) => i?.author.handle)).toEqual(['normaluser', 'spamking88', 'cndon91']);
     expect(items[1]?.text).toContain('500 USDT Giveaway');
     expect(items[1]?.links.map((l) => l.hostname)).toContain('t.co');
     expect(items[1]?.links.every((l) => !l.href.startsWith('https://x.com'))).toBe(true);

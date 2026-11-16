@@ -16,7 +16,7 @@ export interface PageSeo {
 }
 
 /** OG 图缓存破坏版本（发布期手动 +1）；走环境变量的原因：随快照节奏走 */
-const OG_VERSION = (globalThis as { __FS_OG_V__?: number }).__FS_OG_V__ ?? 1;
+const OG_VERSION = (globalThis as { __FS_OG_V__?: number }).__FS_OG_V__ ?? 2;
 
 function ogImageUrl(ogImage: string | undefined): string {
   if (!ogImage) return `${SITE_URL}/og/site.png?v=${OG_VERSION}`;

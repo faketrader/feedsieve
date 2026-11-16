@@ -81,7 +81,7 @@ export async function getBundledEntries(): Promise<unknown> {
 export interface CommunitySettings {
   /** 社区名单总开关（关掉后只跑启发式 + 内置名单） */
   enabled: boolean;
-  /** 标注强度：清爽 / 标准 / 大扫除 */
+  /** 识别灵敏度：清爽 / 标准 / 大扫除 */
   strength: MarkStrength;
   /**
    * 同步用户明确维护的本地黑名单/白名单（默认开，全局开关，绝无逐条弹窗）。
@@ -90,12 +90,24 @@ export interface CommunitySettings {
    * 不上传浏览历史、推文原文或任何被动页面记录。
    */
   autoContribute: boolean;
+  /**
+   * 参与全站热榜（默认开；「仅本地运行」打开时一并停止）：上报浏览时 X 已加载的公开帖子指标，
+   * 不带安装 ID 和自己的 X 账号，见 src/lib/insight/hot-uplink.ts。
+   */
+  hotContribute: boolean;
+  /**
+   * 上报规则命中（默认开；「仅本地运行」打开时一并停止）：本地规则打了黄框的账号和规则 ID，
+   * 匿名报给服务器做误伤统计与佐证，不是票，见 src/lib/community/rule-hit-uplink.ts。
+   */
+  hitContribute: boolean;
 }
 
 export const DEFAULT_COMMUNITY_SETTINGS: CommunitySettings = {
   enabled: true,
   strength: DEFAULT_MARK_STRENGTH,
   autoContribute: true,
+  hotContribute: true,
+  hitContribute: true,
 };
 
 /**
@@ -191,6 +203,8 @@ export async function getCommunitySettings(): Promise<CommunitySettings> {
     enabled: value['enabled'] !== false,
     strength: isMarkStrength(value['strength']) ? value['strength'] : DEFAULT_MARK_STRENGTH,
     autoContribute: value['autoContribute'] !== false,
+    hotContribute: value['hotContribute'] !== false,
+    hitContribute: value['hitContribute'] !== false,
   };
 }
 
@@ -253,6 +267,8 @@ export interface RuntimeCommunity {
   version: string;
   /** 官方破坏性动作暂停开关（来自签名快照，随验签后的快照生效） */
   killSwitch?: { destructive_actions_disabled: true; reason?: string; disabled_since?: string };
+  /** 静音规则（政策 v4，误伤率超线）：检测管线不再用它们标黄框 */
+  mutedRules?: ReadonlySet<string>;
 }
 
 /** 内容脚本用：快照 + 设置 -> 可用索引；关闭或无快照返回 null */
@@ -308,5 +324,6 @@ export async function buildRuntimeCommunity(): Promise<RuntimeCommunity | null> 
     campaignByFingerprint,
     version: index.version,
     ...(parsed.value.kill_switch ? { killSwitch: parsed.value.kill_switch } : {}),
+    mutedRules: new Set(parsed.value.muted_rules ?? []),
   };
 }

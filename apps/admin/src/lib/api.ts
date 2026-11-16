@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 export interface Dashboard {
-  /** 社区净票达标数（进入公开名单的来源之一） */
+  /** 在当前公开名单里的社区账号（政策 v4 口径，快照发布写入） */
   community_listed: number;
   /** 未达标的社区候选账号 */
   community_candidates: number;
@@ -29,6 +29,10 @@ export interface CommunityCandidate {
   allowed_installs: number;
   fingerprints: number;
   domains: number;
+  /** 最近 7 天被本地规则命中的不同网段数（≥ 3 且净票 ≥ 2、无误标时佐证上榜） */
+  hit_networks_7d: number;
+  /** 在当前公开名单里（政策 v4 口径） */
+  listed: boolean;
   sources: string[];
   first_report_at: number;
   updated_at: number;
@@ -175,6 +179,8 @@ const communityCandidateSchema = z.object({
   allowed_installs: z.number(),
   fingerprints: z.number(),
   domains: z.number(),
+  hit_networks_7d: z.number().default(0),
+  listed: z.boolean().default(false),
   sources: z.array(z.string()),
   first_report_at: z.number(),
   updated_at: z.number(),
@@ -479,4 +485,53 @@ export const reviewSample = (id: number, review: import('@feedsieve/shared').Sam
   request<{ changed: boolean }>(`/samples/${id}/review`, {
     method: 'POST',
     body: JSON.stringify(review),
+  });
+
+// ---------- AI 号复核 ----------
+const aiReviewItemSchema = z.object({
+  handle: z.string(),
+  verdict: z.string().nullable(),
+  score: z.number().nullable(),
+  confirmed: z.boolean(),
+  judged_at: z.number().nullable(),
+  ai_count: z.number(),
+  human_count: z.number(),
+  appeals: z.array(z.object({ id: z.number(), statement: z.string(), created_at: z.number() })),
+});
+const aiReviewsSchema = z.object({
+  items: z.array(aiReviewItemSchema),
+  outcomes: z.record(z.string(), z.number()),
+});
+export type AiReviewItem = z.infer<typeof aiReviewItemSchema>;
+export type AiReviews = z.infer<typeof aiReviewsSchema>;
+export const getAiReviews = () => request<AiReviews>('/ai-reviews', {}, aiReviewsSchema);
+export const decideAiReview = (handle: string, decision: 'human' | 'keep') =>
+  request<{ ok: true }>(`/ai-reviews/${encodeURIComponent(handle)}`, {
+    method: 'POST',
+    body: JSON.stringify({ decision }),
+  });
+
+// 规则误伤（规则命中众包，见 community-api src/rule-hits.ts）
+const ruleFeedbackSchema = z.object({
+  rules: z.array(
+    z.object({
+      rule_id: z.string(),
+      hit_accounts: z.number(),
+      hit_nets: z.number(),
+      rescue_accounts: z.number(),
+      rescue_installs: z.number(),
+      fp_rate: z.number().nullable(),
+      state: z.enum(['active', 'muted', 'exempt']),
+      muted_at: z.number().optional(),
+    }),
+  ),
+  policy: z.record(z.string(), z.unknown()),
+});
+export type RuleFeedback = z.infer<typeof ruleFeedbackSchema>;
+export const getRuleFeedback = () =>
+  request<RuleFeedback>('/rule-feedback', {}, ruleFeedbackSchema);
+export const setRuleMuted = (ruleId: string, muted: boolean) =>
+  request<{ ok: true }>(`/rule-feedback/${encodeURIComponent(ruleId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ muted }),
   });

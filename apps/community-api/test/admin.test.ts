@@ -1,6 +1,9 @@
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
+import { getDb } from '../src/db/client';
+import { accounts } from '../src/db/schema';
 
 const ORIGIN = 'https://api.example.com';
 
@@ -25,7 +28,12 @@ async function report(installationId: string, handle: string) {
 
 describe('管理后台安全边界', () => {
   it('retires the public string-HTML page and every legacy bearer-token endpoint', async () => {
-    for (const path of ['/maintainer', '/admin/publish', '/admin/blocklist', '/admin/community-votes']) {
+    for (const path of [
+      '/maintainer',
+      '/admin/publish',
+      '/admin/blocklist',
+      '/admin/community-votes',
+    ]) {
       const response = await fetchApi(path, {
         method: path === '/admin/publish' ? 'POST' : 'GET',
         headers: { authorization: 'Bearer ignored-even-if-present' },
@@ -43,9 +51,10 @@ describe('管理后台安全边界', () => {
     ];
     for (const id of installs) await report(id, 'review_user');
 
-    const row = await env.DB.prepare('SELECT status, report_count FROM accounts WHERE handle = ?1')
-      .bind('review_user')
-      .first<{ status: string; report_count: number }>();
+    const [row] = await getDb(env)
+      .select({ status: accounts.status, report_count: accounts.reportCount })
+      .from(accounts)
+      .where(eq(accounts.handle, 'review_user'));
     expect(row).toEqual({ status: 'strong', report_count: 3 });
   });
 });

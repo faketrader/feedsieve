@@ -2,6 +2,8 @@ import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
 import { hashInstallationId } from '../src/lib/hash';
+import { sql, type SQL } from 'drizzle-orm';
+import { getDb } from '../src/db/client';
 
 const ORIGIN = 'https://api.example.com';
 
@@ -30,10 +32,15 @@ async function postReports(installationId: string, handle: string): Promise<Resp
   );
 }
 
+async function first<T extends Record<string, unknown>>(query: SQL): Promise<T | null> {
+  const [row] = await getDb(env).execute<T>(query);
+  return (row ?? null) as T | null;
+}
+
 async function accountRow(handle: string) {
-  return env.DB.prepare('SELECT status, report_count, rescue_count FROM accounts WHERE handle = ?1')
-    .bind(handle)
-    .first<{ status: string; report_count: number; rescue_count: number }>();
+  return first<{ status: string; report_count: number; rescue_count: number }>(
+    sql`SELECT status, report_count, rescue_count FROM accounts WHERE handle = ${handle}`,
+  );
 }
 
 async function report3(handle: string): Promise<void> {
@@ -108,17 +115,15 @@ describe('POST /v1/rescues', () => {
     const body = (await res.json()) as { results: { status: string }[] };
     expect(body.results[0]!.status).toBe('unknown');
 
-    const feedback = await env.DB.prepare(
-      `SELECT detection_source, rule_id, detection_reason, client_version
-       FROM rescues WHERE handle = ?1`,
-    )
-      .bind(handle)
-      .first<{
-        detection_source: string;
-        rule_id: string;
-        detection_reason: string;
-        client_version: string;
-      }>();
+    const feedback = await first<{
+      detection_source: string;
+      rule_id: string;
+      detection_reason: string;
+      client_version: string;
+    }>(
+      sql`SELECT detection_source, rule_id, detection_reason, client_version
+          FROM rescues WHERE handle = ${handle}`,
+    );
     expect(feedback).toMatchObject({
       detection_source: 'heuristic',
       rule_id: 'default-name-digits',
@@ -213,11 +218,9 @@ describe('rescues 配额（原子条件 UPSERT）', () => {
       rescues: [{ handle: 'quota_done' }],
     });
     // 直接把今日额度注满（limit 50）
-    await env.DB.prepare(
-      'UPDATE installations SET rescues_day = ?2, rescues_today = 50 WHERE id = ?1',
-    )
-      .bind(hash, today)
-      .run();
+    await getDb(env).execute(
+      sql`UPDATE installations SET rescues_day = ${today}, rescues_today = 50 WHERE id = ${hash}`,
+    );
 
     // 已生效的 allowed 标签重试：幂等，不占额度
     const retry = await postRescues({

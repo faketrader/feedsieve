@@ -14,7 +14,9 @@
 community
   每个安装对每个账号只有一个当前选择
   净票数 = 拉黑票 - 误标票
-  净票数 >= 3 时进入；低于 3 时自动退出
+  共识上榜：净票数 >= 3，且（拉黑票横跨 >= 2 天 / 加权共识达标 / 净票数 >= 5）
+  佐证上榜：净票数 >= 2、没有误标票，且最近 7 天被 >= 3 个网段的用户的本地规则命中
+  条件不再满足时自动退出；探活确认已注销 / 冻结的账号不再下发
 
 maintainer
   维护者通过受 Cloudflare Access 保护的管理后台明确加入或撤销
@@ -32,12 +34,15 @@ final blocklist = community ∪ maintainer
 - [`lists/blocklist.yaml`](lists/blocklist.yaml)：当前公开名单的人类可读版本，适合 GitHub 阅读、Diff 和审计。
 - [`lists/official.json`](lists/official.json)：内容相同的机器版本，供扩展校验后建立本地索引。
 - [`lists/manifest.json`](lists/manifest.json)：版本、政策版本、条目数和两个文件的 SHA-256。
-- [`policy/v3.yaml`](policy/v3.yaml)：唯一阈值、计票与维护者来源的公开政策。
+- [`policy/v4.yaml`](policy/v4.yaml)：当前政策（2026-10-31 起）：阈值、独立性、规则命中佐证、误伤静音与维护者来源。
+- [`policy/v3.yaml`](policy/v3.yaml)：上一版政策，留档。
 - [`schema/account-list.schema.json`](schema/account-list.schema.json)：JSON 快照协议。
 
-`lists/` 是线上 Worker 快照的仓库镜像，由 [`../scripts/mirror-community-lists.sh`](../scripts/mirror-community-lists.sh) 下载全部 manifest 文件并逐个验证 SHA-256。GitHub Actions 每天 01:17 UTC 自动镜像一次（[`../.github/workflows/mirror-community-lists.yml`](../.github/workflows/mirror-community-lists.yml)，无变化不产生提交），发版前或名单大变化后也可手动运行。镜像不承诺实时：线上快照默认按“当日一版”发布（当天首次实质变化后 ≤1 小时公开），维护者后台 / Agent 显式发布产生的新版本跳过当日节流即时公开，因此同一天可能有多版；权威数据始终以 Worker API 为准。
+`lists/` 是线上 Worker 快照的仓库镜像，由 [`../scripts/mirror-community-lists.sh`](../scripts/mirror-community-lists.sh) 下载全部 manifest 文件并逐个验证 SHA-256。发版前或名单大变化后由维护者手动运行并提交。镜像不承诺实时：线上快照每 30 分钟检查一次、两版至少隔 25 分钟，扩展按增量（`/v1/snapshots/delta/:from/:to`）同步，增量套在旧版上重建的全文必须与签名 manifest 的 SHA-256 一致，否则退回全量；维护者后台 / Agent 显式发布即时公开。权威数据始终以 Worker API 为准。
 
-**官方暂停开关（kill switch）的时效**：破坏性操作暂停与否以部署配置实时状态为准，扩展在任何破坏性动作执行前查询 `GET /v1/kill-switch`（no-store，不受快照日更节流）。快照里携带的 `kill_switch` 仅作存档与离线兜底，可能滞后到次日。
+**官方暂停开关（kill switch）的时效**：破坏性操作暂停与否以部署配置实时状态为准，扩展在任何破坏性动作执行前查询 `GET /v1/kill-switch`（no-store，不受快照节流）。快照里携带的 `kill_switch` 仅作存档与离线兜底，可能滞后半小时。
+
+**静音规则（muted_rules）**：快照顶层的 `muted_rules` 列出误伤率超线、已自动静音（或维护者手动静音）的规则 ID，扩展不再用这些规则标黄框。规则命中上报、误伤统计与静音阈值见 `policy/v4.yaml` 的 `rule_feedback`。
 
 ## 快照条目
 
@@ -53,6 +58,7 @@ final blocklist = community ∪ maintainer
 | `rescue_count`                     | 当前独立误标票数                         |
 | `net_votes`                        | 两者之差；仅作解释，客户端不重算入榜资格 |
 | `evidence_post_ids`                | 可选公开证据推文 ID                      |
+| `listed_by`                        | 只在佐证上榜时出现，值为 `corroborated`  |
 
 公开快照不包含安装哈希、IP、Cookie、X 凭证、浏览历史或原始推文文本。
 

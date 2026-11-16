@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 误伤申诉 / 入册申请
-    url: https://feedsieve.win/lists/apply
-    about: 误伤申诉与白名单自荐的网页通道（不入 GitHub）
+  - name: 安全漏洞（私密报告）
+    url: https://github.com/realchendahuang/feedsieve/security/advisories/new
+    about: 不要用公开 issue 报告安全问题
+  - name: 使用教程与常见问题
+    url: https://feedsieve.win/guide
+    about: 装不上、看不到黄框、热帖为空，先看这里

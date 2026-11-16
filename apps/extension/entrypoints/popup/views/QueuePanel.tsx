@@ -12,8 +12,8 @@ interface QueuePanelProps {
 }
 
 /**
- * 批量拉黑进行中/已暂停的进度面板。页面批（清理页）与社区批（名单页）
- * 共用同一队列，各自在触发它的页面展示。
+ * 批量拉黑进行中/已暂停的进度。页面批与社区批共用同一队列，
+ * 各自显示在清理页里触发它的那一块下面。
  */
 export default function QueuePanel({
   language,
@@ -28,11 +28,22 @@ export default function QueuePanel({
   return (
     <div className="queue-panel">
       <div className="queue-line">
-        <span>
-          {queue.source === 'page-batch' ? t.pageMarked : t.communityClean} ·{' '}
-          {t.queueProgress(done, total)}
-        </span>
+        <span>{t.queueProgress(done, total)}</span>
         <strong>{statusLabel}</strong>
+        <span className="toolbar-end">
+          {queue.status === 'running' ? (
+            <button type="button" className="text-button" onClick={() => onControl('pause')}>
+              {t.pause}
+            </button>
+          ) : (
+            <button type="button" className="text-button" onClick={() => onControl('resume')}>
+              {queue.pauseReason === 'quota_exhausted' ? t.resumeAnyway : t.resume}
+            </button>
+          )}
+          <button type="button" className="text-button" onClick={() => onControl('cancel')}>
+            {t.cancel}
+          </button>
+        </span>
       </div>
       <div className="queue-track" aria-hidden="true">
         <div
@@ -40,27 +51,8 @@ export default function QueuePanel({
           style={{ width: `${Math.round((done / Math.max(total, 1)) * 100)}%` }}
         />
       </div>
-      {queue.status === 'running' ? (
-        <div className="queue-actions">
-          <button className="secondary-inline" onClick={() => onControl('pause')}>
-            {t.pause}
-          </button>
-          <button className="text-action" onClick={() => onControl('cancel')}>
-            {t.cancel}
-          </button>
-        </div>
-      ) : queue.status === 'paused' ? (
-        <div className="queue-actions">
-          <button className="secondary-inline" onClick={() => onControl('resume')}>
-            {queue.pauseReason === 'quota_exhausted' ? t.resumeAnyway : t.resume}
-          </button>
-          <button className="text-action" onClick={() => onControl('cancel')}>
-            {t.cancel}
-          </button>
-        </div>
-      ) : null}
       {pauseNote ? (
-        <p className="queue-pause-note" role="status">
+        <p className="queue-note" role="status">
           {pauseNote}
         </p>
       ) : null}

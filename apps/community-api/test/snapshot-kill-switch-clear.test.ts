@@ -1,6 +1,8 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
+import { getDb } from '../src/db/client';
+import { snapshots } from '../src/db/schema';
 import { getSnapshotFile, killSwitchNeedsPublish, SNAPSHOT_PACK } from '../src/snapshot';
 
 const ORIGIN = 'https://api.example.com';
@@ -31,21 +33,19 @@ describe('stale kill_switch archive cleanup', () => {
       null,
       2,
     )}\n`;
-    await env.DB.prepare(
-      `INSERT INTO snapshots (version, manifest_json, signature_json, files_json, created_at)
-       VALUES (?1, ?2, ?3, ?4, ?5)`,
-    )
-      .bind(
-        staleVersion,
-        JSON.stringify({
+    await getDb(env)
+      .insert(snapshots)
+      .values({
+        version: staleVersion,
+        manifestJson: JSON.stringify({
           schema_version: 2,
           policy_version: 3,
           snapshot_version: staleVersion,
           generated_at: `${yesterday.replaceAll('.', '-')}T00:00:00Z`,
           files: [],
         }),
-        JSON.stringify({ key_id: 'release-1', alg: 'ed25519', sig: 'stale' }),
-        JSON.stringify({
+        signatureJson: JSON.stringify({ key_id: 'release-1', alg: 'ed25519', sig: 'stale' }),
+        filesJson: JSON.stringify({
           [SNAPSHOT_PACK]: {
             path: SNAPSHOT_PACK,
             sha256: 'stale-body',
@@ -53,9 +53,8 @@ describe('stale kill_switch archive cleanup', () => {
             body: staleBody,
           },
         }),
-        Math.floor(Date.now() / 1000) - 86400,
-      )
-      .run();
+        createdAt: Math.floor(Date.now() / 1000) - 86400,
+      });
 
     expect(await killSwitchNeedsPublish(env)).toBe(true);
     await worker.scheduled({ scheduledTime: Date.now() } as never, env);

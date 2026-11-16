@@ -43,8 +43,7 @@ export interface FollowingSyncDeps {
 }
 
 export type FollowingSyncStartResult =
-  | { status: 'navigating'; url: string }
-  | { status: 'error'; error: string };
+  { status: 'navigating'; url: string } | { status: 'error'; error: string };
 
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
@@ -187,10 +186,7 @@ export function createFollowingSync(deps: FollowingSyncDeps = {}) {
   }
 
   /** 默认分页取数：复用页面会话（csrf + cookie）请求 Following 时间线下一页。 */
-  async function defaultFetchPage(
-    sourceUrl: string,
-    cursor: string,
-  ): Promise<ParsedApiData> {
+  async function defaultFetchPage(sourceUrl: string, cursor: string): Promise<ParsedApiData> {
     const csrf = readCsrfToken();
     if (!csrf) throw new Error('missing_csrf');
     const url = new URL(sourceUrl);

@@ -1,6 +1,8 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
+import { sql, type SQL } from 'drizzle-orm';
+import { getDb } from '../src/db/client';
 import { hashInstallationId } from '../src/lib/hash';
 
 const ORIGIN = 'https://api.example.com';
@@ -18,12 +20,15 @@ async function post(path: string, body: unknown): Promise<Record<string, unknown
   return (await response.json()) as Record<string, unknown>;
 }
 
+async function first<T extends Record<string, unknown>>(query: SQL): Promise<T | null> {
+  const [row] = await getDb(env).execute<T>(query);
+  return (row ?? null) as T | null;
+}
+
 async function account(handle: string) {
-  return env.DB.prepare(
-    'SELECT status, report_count, rescue_count, category FROM accounts WHERE handle = ?1',
-  )
-    .bind(handle)
-    .first<{ status: string; report_count: number; rescue_count: number; category: string }>();
+  return first<{ status: string; report_count: number; rescue_count: number; category: string }>(
+    sql`SELECT status, report_count, rescue_count, category FROM accounts WHERE handle = ${handle}`,
+  );
 }
 
 describe('active labels（每安装每账号只保留最后判断）', () => {
@@ -55,20 +60,16 @@ describe('active labels（每安装每账号只保留最后判断）', () => {
 
     const installHash = await hashInstallationId(env.INSTALLATION_SALT, installationId);
     expect(
-      await env.DB.prepare(
-        'SELECT label FROM active_labels WHERE installation_id = ?1 AND handle = ?2',
-      )
-        .bind(installHash, handle)
-        .first<{ label: string }>(),
+      await first<{ label: string }>(
+        sql`SELECT label FROM active_labels WHERE installation_id = ${installHash} AND handle = ${handle}`,
+      ),
     ).toEqual({ label: 'allowed' });
     expect(
-      await env.DB.prepare(
-        `SELECT
-             (SELECT COUNT(*) FROM reports WHERE installation_id = ?1 AND handle = ?2) AS reports,
-             (SELECT COUNT(*) FROM rescues WHERE installation_id = ?1 AND handle = ?2) AS rescues`,
-      )
-        .bind(installHash, handle)
-        .first<{ reports: number; rescues: number }>(),
+      await first<{ reports: number; rescues: number }>(
+        sql`SELECT
+             (SELECT COUNT(*) FROM reports WHERE installation_id = ${installHash} AND handle = ${handle}) AS reports,
+             (SELECT COUNT(*) FROM rescues WHERE installation_id = ${installHash} AND handle = ${handle}) AS rescues`,
+      ),
     ).toEqual({ reports: 1, rescues: 1 });
 
     const result = await post('/v1/reports', {
@@ -116,9 +117,7 @@ describe('active labels（每安装每账号只保留最后判断）', () => {
       rescue_count: 0,
     });
     expect(
-      await env.DB.prepare('SELECT COUNT(*) AS n FROM reports WHERE handle = ?1')
-        .bind(handle)
-        .first<{ n: number }>(),
+      await first<{ n: number }>(sql`SELECT COUNT(*) AS n FROM reports WHERE handle = ${handle}`),
     ).toEqual({ n: 1 });
   });
 
@@ -147,11 +146,9 @@ describe('active labels（每安装每账号只保留最后判断）', () => {
       category: 'copy_paste',
     });
     expect(
-      await env.DB.prepare(
-        'SELECT reason, content_fingerprint, link_domains FROM reports WHERE handle = ?1',
-      )
-        .bind(handle)
-        .first<Record<string, unknown>>(),
+      await first<Record<string, unknown>>(
+        sql`SELECT reason, content_fingerprint, link_domains FROM reports WHERE handle = ${handle}`,
+      ),
     ).toMatchObject({
       reason: 'copy_paste',
       content_fingerprint: '0123456789abcdef',
@@ -193,13 +190,11 @@ describe('撤回每日配额', () => {
     // 预置：当日配额已用满
     const installHash = await hashInstallationId(env.INSTALLATION_SALT, installationId);
     const today = new Date().toISOString().slice(0, 10);
-    await env.DB.prepare(
-      `INSERT INTO installations (id, first_seen_at, last_seen_at, retracts_day, retracts_today)
-       VALUES (?1, ?2, ?2, ?3, 50)
-       ON CONFLICT(id) DO UPDATE SET retracts_day = excluded.retracts_day, retracts_today = 50`,
-    )
-      .bind(installHash, Math.floor(Date.now() / 1000), today)
-      .run();
+    const nowSec = Math.floor(Date.now() / 1000);
+    await getDb(env).execute(sql`
+      INSERT INTO installations (id, first_seen_at, last_seen_at, retracts_day, retracts_today)
+      VALUES (${installHash}, ${nowSec}, ${nowSec}, ${today}, 50)
+      ON CONFLICT(id) DO UPDATE SET retracts_day = excluded.retracts_day, retracts_today = 50`);
 
     const capped = await worker.fetch(
       new Request(`${ORIGIN}/v1/labels/retract`, {
@@ -212,33 +207,29 @@ describe('撤回每日配额', () => {
     expect(capped.status).toBe(429);
     expect(((await capped.json()) as Record<string, unknown>).error).toBe('rate_limited');
     // 拒绝时不落撤回：标签仍在
-    const label = await env.DB.prepare(
-      'SELECT 1 AS present FROM active_labels WHERE installation_id = ?1 AND handle = ?2',
-    )
-      .bind(installHash, handle)
-      .first();
+    const label = await first(
+      sql`SELECT 1 AS present FROM active_labels WHERE installation_id = ${installHash} AND handle = ${handle}`,
+    );
     expect(label).not.toBeNull();
 
     // 重置配额后同一撤回成功
-    await env.DB.prepare('UPDATE installations SET retracts_today = 0 WHERE id = ?1')
-      .bind(installHash)
-      .run();
-    const ok = await post('/v1/labels/retract', { installation_id: installationId, handles: [handle] });
+    await getDb(env).execute(
+      sql`UPDATE installations SET retracts_today = 0 WHERE id = ${installHash}`,
+    );
+    const ok = await post('/v1/labels/retract', {
+      installation_id: installationId,
+      handles: [handle],
+    });
     expect(ok.results).toEqual([{ handle, status: 'retracted' }]);
   });
 
   it('对无标签 handle 的空撤回不消耗配额（重试幂等）', async () => {
     const installationId = 'retract-cap-0002-bbbbbbbb';
-    await env.DB.prepare(
-      'INSERT INTO installations (id, first_seen_at, last_seen_at, retracts_day, retracts_today) VALUES (?1, ?2, ?2, ?3, ?4)',
-    )
-      .bind(
-        await hashInstallationId(env.INSTALLATION_SALT, installationId),
-        Math.floor(Date.now() / 1000),
-        new Date().toISOString().slice(0, 10),
-        50,
-      )
-      .run();
+    const nowSec = Math.floor(Date.now() / 1000);
+    await getDb(env).execute(sql`
+      INSERT INTO installations (id, first_seen_at, last_seen_at, retracts_day, retracts_today)
+      VALUES (${await hashInstallationId(env.INSTALLATION_SALT, installationId)}, ${nowSec}, ${nowSec},
+              ${new Date().toISOString().slice(0, 10)}, 50)`);
     const res = await post('/v1/labels/retract', {
       installation_id: installationId,
       handles: ['never_reported'],

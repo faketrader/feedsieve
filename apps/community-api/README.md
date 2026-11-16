@@ -1,6 +1,6 @@
 # @feedsieve/community-api
 
-FeedSieve 社区名单与公开关键词后端：Cloudflare Worker + Hono + D1 + R2。D1 收上报、攒名单；R2 分发版本化的公开关键词包。
+FeedSieve 社区名单与公开关键词后端：Cloudflare Worker + Hono + PostgreSQL（Drizzle，经 Hyperdrive）+ R2。PostgreSQL 收上报、攒名单；R2 分发版本化的公开关键词包。
 
 官方实例由项目维护者部署运营（API 地址不在仓库内硬编码；扩展内嵌地址见 `apps/extension/wxt.config.ts` 与 `src/lib/community-store.ts` 的运行必需常量，脚本与 skill 走 `FEEDSIEVE_API` 环境变量或本地 `~/.config/feedsieve/api-base`）。
 **代码完全开源，任何人都可以部署自己的实例。**
@@ -11,35 +11,51 @@ FeedSieve 社区名单与公开关键词后端：Cloudflare Worker + Hono + D1 +
 
 | 内容                                     | 位置                           | 是否入库                                  |
 | ---------------------------------------- | ------------------------------ | ----------------------------------------- |
-| 全部源码 / schema / 测试                 | `src/` `migrations/` `test/`   | ✅ 提交                                   |
-| 公开 Worker 配置（占位 database_id）     | `wrangler.jsonc`               | ✅ 提交                                   |
+| 全部源码 / schema / 迁移 / 测试          | `src/` `drizzle/` `test/`      | ✅ 提交                                   |
+| 公开 Worker 配置（占位 Hyperdrive id）   | `wrangler.jsonc`               | ✅ 提交                                   |
 | 私有配置模板                             | `wrangler.local.example.jsonc` | ✅ 提交                                   |
-| 真实 account_id / database_id / 域名路由 | `wrangler.local.jsonc`         | ❌ gitignored                             |
+| 真实 account_id / Hyperdrive id / 域名路由 | `wrangler.local.jsonc`         | ❌ gitignored                             |
 | 线上密钥                                 | `wrangler secret put`          | ❌ 只存在 Cloudflare                      |
 | 本地开发密钥                             | `.dev.vars`                    | ❌ gitignored（提交 `.dev.vars.example`） |
 
-隐私红线（见 `docs/OPEN_SOURCE_GOVERNANCE.md` §5）：举报者侧数据只存服务器加盐哈希，IP / 原始安装 UUID 永不落库、永不公开。
+隐私红线：举报者侧数据只存服务器加盐哈希，IP / 原始安装 UUID 永不落库、永不公开。
 
 ## 本地开发
 
 ```sh
 pnpm install
 cp .dev.vars.example .dev.vars
-pnpm dev        # vite dev（TanStack Start SSR + Hono API），本地 workerd + 本地 D1
-pnpm test       # vitest + @cloudflare/vitest-plugin，真 workerd + 真迁移
+docker compose up -d postgres   # 仓库根目录：本地 PostgreSQL 17（127.0.0.1:54330）
+pnpm db:migrate                 # 本地库跑 drizzle/ 下的迁移
+pnpm dev        # vite dev（TanStack Start SSR + Hono API），本地 workerd + 本地 PostgreSQL
+pnpm test       # vitest + @cloudflare/vitest-plugin：真 workerd，连本地 feedsieve_test 库（自动建库、迁移、按文件清表）
 pnpm typecheck
 ```
+
+改表：改 `src/db/schema.ts` → `pnpm db:generate --name <名字>` → 审阅 `drizzle/` 下生成的 SQL → 和代码一起提交。
+线上迁移：`DATABASE_URL=<线上连接串> pnpm db:migrate`，先迁移再部署代码。
+数据库要用 C 排序规则建库（`locale_provider builtin builtin_locale 'C'`），快照内容的排序依赖字节序。
 
 ## 部署你自己的实例
 
 ```sh
 wrangler login
-wrangler d1 create feedsieve-community        # 记下输出的 database_id
+# 准备一个 PostgreSQL 17 库（C 排序规则）：
+#   create database feedsieve template template0 locale_provider builtin builtin_locale 'C';
+DATABASE_URL=postgres://… pnpm db:migrate
+wrangler hyperdrive create feedsieve-postgres --connection-string=postgres://… --caching-disabled   # 记下 id
 wrangler r2 bucket create feedsieve-keyword-packs
 cp wrangler.local.example.jsonc wrangler.local.jsonc
-#   编辑 wrangler.local.jsonc：填 account_id、database_id、你的域名
-wrangler d1 migrations apply feedsieve-community --remote --config wrangler.local.jsonc
+#   编辑 wrangler.local.jsonc：填 account_id、Hyperdrive id、你的域名
 echo "your-salt" | wrangler secret put INSTALLATION_SALT --config wrangler.local.jsonc
+# AI 号判定：官方实例默认走 goupiti 中转的 DeepSeek V4.1 Flash（OpenAI 兼容 /v1/chat/completions），
+# 由维护者自己配 base URL + key；不配这个通道时回落到 Cloudflare Workers AI 的 Clef（AI binding 已在 wrangler 配置里）。
+# 旧 /v1/ai-accounts/check 的 TikHub 拉回复：
+echo "tikhub-key" | wrangler secret put TIKHUB_API_KEY --config wrangler.local.jsonc
+# HTTP 判定通道（DeepSeek / 任意 OpenAI 兼容服务）的 key（base URL 和模型名写 vars）：
+echo "judge-key" | wrangler secret put AI_JUDGE_HTTP_API_KEY --config wrangler.local.jsonc
+# 只有要接 TypeSafe 直连备用通道时，才需要这个 secret：
+echo "typesafe-key" | wrangler secret put TYPESAFE_API_KEY --config wrangler.local.jsonc
 pnpm --filter @feedsieve/admin build
 pnpm deploy                                   # = wrangler deploy --config wrangler.local.jsonc
 pnpm keyword-packs:publish                    # 发布仓库中已审阅的词库版本到 R2
@@ -47,6 +63,27 @@ curl https://你的域名/healthz
 ```
 
 注意：中国大陆访问 `*.workers.dev` 不可靠，务必绑定自定义域。
+
+### AI 号判定模型网关
+
+判定模型不写死在代码里，按 `AI_JUDGE_PROVIDERS` 的顺序调用，前一个失败自动换下一个（每个 provider 有独立熔断）：
+
+```jsonc
+"vars": {
+  // 官方实例：先走 HTTP 判定服务（DeepSeek），失败再回落 Workers AI 的 Clef
+  "AI_JUDGE_PROVIDERS": "openai-compatible,workers-ai",
+  "AI_JUDGE_HTTP_BASE_URL": "https://你的中转/v1",   // OpenAI 兼容 base（需从 Cloudflare 出网可达）
+  "AI_JUDGE_HTTP_MODEL": "deepseek-v4.1-flash",
+  // "AI_JUDGE_PROVIDERS": "workers-ai",             // 只走 Cloudflare 自家模型
+  "AI_JUDGE_MODEL": "@cf/cloudflare/clef",          // workers-ai 回落到 Clef；也可换 clef-flash
+  // "AI_JUDGE_PROVIDERS": "workers-ai:typesafe/jev-1.14.0",        // 第三方 Jev（会经 AI Gateway，需要 credits）
+  "AI_GATEWAY_ID": "default"                        // 只有第三方模型才需要
+}
+```
+
+HTTP 判定服务按 OpenAI Chat Completions 协议调用（`POST {base}/chat/completions`），非思考模式 + JSON 输出 + temperature 0；只发账号最近的公开回复与回复间隔，不带 handle。
+
+本地 `pnpm dev` 想直接调 AI，需要给 `wrangler.jsonc` 的 `ai` binding 加 `"remote": true`（会连线上账号；fork 默认不开）。新增供应商：实现 `src/ai-accounts/providers/types.ts` 的 `JudgeProvider`，在 `providers/index.ts` 里加一个配置名分支，判定/缓存/熔断/额度逻辑不用动。
 
 ## 维护后台
 
@@ -69,25 +106,25 @@ pnpm deploy
 
 ## 端点
 
-| 端点                                   | 状态 | 说明                                           |
-| -------------------------------------- | ---- | ---------------------------------------------- |
-| `GET /healthz`                         | ✅   | 存活检查                                       |
-| `POST /v1/reports`                     | ✅   | 显式上报（匿名安装哈希、去重、限速，批量 ≤50） |
-| `POST /v1/rescues`                     | ✅   | 显式误标/抢救反馈（可带检测来源、规则与理由）  |
-| `POST /v1/labels/retract`              | ✅   | 本地名单删除后撤回当前票（原始审计证据保留）   |
-| `GET /v1/snapshots/latest`             | ✅   | manifest（版本 + sha256 + 条目数，短缓存）     |
-| `GET /v1/snapshots/:version/:file`     | ✅   | 快照文件（immutable 缓存）                     |
-| `GET /v1/kill-switch`                  | ✅   | 官方暂停开关实时状态（no-store，不受快照日更节流） |
-| `GET /v1/blocklist/latest.yaml`        | ✅   | 当前最终黑名单（人类可读 YAML）                |
-| `GET /v1/blocklist/latest.json`        | ✅   | 当前最终黑名单（机器 JSON）                    |
-| `GET /v1/keyword-packs/latest`         | ✅   | R2 词库 manifest（版本 + SHA-256，短缓存）     |
-| `GET /v1/keyword-packs/:version/:file` | ✅   | R2 版本化词库文件（immutable 缓存）            |
-| `GET /api/admin/dashboard`             | ✅   | 后台概览（仅管理域 + Cloudflare Access）       |
-| `GET/POST/DELETE /api/admin/accounts`  | ✅   | 账号管理，保存/移除即自动发布（仅管理域 + Access） |
-| `POST /api/admin/accounts/publish`     | ✅   | 手动发布（一般无需调用，保存已自动发布）       |
-| `GET/POST/DELETE /api/admin/keywords/*`| ✅   | 词库分类、规则、回退与显式导入（变更即自动发布） |
-| `GET /api/admin/feedback`              | ✅   | 去标识化的误标反馈                             |
-| `GET/POST /api/admin/releases/*`       | ✅   | 发布记录与回退                                 |
+| 端点                                    | 状态 | 说明                                               |
+| --------------------------------------- | ---- | -------------------------------------------------- |
+| `GET /healthz`                          | ✅   | 存活检查                                           |
+| `POST /v1/reports`                      | ✅   | 显式上报（匿名安装哈希、去重、限速，批量 ≤50）     |
+| `POST /v1/rescues`                      | ✅   | 显式误标/抢救反馈（可带检测来源、规则与理由）      |
+| `POST /v1/labels/retract`               | ✅   | 本地名单删除后撤回当前票（原始审计证据保留）       |
+| `GET /v1/snapshots/latest`              | ✅   | manifest（版本 + sha256 + 条目数，短缓存）         |
+| `GET /v1/snapshots/:version/:file`      | ✅   | 快照文件（immutable 缓存）                         |
+| `GET /v1/kill-switch`                   | ✅   | 官方暂停开关实时状态（no-store，不受快照日更节流） |
+| `GET /v1/blocklist/latest.yaml`         | ✅   | 当前最终黑名单（人类可读 YAML）                    |
+| `GET /v1/blocklist/latest.json`         | ✅   | 当前最终黑名单（机器 JSON）                        |
+| `GET /v1/keyword-packs/latest`          | ✅   | R2 词库 manifest（版本 + SHA-256，短缓存）         |
+| `GET /v1/keyword-packs/:version/:file`  | ✅   | R2 版本化词库文件（immutable 缓存）                |
+| `GET /api/admin/dashboard`              | ✅   | 后台概览（仅管理域 + Cloudflare Access）           |
+| `GET/POST/DELETE /api/admin/accounts`   | ✅   | 账号管理，保存/移除即自动发布（仅管理域 + Access） |
+| `POST /api/admin/accounts/publish`      | ✅   | 手动发布（一般无需调用，保存已自动发布）           |
+| `GET/POST/DELETE /api/admin/keywords/*` | ✅   | 词库分类、规则、回退与显式导入（变更即自动发布）   |
+| `GET /api/admin/feedback`               | ✅   | 去标识化的误标反馈                                 |
+| `GET/POST /api/admin/releases/*`        | ✅   | 发布记录与回退                                     |
 
 社区只有一个公式：`report_count - rescue_count >= 3` 时进入最终名单，低于 3 时退出。
 

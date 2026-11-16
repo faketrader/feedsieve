@@ -1,13 +1,12 @@
 /**
  * 公示站数据服务函数（KOSX data.functions.ts 同款模式）：
- * SSR loader 在同一 Worker 内直接调现有取数函数（roster / leaderboard / R2 词库），
- * 不要走 HTTP 自调用；客户端 hydration 后再需要的数据（榜单轮询）走这些
+ * SSR loader 在同一 Worker 内直接调现有取数函数（roster / R2 词库），
+ * 不要走 HTTP 自调用；客户端 hydration 后再需要的数据走这些
  * server function 的 RPC 端点，口径与 /v1 同源。
  */
 import { createServerFn } from '@tanstack/react-start';
 import { env } from 'cloudflare:workers';
 import { getPublicRoster, type RosterPayload } from '../roster';
-import { getLeaderboard, LEADERBOARD, toPublicHunterRow, type HunterRow, type SeasonChampion, type SeasonWindow } from '../leaderboard';
 
 export const getRosterData = createServerFn({ method: 'GET' }).handler(async (): Promise<RosterPayload | null> =>
   getPublicRoster(env),
@@ -105,37 +104,55 @@ function rawRulesToPhrases(raw: Array<Record<string, unknown>>): Array<{ phrase:
     .map((phrase) => ({ phrase }));
 }
 
-/** 榜单公示数据：与 GET /v1/leaderboard 完全同口径（行截断 / id 裁剪）。 */
-export const getRankedData = createServerFn({ method: 'GET' })
-  .validator((scope?: 'week' | 'all') => scope ?? 'week')
-  .handler(async ({ data: scope }): Promise<Omit<PublicBoard, 'me'>> => {
-    const data = await getLeaderboard(env, scope === 'all' ? 'all' : 'week');
-    const rows = data.rows
-      .slice(0, LEADERBOARD.topSize)
-      .map((row, index) => trimRow({ ...row, rank: index + 1 }));
-    return {
-      season: data.season,
-      updated_at: data.computed_at,
-      total: data.rows.length,
-      rows,
-      last_season: data.last_season ?? null,
-    };
+/** 福滤娃周刊热帖（首页「本周 X 精选」模块）。周刊是另一个 Worker（fsw-web），
+ *  经 service binding WEEKLY 调它的公开订阅接口，不共享数据库；拿不到时返回 null，首页照常渲染。 */
+export interface WeeklyPick {
+  id: string;
+  kind: 'curate' | 'self' | 'original';
+  kindLabel: string;
+  board: string | null;
+  title: string;
+  excerpt: string;
+  voteCount: number;
+  commentCount: number;
+  issueNumber: number | null;
+  createdAt: string;
+  author: { handle: string | null; displayName: string } | null;
+  source: { authorName: string | null; authorHandle: string | null; text: string | null; whitelisted: boolean } | null;
+}
+
+export const getWeeklyPicks = createServerFn({ method: 'GET' }).handler(async (): Promise<WeeklyPick[] | null> => {
+  if (!env.WEEKLY) return null;
+  try {
+    const res = await env.WEEKLY.fetch('https://feedsieve.win/weekly/api/public/hot?limit=6', {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { items?: WeeklyPick[] };
+    return Array.isArray(data.items) ? data.items : null;
+  } catch {
+    return null;
+  }
+});
+
+/** AI 味公开结果页（/ai/:handle）：只给可公开的结论，单人未确认的显示「待复核」（见 ai-accounts/public-page.ts） */
+export const getAiPublicData = createServerFn({ method: 'GET' })
+  .validator((data: { handle: string }) => ({ handle: String(data?.handle ?? '').slice(0, 32) }))
+  .handler(async ({ data }) => {
+    const { getAiPublic } = await import('../ai-accounts/public-page');
+    return getAiPublic(env, data.handle);
   });
 
-export interface PublicBoardRow extends HunterRow {
-  rank: number;
-  /** 服务端裁剪到 12 位（匿名哈希前缀，与 /v1/leaderboard 同口径） */
-  id: string;
-}
+/** AI 号广场（/ai）：可公示的 AI / 疑似账号聚合，含主页画像与最近回复样本（见 ai-accounts/square.ts） */
+export const getAiSquareData = createServerFn({ method: 'GET' }).handler(async () => {
+  const { listAiSquare } = await import('../ai-accounts/square');
+  return listAiSquare(env);
+});
 
-export interface PublicBoard {
-  season: SeasonWindow | null;
-  updated_at: number;
-  total: number;
-  rows: PublicBoardRow[];
-  last_season: { id: number; champions: SeasonChampion[] } | null;
-}
-
-function trimRow(row: HunterRow & { rank: number }): PublicBoardRow {
-  return toPublicHunterRow(row) as PublicBoardRow;
-}
+/** AI 号广场单人详情（/ai/:handle）：广场口径的完整条目；不可公示返回 null */
+export const getAiSquareDetail = createServerFn({ method: 'GET' })
+  .validator((data: { handle: string }) => ({ handle: String(data?.handle ?? '').slice(0, 32) }))
+  .handler(async ({ data }) => {
+    const { getAiSquareDetail: load } = await import('../ai-accounts/square');
+    return load(env, data.handle);
+  });

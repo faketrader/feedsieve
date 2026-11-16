@@ -56,7 +56,10 @@ describe('本地检测日志', () => {
 
   it('同一 handle+rule 5 分钟内去重（虚拟滚动重建 DOM 不重复计数）', async () => {
     const now = Date.now();
-    await recordDetection({ handle: 'spam1', ruleId: 'weak-signal-combo', source: 'heuristic' }, now);
+    await recordDetection(
+      { handle: 'spam1', ruleId: 'weak-signal-combo', source: 'heuristic' },
+      now,
+    );
     await recordDetection(
       { handle: 'spam1', ruleId: 'weak-signal-combo', source: 'heuristic' },
       now + 60_000,

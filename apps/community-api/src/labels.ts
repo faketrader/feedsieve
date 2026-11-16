@@ -1,37 +1,21 @@
+import { and, count, countDistinct, eq, inArray, sql } from 'drizzle-orm';
 import { hashInstallationId } from './lib/hash';
 import { deriveStatus } from './rating';
-import { computeConsensusV2, EMPTY_CONSENSUS_V2_INPUT, loadConsensusV2InputsByHandles } from './lib/consensus-v2';
+import {
+  computeConsensusV2,
+  EMPTY_CONSENSUS_V2_INPUT,
+  loadConsensusV2InputsByHandles,
+} from './lib/consensus-v2';
 import { inferCategory, type CategoryVoteRow } from './category-inference';
-import { syncConsensusEvents, type ConsensusTransition } from './leaderboard';
+import { syncConsensusEvents, type ConsensusTransition } from './consensus-events';
 import { validateRescue } from './lib/validate';
+import { getDb, retryOnConflict } from './db/client';
+import { compareText } from './lib/sql';
+import { accounts, activeLabels, installations, reports } from './db/schema';
 
 const MAX_LABEL_BATCH = 50;
-/** 单安装每日撤回上限：报告/撤回无限对拍会反复打脏快照与榜单聚合 */
+/** 单安装每日撤回上限：报告/撤回无限对拍会反复打脏快照 */
 const RETRACT_DAILY_LIMIT = 50;
-/** D1 batch 单次调用与单条查询的绑定参数上限一致，按 100 分片。 */
-export const D1_CHUNK = 100;
-
-/** 批量执行（按 D1_CHUNK 分片）；batch 内语句按序执行，后续语句能看到前面的写入。 */
-export async function batchStatements(
-  env: Cloudflare.Env,
-  statements: D1PreparedStatement[],
-): Promise<void> {
-  for (let index = 0; index < statements.length; index += D1_CHUNK) {
-    await env.DB.batch(statements.slice(index, index + D1_CHUNK));
-  }
-}
-
-/** 批量执行一批读取语句，返回与语句顺序一致的结果数组。 */
-export async function batchReads<T>(
-  env: Cloudflare.Env,
-  reads: D1PreparedStatement[],
-): Promise<D1Result<T>[]> {
-  const all: D1Result<T>[] = [];
-  for (let index = 0; index < reads.length; index += D1_CHUNK) {
-    all.push(...((await env.DB.batch<T>(reads.slice(index, index + D1_CHUNK))) as D1Result<T>[]));
-  }
-  return all;
-}
 
 export type AccountLabel = 'blocked' | 'allowed';
 
@@ -45,11 +29,8 @@ export async function installationHash(
 /**
  * 当前标签是唯一计票源；批量请求（上报 / 抢救 / 撤回）改动一组账号后收敛计数。
  * 逐条版本已并入调用方的批处理推演（见 reports.ts / rescues.ts 的标签内存推演），
- * 这里只保留批量版。
- *
- * 单账号版（refreshAccountFromLabels，N×~10 次 D1 请求）在批量路由里会撞
- * 单次 invocation 的请求上限；这里用 5 条 IN 聚合 SQL + 1 次 batch 写回收敛
- * 任意数量账号，改动单个账号的语义（全量重算防计数漂移）保持不变。
+ * 这里只保留批量版：3 条聚合查询读、1 条 UPDATE … FROM (VALUES …) 写回，任意数量账号都是
+ * 固定次数的往返；改动单个账号的语义（全量重算防计数漂移）保持不变。
  * 返回存在于 accounts 的 handle 集合（调用方据此区分「名单外账号」）。
  */
 export async function refreshAccountsFromLabels(
@@ -60,59 +41,65 @@ export async function refreshAccountsFromLabels(
   if (unique.length === 0) {
     return new Set();
   }
-  const inClause = unique.map((_, index) => `?${index + 1}`).join(', ');
+  const db = getDb(env);
 
-  const [accountRows, blockedRows, allowedRows, voteRows, evidence] = await Promise.all([
-    env.DB.prepare(`SELECT handle, x_user_id FROM accounts WHERE handle IN (${inClause})`)
-      .bind(...unique)
-      .all<{ handle: string; x_user_id: string | null }>(),
-    env.DB.prepare(
-      `SELECT handle, COUNT(*) AS n FROM active_labels
-       WHERE handle IN (${inClause}) AND label = 'blocked' GROUP BY handle`,
-    )
-      .bind(...unique)
-      .all<{ handle: string; n: number }>(),
-    env.DB.prepare(
-      `SELECT handle, COUNT(*) AS n FROM active_labels
-       WHERE handle IN (${inClause}) AND label = 'allowed' GROUP BY handle`,
-    )
-      .bind(...unique)
-      .all<{ handle: string; n: number }>(),
-    env.DB.prepare(
-      `SELECT l.handle, r.reason, r.detection_source, COUNT(*) AS n
-       FROM active_labels l
-       JOIN reports r
-         ON r.installation_id = l.installation_id
-        AND r.handle = l.handle
-       WHERE l.handle IN (${inClause}) AND l.label = 'blocked'
-       GROUP BY l.handle, r.reason, r.detection_source`,
-    )
-      .bind(...unique)
-      .all<{ handle: string; reason: string; detection_source: string | null; n: number }>(),
+  const [accountRows, labelRows, voteRows, evidence] = await Promise.all([
+    db
+      .select({ handle: accounts.handle, xUserId: accounts.xUserId })
+      .from(accounts)
+      .where(inArray(accounts.handle, unique)),
+    db
+      .select({
+        handle: activeLabels.handle,
+        blocked: sql<number>`count(*) filter (where ${activeLabels.label} = 'blocked')`.mapWith(
+          Number,
+        ),
+        allowed: sql<number>`count(*) filter (where ${activeLabels.label} = 'allowed')`.mapWith(
+          Number,
+        ),
+      })
+      .from(activeLabels)
+      .where(inArray(activeLabels.handle, unique))
+      .groupBy(activeLabels.handle),
+    db
+      .select({
+        handle: activeLabels.handle,
+        reason: reports.reason,
+        detectionSource: reports.detectionSource,
+        n: count(),
+      })
+      .from(activeLabels)
+      .innerJoin(
+        reports,
+        and(
+          eq(reports.installationId, activeLabels.installationId),
+          eq(reports.handle, activeLabels.handle),
+        ),
+      )
+      .where(and(inArray(activeLabels.handle, unique), eq(activeLabels.label, 'blocked')))
+      .groupBy(activeLabels.handle, reports.reason, reports.detectionSource),
     loadConsensusV2InputsByHandles(env, unique),
   ]);
 
-  const existingHandles = new Set(accountRows.results.map((row) => row.handle));
-  const xUserIdByHandle = new Map(
-    accountRows.results.map((row) => [row.handle, row.x_user_id] as const),
-  );
-  // 共识锚点同步：本次收敛进/出 strong 的账号写入或删除击杀事件（打野排位赛计分）
+  const existingHandles = new Set(accountRows.map((row) => row.handle));
+  const xUserIdByHandle = new Map(accountRows.map((row) => [row.handle, row.xUserId] as const));
+  // 共识锚点同步：本次收敛进/出 strong 的账号写入或删除共识事件（供死账号探活定位新进共识账号）
   const consensusTransitions = new Map<string, ConsensusTransition>();
-  const blockedCount = new Map(blockedRows.results.map((row) => [row.handle, row.n] as const));
-  const allowedCount = new Map(allowedRows.results.map((row) => [row.handle, row.n] as const));
+  const labelCounts = new Map(labelRows.map((row) => [row.handle, row] as const));
   // 分类用证据推理，不再原样取票面多数（回声票会把 'other' 越滚越大）
   const votesByHandle = new Map<string, CategoryVoteRow[]>();
-  for (const row of voteRows.results) {
+  for (const row of voteRows) {
     const list = votesByHandle.get(row.handle) ?? [];
-    list.push({ reason: row.reason, detectionSource: row.detection_source, count: row.n });
+    list.push({ reason: row.reason, detectionSource: row.detectionSource, count: row.n });
     votesByHandle.set(row.handle, list);
   }
 
   const now = Math.floor(Date.now() / 1000);
-  const statements: D1PreparedStatement[] = [];
-  for (const handle of existingHandles) {
-    const reportCount = blockedCount.get(handle) ?? 0;
-    const rescueCount = allowedCount.get(handle) ?? 0;
+  const updates: ReturnType<typeof sql>[] = [];
+  // 按主键排序：并发请求以相同顺序锁行，避免死锁
+  for (const handle of [...existingHandles].sort(compareText)) {
+    const reportCount = labelCounts.get(handle)?.blocked ?? 0;
+    const rescueCount = labelCounts.get(handle)?.allowed ?? 0;
     const status = deriveStatus({
       handle,
       status: 'new',
@@ -130,33 +117,27 @@ export async function refreshAccountsFromLabels(
       strong: status === 'strong',
       xUserId: xUserIdByHandle.get(handle) ?? null,
     });
-    statements.push(
-      env.DB.prepare(
-        `UPDATE accounts SET
-           report_count = ?2,
-           rescue_count = ?3,
-           owner_votes = ?4,
-           status = ?5,
-           category = ?6,
-           status_v2 = ?8,
-           consensus_v2 = ?9,
-           updated_at = ?7
-         WHERE handle = ?1`,
-      ).bind(
-        handle,
-        reportCount,
-        rescueCount,
-        0,
-        status,
-        category,
-        now,
-        v2.status,
-        v2.score,
-      ),
+    updates.push(
+      sql`(${handle}::text, ${reportCount}::int, ${rescueCount}::int, ${status}::text, ${category}::text, ${v2.status}::text, ${v2.score}::double precision)`,
     );
   }
-  await batchStatements(env, statements);
-  await syncConsensusEvents(env, consensusTransitions);
+  if (updates.length > 0) {
+    const updateStatement = sql`
+      UPDATE ${accounts} AS a SET
+        report_count = v.report_count,
+        rescue_count = v.rescue_count,
+        owner_votes = 0,
+        status = v.status,
+        category = v.category,
+        status_v2 = v.status_v2,
+        consensus_v2 = v.consensus_v2,
+        updated_at = ${now}
+      FROM (VALUES ${sql.join(updates, sql`, `)})
+        AS v(handle, report_count, rescue_count, status, category, status_v2, consensus_v2)
+      WHERE a.handle = v.handle`;
+    await retryOnConflict(() => db.execute(updateStatement));
+  }
+  await retryOnConflict(() => syncConsensusEvents(env, consensusTransitions));
   return existingHandles;
 }
 
@@ -167,7 +148,8 @@ export interface RetractResult {
 }
 
 export type RetractBatchResult =
-  { ok: true; results: RetractResult[] } | { ok: false; httpStatus: 400 | 413 | 429; error: string };
+  | { ok: true; results: RetractResult[] }
+  | { ok: false; httpStatus: 400 | 413 | 429; error: string };
 
 /** 本地名单删除后撤回当前票；原始审计证据不删除。 */
 export async function processRetractionBatch(
@@ -193,6 +175,7 @@ export async function processRetractionBatch(
     return { ok: false, httpStatus: 413, error: 'batch_too_large' };
   }
 
+  const db = getDb(env);
   const identity = await installationHash(env, installationId);
   const today = new Date().toISOString().slice(0, 10);
   const now = Math.floor(Date.now() / 1000);
@@ -217,93 +200,97 @@ export async function processRetractionBatch(
   // 对不存在的标签反复撤回不消耗配额）。条件 UPSERT 本身即门禁。
   let quotaUnits = 0;
   if (validatedHandles.length > 0) {
-    const active = await env.DB.prepare(
-      `SELECT COUNT(DISTINCT handle) AS n FROM active_labels
-       WHERE installation_id = ?1
-         AND handle IN (${validatedHandles.map((_, index) => `?${index + 2}`).join(', ')})`,
-    )
-      .bind(identity.hash, ...validatedHandles)
-      .first<{ n: number }>();
+    const [active] = await db
+      .select({ n: countDistinct(activeLabels.handle) })
+      .from(activeLabels)
+      .where(
+        and(
+          eq(activeLabels.installationId, identity.hash),
+          inArray(activeLabels.handle, validatedHandles),
+        ),
+      );
     quotaUnits = active?.n ?? 0;
   }
   if (quotaUnits > 0) {
-    const reserved = await env.DB.prepare(
-      `INSERT INTO installations (id, first_seen_at, last_seen_at, retracts_day, retracts_today)
-       VALUES (?1, ?2, ?2, ?3, ?4)
-       ON CONFLICT(id) DO UPDATE SET
-         last_seen_at = excluded.last_seen_at,
-         retracts_day = excluded.retracts_day,
-         retracts_today = CASE
-           WHEN installations.retracts_day = excluded.retracts_day
-             THEN installations.retracts_today + excluded.retracts_today
-           ELSE excluded.retracts_today
-         END
-       WHERE (
-         CASE
-           WHEN installations.retracts_day = excluded.retracts_day THEN installations.retracts_today
-           ELSE 0
-         END
-         + excluded.retracts_today
-       ) <= ?5`,
-    )
-      .bind(identity.hash, now, today, quotaUnits, RETRACT_DAILY_LIMIT)
-      .run();
-    if ((reserved.meta.changes ?? 0) === 0) {
+    const usedToday = sql`CASE WHEN ${installations.retractsDay} = excluded.retracts_day THEN ${installations.retractsToday} ELSE 0 END`;
+    const reserved = await db
+      .insert(installations)
+      .values({
+        id: identity.hash,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        retractsDay: today,
+        retractsToday: quotaUnits,
+      })
+      .onConflictDoUpdate({
+        target: installations.id,
+        set: {
+          lastSeenAt: sql`excluded.last_seen_at`,
+          retractsDay: sql`excluded.retracts_day`,
+          retractsToday: sql`${usedToday} + excluded.retracts_today`,
+        },
+        setWhere: sql`${usedToday} + excluded.retracts_today <= ${RETRACT_DAILY_LIMIT}`,
+      })
+      .returning({ id: installations.id });
+    if (reserved.length === 0) {
       return { ok: false, httpStatus: 429, error: 'rate_limited' };
     }
   }
 
-  // 归一化两阶段：直查命中主键索引（IN 点读）→ 未命中的才走别名扫描
-  // （json_each 无索引，扫一次总比每 handle 扫一次强）。
+  // 归一化两阶段：直查命中主键索引（IN 点读）→ 未命中的才走别名展开
+  // （aliases 是 JSON 数组、无索引，扫一次总比每 handle 扫一次强）。
   const canonicalByHandle = new Map<string, string>();
   if (validatedHandles.length > 0) {
-    const direct = await env.DB.prepare(
-      `SELECT handle FROM accounts
-       WHERE handle IN (${validatedHandles.map((_, index) => `?${index + 1}`).join(', ')})`,
-    )
-      .bind(...validatedHandles)
-      .all<{ handle: string }>();
-    for (const row of direct.results) canonicalByHandle.set(row.handle, row.handle);
+    const direct = await db
+      .select({ handle: accounts.handle })
+      .from(accounts)
+      .where(inArray(accounts.handle, validatedHandles));
+    for (const row of direct) canonicalByHandle.set(row.handle, row.handle);
     const unresolved = validatedHandles.filter((handle) => !canonicalByHandle.has(handle));
     if (unresolved.length > 0) {
-      const aliased = await env.DB.prepare(
-        `SELECT je.value AS alias, a.handle AS handle
-         FROM accounts a, json_each(a.aliases) je
-         WHERE je.value IN (${unresolved.map((_, index) => `?${index + 1}`).join(', ')})`,
-      )
-        .bind(...unresolved)
-        .all<{ alias: string; handle: string }>();
-      for (const row of aliased.results) {
+      const aliased = await db.execute<{ alias: string; handle: string }>(sql`
+        SELECT je.alias, a.handle
+        FROM ${accounts} a CROSS JOIN LATERAL jsonb_array_elements_text(
+          CASE WHEN jsonb_typeof(a.aliases::jsonb) = 'array' THEN a.aliases::jsonb ELSE '[]'::jsonb END
+        ) AS je(alias)
+        WHERE je.alias IN ${unresolved}`);
+      for (const row of aliased) {
         if (!canonicalByHandle.has(row.alias)) canonicalByHandle.set(row.alias, row.handle);
       }
     }
   }
 
-  // 删除按 handle 逐条出语句但一次 batch 下发（≤MAX_LABEL_BATCH 条），
-  // 每条独立取 meta.changes 维持 per-handle retracted/absent 语义。
-  const deletions =
-    validatedHandles.length > 0
-      ? await env.DB.batch(
-          validatedHandles.map((validatedHandle) => {
-            const canonical = canonicalByHandle.get(validatedHandle) ?? validatedHandle;
-            return env.DB.prepare(
-              `DELETE FROM active_labels
-               WHERE installation_id = ?1 AND (handle = ?2 OR handle = ?3)`,
-            ).bind(identity.hash, validatedHandle, canonical);
-          }),
-        )
-      : [];
-  validatedHandles.forEach((validatedHandle, index) => {
-    const canonical = canonicalByHandle.get(validatedHandle) ?? validatedHandle;
-    const deletion = deletions[index];
-    if (!deletion || (deletion.meta?.changes ?? 0) === 0) {
-      results.push({ handle: validatedHandle, status: 'absent' });
-      return;
+  // 一条 DELETE 删掉本安装在这些 handle（及其规范名）上的标签，再按请求顺序分配结果：
+  // 同一行标签只算给第一个命中它的 handle，后面的记 absent（与逐条删除的语义一致）。
+  if (validatedHandles.length > 0) {
+    const targets = new Set<string>();
+    for (const handle of validatedHandles) {
+      targets.add(handle);
+      targets.add(canonicalByHandle.get(handle) ?? handle);
     }
-    refreshingHandles.push(canonical, validatedHandle);
-    results.push({ handle: validatedHandle, status: 'retracted' });
-  });
-  // 批量收敛计数：单账号逐次刷新在批量撤回时会把 D1 调用放大几十倍
+    const deleted = await db
+      .delete(activeLabels)
+      .where(
+        and(
+          eq(activeLabels.installationId, identity.hash),
+          inArray(activeLabels.handle, [...targets]),
+        ),
+      )
+      .returning({ handle: activeLabels.handle });
+    const unclaimed = new Set(deleted.map((row) => row.handle));
+    for (const validatedHandle of validatedHandles) {
+      const canonical = canonicalByHandle.get(validatedHandle) ?? validatedHandle;
+      const hits = [validatedHandle, canonical].filter((handle) => unclaimed.has(handle));
+      if (hits.length === 0) {
+        results.push({ handle: validatedHandle, status: 'absent' });
+        continue;
+      }
+      for (const handle of hits) unclaimed.delete(handle);
+      refreshingHandles.push(canonical, validatedHandle);
+      results.push({ handle: validatedHandle, status: 'retracted' });
+    }
+  }
+  // 批量收敛计数：单账号逐次刷新在批量撤回时会把查询放大几十倍
   await refreshAccountsFromLabels(env, refreshingHandles);
   return { ok: true, results };
 }

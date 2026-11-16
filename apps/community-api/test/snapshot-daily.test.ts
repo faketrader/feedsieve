@@ -1,7 +1,11 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
+import { count, like } from 'drizzle-orm';
 import worker from '../src/index';
+import { getDb } from '../src/db/client';
+import { snapshots } from '../src/db/schema';
 import { generateSnapshot, markSnapshotDirty, readSnapshotDirty } from '../src/snapshot';
+import { spreadLatestReport } from './vote-days';
 
 const ORIGIN = 'https://api.example.com';
 
@@ -18,6 +22,7 @@ async function report(installationId: string, handle: string) {
     env,
   );
   expect(res.status).toBe(200);
+  await spreadLatestReport();
 }
 
 function installs(prefix: string): string[] {
@@ -32,9 +37,10 @@ const todayStamp = () => new Date().toISOString().slice(0, 10).replaceAll('-', '
 
 /** 今日快照行数（deferred 不该新增行）。 */
 async function countTodayRows(): Promise<number> {
-  const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM snapshots WHERE version LIKE ?1')
-    .bind(`${todayStamp()}.%`)
-    .first<{ n: number }>();
+  const [row] = await getDb(env)
+    .select({ n: count() })
+    .from(snapshots)
+    .where(like(snapshots.version, `${todayStamp()}.%`));
   return row?.n ?? 0;
 }
 
@@ -44,7 +50,7 @@ async function latestVersion(): Promise<string> {
   return manifest.snapshot_version;
 }
 
-describe('snapshot daily-once publishing', () => {
+describe('snapshot publish interval', () => {
   it('scheduled：脏标记驱动正常发布并清除', async () => {
     for (const id of installs('dapub')) {
       await report(id, 'scheduled_pub_user');
@@ -55,7 +61,7 @@ describe('snapshot daily-once publishing', () => {
     expect((await latestVersion()).startsWith(`${todayStamp()}.`)).toBe(true);
   });
 
-  it('同一天内容变化 → deferred 返回今日版本，不落新行，公开端点仍服务今日版本', async () => {
+  it('距上一版不到 25 分钟内容又变 → deferred 返回上一版，不落新行，公开端点仍服务上一版', async () => {
     const baseline = await generateSnapshot(env);
     const rowsBefore = await countTodayRows();
     expect(baseline.deferred).not.toBe(true);
@@ -70,7 +76,7 @@ describe('snapshot daily-once publishing', () => {
     expect(await latestVersion()).toBe(baseline.version);
   });
 
-  it('scheduled 碰到 deferred 不清脏标记（内容顺延到下一自然日再合并）', async () => {
+  it('scheduled 碰到 deferred 不清脏标记（下一轮 cron 合并发布）', async () => {
     await generateSnapshot(env); // 确保今日已有基线版本（两种隔离模型都成立）
     for (const id of installs('dakeep')) {
       await report(id, 'defer_keep_dirty_user');
@@ -78,10 +84,13 @@ describe('snapshot daily-once publishing', () => {
     await markSnapshotDirty(env);
     const dirty = (await readSnapshotDirty(env)) ?? '';
     await worker.scheduled({ scheduledTime: Date.now() } as never, env);
-    expect(await readSnapshotDirty(env)).toBe(dirty);
-  });
+    // 整点 cron 会无条件重新置脏（规则命中随时在变）：标记仍在，下一轮合并发布
+    expect(dirty).not.toBe('');
+    expect(await readSnapshotDirty(env)).not.toBeNull();
+    // 一条用例里生成两次快照再跑整轮 cron，全量并发校验时常超过默认 5 秒（偶发超时）
+  }, 20_000);
 
-  it('维护者 bypassDailyOnce：同一天也能立即 mint 新版本', async () => {
+  it('维护者 bypassDailyOnce：间隔内也能立即 mint 新版本', async () => {
     for (const id of installs('dabyp')) {
       await report(id, 'bypass_user');
     }

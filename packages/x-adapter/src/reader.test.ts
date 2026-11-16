@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it } from 'vitest';
-import { extractFeedItem } from './reader';
+import { extractFeedItem, extractTweetIdentity } from './reader';
 
 /**
  * 结构仿真实 X DOM（data-testid 锚点、User-Name 双行、t.co 外链包装）。
@@ -170,5 +170,54 @@ describe('extractFeedItem', () => {
       <div data-testid="tweetText">hello</div>
     `);
     expect(extractFeedItem(article)?.author.displayName).toBe('Clean Name');
+  });
+});
+
+describe('extractTweetIdentity', () => {
+  it('reads only postId and handle, matching extractFeedItem', () => {
+    const article = renderTweet(BASIC_TWEET);
+    const item = extractFeedItem(article);
+    expect(extractTweetIdentity(article)).toEqual({
+      postId: item?.postId,
+      author: { handle: item?.author.handle },
+    });
+    expect(item?.postId).toBe('1720000000000000000');
+  });
+
+  it('returns null without an author link and omits a missing postId', () => {
+    expect(extractTweetIdentity(renderTweet('<div>no author</div>'))).toBeNull();
+    expect(
+      extractTweetIdentity(renderTweet('<div data-testid="User-Name"><a href="/bob">b</a></div>')),
+    ).toEqual({ author: { handle: 'bob' } });
+  });
+});
+
+describe('extractFeedItem postId with quoted media', () => {
+  // 2026-10-30 真机：详情页主推文引用带图帖子时，被引用帖子的图片链接排在最前面
+  const QUOTING_TWEET = `
+    <div data-testid="User-Name">
+      <div><a href="/saccc_c"><span>Sac</span></a></div>
+      <div><a href="/saccc_c"><span>@saccc_c</span></a></div>
+    </div>
+    <div role="link">
+      <a href="/quoted_user/status/2115667681940770873/photo/1"><img /></a>
+      <div data-testid="User-Name"><a href="/quoted_user">Q</a></div>
+      <a href="/quoted_user/status/2115667681940770873"><time>3h</time></a>
+    </div>
+    <a href="/saccc_c/status/2115692493190594901"><time>1h</time></a>
+    <a href="/saccc_c/status/2115692493190594901/analytics">views</a>`;
+
+  it('uses the own timestamp link instead of the quoted photo link', () => {
+    const article = renderTweet(QUOTING_TWEET);
+    expect(extractFeedItem(article)?.postId).toBe('2115692493190594901');
+    expect(extractTweetIdentity(article)?.postId).toBe('2115692493190594901');
+  });
+
+  it('falls back to the first status link outside quote cards when there is no time element', () => {
+    const article = renderTweet(`
+      <div data-testid="User-Name"><a href="/a">A</a></div>
+      <div role="link"><a href="/q/status/111/photo/1"></a></div>
+      <a href="/a/status/222/analytics"></a>`);
+    expect(extractTweetIdentity(article)?.postId).toBe('222');
   });
 });

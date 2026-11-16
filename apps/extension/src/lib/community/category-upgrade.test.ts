@@ -18,7 +18,10 @@ describe('recomputeBlockedCategory（只升不降）', () => {
       recomputeBlockedCategory({ category: 'other', linkDomains: ['spam.example'] }, EVIDENCE),
     ).toBe('scam_phishing');
     expect(
-      recomputeBlockedCategory({ category: 'other', contentFingerprint: '0123456789abcdef' }, EVIDENCE),
+      recomputeBlockedCategory(
+        { category: 'other', contentFingerprint: '0123456789abcdef' },
+        EVIDENCE,
+      ),
     ).toBe('copy_paste');
   });
 
@@ -44,9 +47,9 @@ describe('recomputeBlockedCategory（只升不降）', () => {
   });
 
   it('缺分类按 other 处理', () => {
-    expect(
-      recomputeBlockedCategory({ contentFingerprint: '0123456789abcdef' }, EVIDENCE),
-    ).toBe('copy_paste');
+    expect(recomputeBlockedCategory({ contentFingerprint: '0123456789abcdef' }, EVIDENCE)).toBe(
+      'copy_paste',
+    );
   });
 });
 
@@ -95,7 +98,12 @@ describe('upgradeBlockedCategories（同步链路升级）', () => {
     })}\n`;
     storage.communitySnapshotV2 = { snapshot_version: '2026.09.09.1', body, synced_at: 1 };
     storage.blockedAccounts = [
-      { handle: 'fp_block', blockedAt: 1, category: 'other', contentFingerprint: '0123456789abcdef' },
+      {
+        handle: 'fp_block',
+        blockedAt: 1,
+        category: 'other',
+        contentFingerprint: '0123456789abcdef',
+      },
       { handle: 'domain_block', blockedAt: 2, category: 'other', linkDomains: ['spam.example'] },
       { handle: 'already_specific', blockedAt: 3, category: 'scam_phishing' },
     ];
@@ -118,7 +126,12 @@ describe('upgradeBlockedCategories（同步链路升级）', () => {
     })}\n`;
     storage.communitySnapshotV2 = { snapshot_version: '2026.09.09.2', body, synced_at: 1 };
     storage.blockedAccounts = [
-      { handle: 'no_evidence', blockedAt: 1, category: 'other', contentFingerprint: 'ffffffffffffffff' },
+      {
+        handle: 'no_evidence',
+        blockedAt: 1,
+        category: 'other',
+        contentFingerprint: 'ffffffffffffffff',
+      },
     ];
     expect(await upgradeBlockedCategories()).toBe(0);
     expect(await loadSpamEvidenceSets()).toEqual({ fingerprints: new Set(), domains: new Set() });

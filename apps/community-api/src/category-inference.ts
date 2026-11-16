@@ -10,8 +10,10 @@
  * 2. 具体类票面判断：排除回声票（detection_source=community-list）后，任何
  *    具体类（非 other）票都压过无信息的 'other' 票；多类并列取票数多者，
  *    再并列取字典序（产出确定）
- * 3. 话术模板证据（≥2 独立安装一致上报同一指纹）→ copy_paste
- * 4. 以上皆无 → other
+ * 3. 规则命中分类（≥2 个网段的用户的本地规则命中同一分类，见 rule-hits.ts）：
+ *    人工拉黑多数是「其他」，规则知道它是色情引流还是诈骗
+ * 4. 话术模板证据（≥2 独立安装一致上报同一指纹）→ copy_paste
+ * 5. 以上皆无 → other
  *
  * 维护者人工分类由快照合并层在推理结果之上覆盖（maintainer 优先级最高）。
  * 本函数只影响「为什么标注」（展示/解释），不影响「谁在名单里」（入榜仍是净票公式）。
@@ -31,6 +33,8 @@ export interface CategoryInferenceInput {
   hasDomainEvidence: boolean;
   /** ≥2 独立安装一致上报同一内容指纹（与快照 fingerprints 下发门槛同源） */
   hasFingerprintEvidence: boolean;
+  /** 规则命中最多的分类（≥2 个网段，见 rule-hits.ts topHitCategory）；没有为 null */
+  hitCategory?: string | null;
 }
 
 /** 回声票来源：社区名单命中拉黑是「采用既有结论」，对分类没有信息量。 */
@@ -50,6 +54,9 @@ export function inferCategory(input: CategoryInferenceInput): string {
   const top = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
   if (top) {
     return top[0];
+  }
+  if (input.hitCategory && input.hitCategory !== 'other') {
+    return input.hitCategory;
   }
   if (input.hasFingerprintEvidence) {
     return 'copy_paste';

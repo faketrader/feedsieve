@@ -1,7 +1,13 @@
+import { and, desc, eq, inArray, isNotNull, like, notInArray, sql } from 'drizzle-orm';
+import { describeDbError, getDb } from './db/client';
+import { accountHealth, accounts, meta, snapshots } from './db/schema';
 import { sha256Hex } from './lib/hash';
+import { compareText } from './lib/sql';
 import { computeScore } from './lib/score';
 import {
   buildSigningMessage,
+  buildSnapshotDelta,
+  compareManifestVersions,
   signManifestMessage,
   type ManifestSignature,
   type VerifiedEntry,
@@ -14,10 +20,31 @@ import { POLICY } from './reports';
 import { autoRateAccounts } from './rating';
 import { inferCategory } from './category-inference';
 import { loadCommunityAggregates } from './lib/consensus-v2';
+import { LISTING_POLICY, listingReason } from './lib/listing';
+import { loadHitSignals, mutedRuleIds, readRuleMutes, topHitCategory } from './rule-hits';
 
 export const SNAPSHOT_SCHEMA_VERSION = 2;
-export const SNAPSHOT_PACK = 'official.json';
-export const PUBLIC_BLOCKLIST_PACK = 'blocklist.yaml';
+/** 入榜政策版本（community/policy/v4.yaml），写进快照 body 与 manifest。 */
+export const SNAPSHOT_POLICY_VERSION = LISTING_POLICY.version;
+/**
+ * 两版快照之间至少隔这么久（cron 每 30 分钟检查一次）。原来是「当日一版」，
+ * 新上榜的号最晚要等到第二天；现在扩展按增量同步（/v1/snapshots/delta），发得勤也不费流量。
+ */
+export const SNAPSHOT_MIN_INTERVAL_S = 25 * 60;
+// 键名与包名单独放在 snapshot-keys.ts：上报端点只要那两个 meta 键，
+// 不该为此把整个快照模块（生成/签名/YAML）拉进冷启动。
+export {
+  SNAPSHOT_PACK,
+  PUBLIC_BLOCKLIST_PACK,
+  SNAPSHOT_LATEST_KEY,
+  SNAPSHOT_DIRTY_KEY,
+} from './snapshot-keys';
+import {
+  SNAPSHOT_PACK,
+  PUBLIC_BLOCKLIST_PACK,
+  SNAPSHOT_LATEST_KEY,
+  SNAPSHOT_DIRTY_KEY,
+} from './snapshot-keys';
 
 /** 指纹簇（Campaign）：汉明距离 <= 此值视为同一话术的变体，归同一簇；< 2 个账号的簇不产生 campaign */
 const SIMHASH_HAMMING_THRESHOLD = 2;
@@ -26,11 +53,10 @@ const MIN_CAMPAIGN_ACCOUNTS = 2;
 /**
  * 快照 R2 分发前缀（与词库 keyword-packs/ 同桶分域）。
  * 快照文件是 write-once 发布物：版本化文件不可变缓存 + latest 指针文件。
- * 读路径优先 R2（零 D1 行读），D1 files_json 保留为归档回退；latest 指针
+ * 读路径优先 R2（不查库），数据库 files_json 保留为归档回退；latest 指针
  * 存 meta 表供 O(1) 点读，取代每次轮询的全表排序扫。
  */
 const SNAPSHOT_R2_PREFIX = 'snapshots';
-export const SNAPSHOT_LATEST_KEY = 'latest_snapshot_version';
 
 async function r2Text(env: Cloudflare.Env, key: string): Promise<string | null> {
   const object = await env.KEYWORD_PACKS?.get(key);
@@ -64,12 +90,19 @@ async function publishSnapshotToR2(
 
 /** 记录最新版本指针（meta 表，O(1) 点读）。 */
 async function setLatestSnapshotPointer(env: Cloudflare.Env, version: string): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO meta (key, value) VALUES (?1, ?2)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-  )
-    .bind(SNAPSHOT_LATEST_KEY, version)
-    .run();
+  await upsertMeta(env, SNAPSHOT_LATEST_KEY, version);
+}
+
+async function upsertMeta(env: Cloudflare.Env, key: string, value: string): Promise<void> {
+  await getDb(env)
+    .insert(meta)
+    .values({ key, value })
+    .onConflictDoUpdate({ target: meta.key, set: { value: sql`excluded.value` } });
+}
+
+async function readMeta(env: Cloudflare.Env, key: string): Promise<string | null> {
+  const [row] = await getDb(env).select({ value: meta.value }).from(meta).where(eq(meta.key, key));
+  return row?.value ?? null;
 }
 
 export interface SnapshotEntry {
@@ -90,6 +123,8 @@ export interface SnapshotEntry {
   domains?: string[];
   campaign_entry_id?: string;
   campaign_size?: number;
+  /** 佐证上榜（净票 ≥ 2 + 多个网段的规则命中佐证）时标出；共识上榜不写 */
+  listed_by?: 'corroborated';
 }
 
 function hamming(a: string, b: string): number {
@@ -177,6 +212,7 @@ interface AccountRow {
   aliases: string;
   category: string;
   status: string;
+  status_v2: string;
   report_count: number;
   rescue_count: number;
   first_report_at: number;
@@ -194,7 +230,7 @@ export interface PublishedSnapshot {
   version: string;
   manifest: Record<string, unknown>;
   files: Record<string, SnapshotFile>;
-  /** 当日一版守卫命中：内容有变化但今天已发布过，未落新行（调用方应保留脏标记待次日）。 */
+  /** 发布间隔守卫命中：内容有变化但距上一版不到 SNAPSHOT_MIN_INTERVAL_S，未落新行（调用方保留脏标记）。 */
   deferred?: boolean;
 }
 
@@ -215,6 +251,7 @@ function buildEntry(
   fingerprints: string[],
   domains: string[],
   campaign?: { entryId: string; size: number },
+  corroborated = false,
 ): SnapshotEntry {
   let aliases: string[] = [];
   try {
@@ -247,6 +284,7 @@ function buildEntry(
     ...(domains.length > 0 ? { domains } : {}),
     // v0.5 Campaign：该条目所属簇的代表条目与规模（只在簇内 >= 2 账号时存在）
     ...(campaign ? { campaign_entry_id: campaign.entryId, campaign_size: campaign.size } : {}),
+    ...(corroborated ? { listed_by: 'corroborated' as const } : {}),
   };
 }
 
@@ -267,8 +305,11 @@ export function serializePublicBlocklistYaml(input: {
     `version: ${yamlString(input.version)}`,
     `generated_at: ${yamlString(input.generatedAt)}`,
     'rule:',
+    `  policy_version: ${SNAPSHOT_POLICY_VERSION}`,
     '  formula: "block_votes - false_positive_votes"',
     `  min_net_votes: ${POLICY.communityNetThreshold}`,
+    '  independence: "consensus_v2 strong | votes on >= 2 days | net >= 5"',
+    '  corroborated: "net >= 2, no false-positive votes, rule hits from >= 3 networks in 7 days"',
     'summary:',
     `  accounts: ${input.entries.length}`,
   ];
@@ -288,6 +329,9 @@ export function serializePublicBlocklistYaml(input: {
       `      false_positive: ${entry.rescue_count}`,
       `      net: ${entry.net_votes}`,
     );
+    if (entry.listed_by) {
+      lines.push(`    listed_by: ${yamlString(entry.listed_by)}`);
+    }
     if (entry.maintainer_note) {
       lines.push(`    maintainer_note: ${yamlString(entry.maintainer_note)}`);
     }
@@ -339,32 +383,70 @@ export async function generateSnapshot(
   // 出快照前按唯一净票公式收敛历史状态字段。
   await autoRateAccounts(env, aggregates);
 
-  const latest = await env.DB.prepare(
-    `SELECT version FROM snapshots
-     WHERE version LIKE ?1
-     ORDER BY CAST(substr(version, 12) AS INTEGER) DESC
-     LIMIT 1`,
-  )
-    .bind(`${dateStamp}.%`)
-    .first<{ version: string }>();
+  const db = getDb(env);
+  const [latest] = await db
+    .select({ version: snapshots.version })
+    .from(snapshots)
+    .where(like(snapshots.version, `${dateStamp}.%`))
+    .orderBy(sql`substr(${snapshots.version}, 12)::bigint desc`)
+    .limit(1);
   const version = nextVersion(latest?.version ?? null, dateStamp);
+  // 内容比较和发布间隔看「全局最新一版」（跨日也算）：零点后第一轮不会无故 mint 一版相同内容
+  const [latestAny] = await db
+    .select({ version: snapshots.version })
+    .from(snapshots)
+    .orderBy(desc(snapshots.createdAt))
+    .limit(1);
 
   // accounts 一次全扫出三份投影（黑名单行 / verified 行 / 全量索引），原来是
   // 三次独立全扫——前两次都是这份全量的过滤子集。
-  const allAccountRows = await env.DB.prepare(
-    `SELECT handle, x_user_id, aliases, category, status, report_count, rescue_count,
-            first_report_at, updated_at
-     FROM accounts
-     ORDER BY handle ASC`,
-  ).all<AccountRow>();
-  const accountRows = allAccountRows.results.filter(
-    (row) => row.report_count - row.rescue_count >= POLICY.communityNetThreshold,
-  );
+  // 排序用 "C" 排序规则（字节序），与 SQLite 的二进制比较一致，快照内容与签名才稳定
+  const allAccountRows: AccountRow[] = await db
+    .select({
+      handle: accounts.handle,
+      x_user_id: accounts.xUserId,
+      aliases: accounts.aliases,
+      category: accounts.category,
+      status: accounts.status,
+      status_v2: accounts.statusV2,
+      report_count: accounts.reportCount,
+      rescue_count: accounts.rescueCount,
+      first_report_at: accounts.firstReportAt,
+      updated_at: accounts.updatedAt,
+    })
+    .from(accounts)
+    .orderBy(sql`${accounts.handle} collate "C" asc`);
+  // 规则命中佐证 + 误伤静音（rule-hits.ts）；已静音规则的命中不算佐证
+  const ruleMutes = await readRuleMutes(env);
+  const mutedRules = mutedRuleIds(ruleMutes);
+  const [hitSignals, deadRows] = await Promise.all([
+    loadHitSignals(env, now.getTime(), new Set(mutedRules)),
+    db
+      .select({ handle: accountHealth.handle })
+      .from(accountHealth)
+      .where(eq(accountHealth.state, 'dead')),
+  ]);
+  const deadHandles = new Set(deadRows.map((row) => row.handle));
+  const listedBy = new Map<string, 'consensus' | 'corroborated'>();
+  const accountRows = allAccountRows.filter((row) => {
+    const reason = listingReason(
+      {
+        report_count: row.report_count,
+        rescue_count: row.rescue_count,
+        status_v2: row.status_v2,
+        distinct_days: aggregates.daysByHandle.get(row.handle) ?? 0,
+        dead: deadHandles.has(row.handle),
+      },
+      hitSignals.get(row.handle),
+    );
+    if (reason) listedBy.set(row.handle, reason);
+    return reason !== null;
+  });
 
   // 社区白名单（verified）：入榜公式与黑名单严格镜像——抢救净票 >= 同一阈值。
   // rescue_count/report_count 由 refreshAccountsFromLabels 收敛（active_labels 计票），
   // 与黑名单入榜 SQL 同源，无独立安装/跨天二次筛选（COMMUNITY_FILTERING 口径一致）。
-  const verified: VerifiedEntry[] = allAccountRows.results
+  const verified: VerifiedEntry[] = allAccountRows
     .filter((row) => row.rescue_count - row.report_count >= POLICY.communityNetThreshold)
     .map((row) => ({
       handle: row.handle,
@@ -391,9 +473,9 @@ export async function generateSnapshot(
 
   const entries: SnapshotEntry[] = [];
   const daysByHandle = aggregates.daysByHandle;
-  const accountByHandle = new Map(allAccountRows.results.map((row) => [row.handle, row] as const));
+  const accountByHandle = new Map(allAccountRows.map((row) => [row.handle, row] as const));
   const reportCounts = new Map(
-    allAccountRows.results.map((row) => [row.handle, row.report_count] as const),
+    allAccountRows.map((row) => [row.handle, row.report_count] as const),
   );
   const { fingerprintsByHandle, domainsByHandle } = aggregates;
   // 指纹簇（Campaign）：每个指纹的账号（已达标），汉明距离归簇
@@ -415,6 +497,7 @@ export async function generateSnapshot(
       votes: votesByHandle.get(handle) ?? [],
       hasDomainEvidence: (domainsByHandle.get(handle)?.length ?? 0) > 0,
       hasFingerprintEvidence: (fingerprintsByHandle.get(handle)?.length ?? 0) > 0,
+      hitCategory: topHitCategory(hitSignals.get(handle)),
     });
   for (const row of accountRows) {
     const evidence = evidenceByHandle.get(row.handle) ?? [];
@@ -428,6 +511,7 @@ export async function generateSnapshot(
         fingerprintsByHandle.get(row.handle) ?? [],
         domainsByHandle.get(row.handle) ?? [],
         campaign,
+        listedBy.get(row.handle) === 'corroborated',
       ),
     );
   }
@@ -513,7 +597,8 @@ export async function generateSnapshot(
       if (entry && whitelistHandles.has(entry.handle)) entries.splice(i, 1);
     }
   }
-  entries.sort((a, b) => a.handle.localeCompare(b.handle));
+  // 字节序（handle 只含 [a-z0-9_]）：扩展用增量重建全文时排序与语言设置无关，结果才能和签名哈希对上
+  entries.sort((a, b) => compareText(a.handle, b.handle));
 
   const generatedAt = now.toISOString();
   // 官方破坏性动作暂停开关：部署配置里设置了 DESTRUCTIVE_KILL_SWITCH（理由）即下发；
@@ -522,13 +607,15 @@ export async function generateSnapshot(
   const body = `${JSON.stringify(
     {
       schema_version: SNAPSHOT_SCHEMA_VERSION,
-      policy_version: 3,
+      policy_version: SNAPSHOT_POLICY_VERSION,
       snapshot_version: version,
       generated_at: generatedAt,
       entries,
       ...(verified.length > 0 ? { verified } : {}),
       ...(whitelist.length > 0 ? { whitelist } : {}),
       ...(killSwitch ? { kill_switch: killSwitch } : {}),
+      // 误伤率高、已静音的规则：扩展不再用它们标黄框（旧版扩展忽略这个字段）
+      ...(mutedRules.length > 0 ? { muted_rules: mutedRules } : {}),
     },
     null,
     2,
@@ -550,7 +637,7 @@ export async function generateSnapshot(
 
   const manifest = {
     schema_version: SNAPSHOT_SCHEMA_VERSION,
-    policy_version: 3,
+    policy_version: SNAPSHOT_POLICY_VERSION,
     snapshot_version: version,
     generated_at: generatedAt,
     policy: publicPolicy(),
@@ -584,17 +671,26 @@ export async function generateSnapshot(
   // 内容无变化则复用最新版本（cron 每小时跑，避免空转刷版本号）。
   // 比较 entries 内容（body 里的 generated_at 每次不同，不能整串比较）。
   // kill_switch 也参与比较：开关翻转（开/关/理由变更）必须产生新版本，不能复用旧 body。
-  const lastVersion = latest?.version ?? null;
-  const loadLatestRow = () =>
-    lastVersion
-      ? env.DB.prepare('SELECT manifest_json, files_json FROM snapshots WHERE version = ?1')
-          .bind(lastVersion)
-          .first<{ manifest_json: string; files_json: string }>()
-      : Promise.resolve(null);
+  const lastVersion = latestAny?.version ?? null;
+  const loadLatestRow = async () => {
+    if (!lastVersion) return null;
+    const [row] = await db
+      .select({ manifest_json: snapshots.manifestJson, files_json: snapshots.filesJson })
+      .from(snapshots)
+      .where(eq(snapshots.version, lastVersion));
+    return row ?? null;
+  };
   const lastBody = lastVersion ? await getSnapshotFile(env, lastVersion, SNAPSHOT_PACK) : null;
-  if (lastBody && entriesContentEqual(lastBody, entries, verified, whitelist, killSwitch)) {
+  if (
+    lastBody &&
+    entriesContentEqual(lastBody, entries, verified, whitelist, killSwitch, mutedRules)
+  ) {
     const lastRow = await loadLatestRow();
     if (lastRow) {
+      await syncListedFlags(
+        env,
+        entries.map((entry) => entry.handle),
+      );
       return {
         version: lastVersion as string,
         manifest: JSON.parse(lastRow.manifest_json),
@@ -603,12 +699,12 @@ export async function generateSnapshot(
     }
   }
 
-  // 当日一版守卫：今天已发布过、内容又有变化时不再 mint 新版本，延迟到下一个自然日
-  // 由 cron 合并发布（版本号是 YYYY.MM.DD.N 天锚格式，天然支持日更语义）。
-  // 调用方（scheduled）看到 deferred 会保留脏标记；维护者显式发布走 bypassDailyOnce 即时通道。
-  if (lastVersion && !options.bypassDailyOnce) {
+  // 发布间隔守卫：距最新一版不到 SNAPSHOT_MIN_INTERVAL_S 时先不 mint 新版本，
+  // 调用方（scheduled）看到 deferred 会保留脏标记，下一轮 cron 合并发布；
+  // 维护者显式发布走 bypassDailyOnce 即时通道。
+  if (!options.bypassDailyOnce && (await publishedWithin(env, SNAPSHOT_MIN_INTERVAL_S))) {
     const lastRow = await loadLatestRow();
-    if (lastRow) {
+    if (lastRow && lastVersion) {
       return {
         version: lastVersion as string,
         manifest: JSON.parse(lastRow.manifest_json),
@@ -618,25 +714,24 @@ export async function generateSnapshot(
     }
   }
 
-  const inserted = await env.DB.prepare(
-    `INSERT OR IGNORE INTO snapshots (version, manifest_json, signature_json, files_json, created_at)
-     VALUES (?1, ?2, ?3, ?4, ?5)`,
-  )
-    .bind(
+  const inserted = await db
+    .insert(snapshots)
+    .values({
       version,
-      `${JSON.stringify(manifest, null, 2)}\n`,
+      manifestJson: `${JSON.stringify(manifest, null, 2)}\n`,
       signatureJson,
-      JSON.stringify({
+      filesJson: JSON.stringify({
         [machineFile.path]: machineFile,
         [yamlFile.path]: yamlFile,
       }),
-      Math.floor(now.getTime() / 1000),
-    )
-    .run();
+      createdAt: Math.floor(now.getTime() / 1000),
+    })
+    .onConflictDoNothing()
+    .returning({ version: snapshots.version });
 
-  // 两个请求可能同时读取到同一 latest 版本。D1 只允许一个写入；另一个重读最新
+  // 两个请求可能同时读取到同一 latest 版本。主键冲突时只有一个写入成功；另一个重读最新
   // 内容，若内容已一致会直接复用，否则分配下一个序号。避免真实三票并发时返回 500。
-  if ((inserted.meta.changes ?? 0) === 0) {
+  if (inserted.length === 0) {
     if (publishAttempt >= 20) {
       throw new Error('snapshot_publish_contention');
     }
@@ -645,9 +740,13 @@ export async function generateSnapshot(
 
   // 最新版本指针：latest 轮询从全表排序扫降为 O(1) 点读（写入失败无妨，读端回退排序扫）
   await setLatestSnapshotPointer(env, version);
-  // R2 分发：失败不阻断发布（D1 仍权威，读端自动回退 files_json）
+  await syncListedFlags(
+    env,
+    entries.map((entry) => entry.handle),
+  );
+  // R2 分发：失败不阻断发布（数据库仍权威，读端自动回退 files_json）
   await publishSnapshotToR2(env, version, machineFile, yamlFile, manifest).catch((error) => {
-    console.error('[community-api] snapshot R2 publish failed:', error);
+    console.error(`[community-api] snapshot R2 publish failed: ${describeDbError(error)}`);
   });
 
   return {
@@ -660,37 +759,72 @@ export async function generateSnapshot(
   };
 }
 
-/** 两次快照的 entries、verified 与 kill_switch 是否相同（忽略 generated_at / 版本号等元信息）。 */
+/**
+ * 把「在不在公开名单里」写回 accounts.listed：后台概览、热榜、主页洞察、贡献统计都按它判断，
+ * 和扩展下载的名单同一口径。只在快照真正发布或复用时调用（deferred 时名单还没变）。
+ */
+async function syncListedFlags(env: Cloudflare.Env, handles: string[]): Promise<void> {
+  const db = getDb(env);
+  for (let i = 0; i < handles.length; i += 5_000) {
+    const chunk = handles.slice(i, i + 5_000);
+    await db
+      .update(accounts)
+      .set({ listed: 1 })
+      .where(and(eq(accounts.listed, 0), inArray(accounts.handle, chunk)));
+  }
+  await db
+    .update(accounts)
+    .set({ listed: 0 })
+    .where(
+      handles.length > 0
+        ? and(eq(accounts.listed, 1), notInArray(accounts.handle, handles))
+        : eq(accounts.listed, 1),
+    );
+}
+
+/** 最近这么多秒内是否发布过快照（任何日期）。 */
+async function publishedWithin(env: Cloudflare.Env, seconds: number): Promise<boolean> {
+  const [row] = await getDb(env)
+    .select({ created_at: snapshots.createdAt })
+    .from(snapshots)
+    .orderBy(desc(snapshots.createdAt))
+    .limit(1);
+  return row !== undefined && Math.floor(Date.now() / 1000) - row.created_at < seconds;
+}
+
+/** 两次快照的 entries、verified、whitelist、kill_switch 与 muted_rules 是否相同（忽略 generated_at / 版本号等元信息）。 */
 function entriesContentEqual(
   lastBody: string,
   currentEntries: unknown[],
   currentVerified: unknown[],
   currentWhitelist: unknown[],
-  currentKillSwitch?: { destructive_actions_disabled: true; reason?: string; disabled_since?: string },
+  currentKillSwitch:
+    | {
+        destructive_actions_disabled: true;
+        reason?: string;
+        disabled_since?: string;
+      }
+    | undefined,
+  currentMutedRules: string[],
 ): boolean {
-  let last: {
+  type LastBody = {
     schema_version?: number;
     policy_version?: number;
     entries?: unknown[];
     verified?: unknown[];
     whitelist?: unknown[];
     kill_switch?: unknown;
+    muted_rules?: unknown[];
   };
+  let last: LastBody;
   try {
-    last = JSON.parse(lastBody) as {
-      schema_version?: number;
-      policy_version?: number;
-      entries?: unknown[];
-      verified?: unknown[];
-      whitelist?: unknown[];
-      kill_switch?: unknown;
-    };
+    last = JSON.parse(lastBody) as LastBody;
   } catch {
     return false;
   }
   if (
     last.schema_version !== SNAPSHOT_SCHEMA_VERSION ||
-    last.policy_version !== 3 ||
+    last.policy_version !== SNAPSHOT_POLICY_VERSION ||
     !Array.isArray(last.entries)
   ) {
     return false;
@@ -700,6 +834,7 @@ function entriesContentEqual(
   if (JSON.stringify(last.entries) !== JSON.stringify(currentEntries)) return false;
   // 白名单也参与内容复用判断：verified / whitelist 变化必须产生新版本，不能复用旧 body
   if (JSON.stringify(last.verified ?? []) !== JSON.stringify(currentVerified)) return false;
+  if (JSON.stringify(last.muted_rules ?? []) !== JSON.stringify(currentMutedRules)) return false;
   return JSON.stringify(last.whitelist ?? []) === JSON.stringify(currentWhitelist);
 }
 
@@ -713,30 +848,42 @@ async function latestSnapshotRow(env: Cloudflare.Env): Promise<{
   files_json: string;
   created_at: number;
 } | null> {
+  const db = getDb(env);
   const requireSigned = env.REQUIRE_SIGNED_SNAPSHOTS === '1';
-  const signedWhere = requireSigned ? ' AND signature_json IS NOT NULL' : '';
-  const pointer = await env.DB.prepare('SELECT value FROM meta WHERE key = ?1')
-    .bind(SNAPSHOT_LATEST_KEY)
-    .first<{ value: string }>();
-  if (pointer) {
-    const row = await env.DB.prepare(
-      `SELECT version, manifest_json, files_json, created_at FROM snapshots
-       WHERE version = ?1${signedWhere}`,
+  const columns = {
+    version: snapshots.version,
+    manifest_json: snapshots.manifestJson,
+    files_json: snapshots.filesJson,
+    created_at: snapshots.createdAt,
+  };
+  // 指针和快照行一条查询读出（每次往返都要经 Hyperdrive 到源站，少一次串行往返）
+  const [row] = await db
+    .select(columns)
+    .from(snapshots)
+    .where(
+      and(
+        eq(
+          snapshots.version,
+          sql`(select ${meta.value} from ${meta} where ${meta.key} = ${SNAPSHOT_LATEST_KEY})`,
+        ),
+        requireSigned ? isNotNull(snapshots.signatureJson) : undefined,
+      ),
+    );
+  if (row) return row;
+  const [fallback] = await db
+    .select(columns)
+    .from(snapshots)
+    .where(requireSigned ? isNotNull(snapshots.signatureJson) : undefined)
+    .orderBy(
+      sql`substr(${snapshots.version}, 1, 10) collate "C" desc`,
+      sql`substr(${snapshots.version}, 12)::bigint desc`,
     )
-      .bind(pointer.value)
-      .first<{ version: string; manifest_json: string; files_json: string; created_at: number }>();
-    if (row) return row;
-  }
-  return env.DB.prepare(
-    `SELECT version, manifest_json, files_json, created_at FROM snapshots
-     ${requireSigned ? 'WHERE signature_json IS NOT NULL' : ''}
-     ORDER BY substr(version, 1, 10) DESC, CAST(substr(version, 12) AS INTEGER) DESC
-     LIMIT 1`,
-  ).first<{ version: string; manifest_json: string; files_json: string; created_at: number }>();
+    .limit(1);
+  return fallback ?? null;
 }
 
 export async function getLatestSnapshot(env: Cloudflare.Env): Promise<{ manifest: string } | null> {
-  // 快路径：R2 latest-manifest（发布时写入，命中即零 D1 读取）
+  // 快路径：R2 latest-manifest（发布时写入，命中即不查库）
   if (env.REQUIRE_SIGNED_SNAPSHOTS !== '1') {
     const r2Manifest = await r2Text(env, `${SNAPSHOT_R2_PREFIX}/latest-manifest.json`);
     if (r2Manifest !== null) {
@@ -759,7 +906,7 @@ export async function getSnapshotFile(
     return null;
   }
   // 快路径：R2 版本化文件（不可变缓存）。requireSigned 时文件本身不携带签名信息，
-  // 校验语义在 manifest（latestSnapshotRow 已按 signature 过滤），这里仍走 D1 点读。
+  // 校验语义在 manifest（latestSnapshotRow 已按 signature 过滤），这里仍走数据库点读。
   if (env.REQUIRE_SIGNED_SNAPSHOTS !== '1') {
     const r2Body = await r2Text(env, `${SNAPSHOT_R2_PREFIX}/${version}/${path}`);
     if (r2Body !== null) {
@@ -767,14 +914,17 @@ export async function getSnapshotFile(
     }
   }
   const requireSigned = env.REQUIRE_SIGNED_SNAPSHOTS === '1';
-  const row = await env.DB.prepare(
-    `SELECT files_json FROM snapshots WHERE version = ?1
-     ${requireSigned ? 'AND signature_json IS NOT NULL' : ''}`,
-  )
-    .bind(version)
-    .first<{ files_json: string }>();
+  const [row] = await getDb(env)
+    .select({ filesJson: snapshots.filesJson })
+    .from(snapshots)
+    .where(
+      and(
+        eq(snapshots.version, version),
+        requireSigned ? isNotNull(snapshots.signatureJson) : undefined,
+      ),
+    );
   if (!row) return null;
-  const files = JSON.parse(row.files_json) as Record<string, SnapshotFile>;
+  const files = JSON.parse(row.filesJson) as Record<string, SnapshotFile>;
   return files[path]?.body ?? null;
 }
 
@@ -799,6 +949,70 @@ export async function getLatestSnapshotFile(
   return files[path]?.body ?? null;
 }
 
+const SNAPSHOT_VERSION_RE = /^\d{4}\.\d{2}\.\d{2}\.\d{1,4}$/;
+/** 快照版本保留 14 天：现在一天最多 48 版，比这更旧的扩展直接下全量。最新一版永远保留。 */
+const SNAPSHOT_RETENTION_S = 14 * 86_400;
+
+/** cron：删掉 14 天前的快照版本（数据库行 + R2 版本文件），最新一版不删。 */
+export async function cleanupOldSnapshots(
+  env: Cloudflare.Env,
+  nowMs = Date.now(),
+): Promise<number> {
+  const db = getDb(env);
+  const cutoff = Math.floor(nowMs / 1000) - SNAPSHOT_RETENTION_S;
+  const latest = await getLatestSnapshotVersion(env);
+  const old = await db
+    .select({ version: snapshots.version })
+    .from(snapshots)
+    .where(sql`${snapshots.createdAt} < ${cutoff}`)
+    .limit(500);
+  const versions = old.map((row) => row.version).filter((version) => version !== latest);
+  if (versions.length === 0) return 0;
+  await db.delete(snapshots).where(inArray(snapshots.version, versions));
+  await Promise.all(
+    versions.map((version) =>
+      env.KEYWORD_PACKS?.delete([
+        `${SNAPSHOT_R2_PREFIX}/${version}/${SNAPSHOT_PACK}`,
+        `${SNAPSHOT_R2_PREFIX}/${version}/${PUBLIC_BLOCKLIST_PACK}`,
+      ]).catch(() => undefined),
+    ),
+  );
+  return versions.length;
+}
+/** 增量比全量的这个比例还大时不给（扩展直接下全量更省事）。 */
+const DELTA_MAX_RATIO = 0.5;
+
+/**
+ * 两版之间的增量（见 packages/community-lists/src/delta.ts）。版本不可变，结果可以永久缓存。
+ * 任一版本不存在、from 不早于 to、增量过大时返回 null，扩展会退回下载全量。
+ */
+export async function getSnapshotDelta(
+  env: Cloudflare.Env,
+  from: string,
+  to: string,
+): Promise<string | null> {
+  if (
+    !SNAPSHOT_VERSION_RE.test(from) ||
+    !SNAPSHOT_VERSION_RE.test(to) ||
+    compareManifestVersions(from, to) >= 0
+  ) {
+    return null;
+  }
+  const [base, target] = await Promise.all([
+    getSnapshotFile(env, from, SNAPSHOT_PACK),
+    getSnapshotFile(env, to, SNAPSHOT_PACK),
+  ]);
+  if (!base || !target) return null;
+  try {
+    const delta = buildSnapshotDelta(base, target);
+    const text = JSON.stringify(delta);
+    // 小快照（测试、冷启动）不卡比例：省不了多少，但也不该逼扩展下全量
+    return text.length <= Math.max(target.length * DELTA_MAX_RATIO, 64_000) ? text : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 概览页所需的最新快照元信息（版本 / 生成时间 / 公开条目数 / 落后秒数）。 */
 export interface LatestSnapshotMeta {
   version: string;
@@ -809,7 +1023,9 @@ export interface LatestSnapshotMeta {
   lag_seconds: number;
 }
 
-export async function getLatestSnapshotMeta(env: Cloudflare.Env): Promise<LatestSnapshotMeta | null> {
+export async function getLatestSnapshotMeta(
+  env: Cloudflare.Env,
+): Promise<LatestSnapshotMeta | null> {
   const row = await latestSnapshotRow(env);
   if (!row) return null;
   try {
@@ -829,11 +1045,9 @@ export async function getLatestSnapshotMeta(env: Cloudflare.Env): Promise<Latest
 /** 只读最新版本号：异步化后上报路径立即返回当前有效版本，不等新快照生成。 */
 export async function getLatestSnapshotVersion(env: Cloudflare.Env): Promise<string | null> {
   // O(1) 点读 meta 指针（POST 路径每批调用一次，不再全表排序扫 snapshots）
-  const pointer = await env.DB.prepare('SELECT value FROM meta WHERE key = ?1')
-    .bind(SNAPSHOT_LATEST_KEY)
-    .first<{ value: string }>();
+  const pointer = await readMeta(env, SNAPSHOT_LATEST_KEY);
   if (pointer) {
-    return pointer.value;
+    return pointer;
   }
   const latest = await getLatestSnapshot(env);
   if (!latest) return null;
@@ -850,18 +1064,12 @@ export async function getLatestSnapshotVersion(env: Cloudflare.Env): Promise<str
  *
  * 开关状态来自部署配置 env.DESTRUCTIVE_KILL_SWITCH，翻转不落库、不置脏；
  * 这里与最新已发布 body 里的 kill_switch 比对，不一致就值得补发（开/关/理由变更
- * 都要让公开镜像尽快反映）。当日已发布过则直接返回 false —— day-once 守卫会把
- * 开关变更顺延到次日，实时生效由 /v1/kill-switch 端点兜底，扩展破坏性操作前查询。
+ * 都要让公开镜像尽快反映）。距上一版不到 SNAPSHOT_MIN_INTERVAL_S 时返回 false，留给下一轮 cron，
+ * 实时生效由 /v1/kill-switch 端点兜底，扩展破坏性操作前查询。
  */
 export async function killSwitchNeedsPublish(env: Cloudflare.Env): Promise<boolean> {
   const now = new Date();
-  const dateStamp = now.toISOString().slice(0, 10).replaceAll('-', '.');
-  const todayRow = await env.DB.prepare(
-    'SELECT 1 AS x FROM snapshots WHERE version LIKE ?1 LIMIT 1',
-  )
-    .bind(`${dateStamp}.%`)
-    .first<{ x: number }>();
-  if (todayRow) {
+  if (await publishedWithin(env, SNAPSHOT_MIN_INTERVAL_S)) {
     return false;
   }
 
@@ -890,27 +1098,18 @@ export async function killSwitchNeedsPublish(env: Cloudflare.Env): Promise<boole
  * 不产生新快照行，「数据比快照新」会永远为真导致每周期空转全量扫描。
  * value 存置脏时刻（毫秒）；清除带值比对，生成期间到达的新变更会保留标记。
  */
-export const SNAPSHOT_DIRTY_KEY = 'snapshot_dirty';
 
 export async function markSnapshotDirty(env: Cloudflare.Env): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO meta (key, value) VALUES (?1, ?2)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-  )
-    .bind(SNAPSHOT_DIRTY_KEY, String(Date.now()))
-    .run();
+  await upsertMeta(env, SNAPSHOT_DIRTY_KEY, String(Date.now()));
 }
 
 export async function readSnapshotDirty(env: Cloudflare.Env): Promise<string | null> {
-  const row = await env.DB.prepare('SELECT value FROM meta WHERE key = ?1')
-    .bind(SNAPSHOT_DIRTY_KEY)
-    .first<{ value: string }>();
-  return row?.value ?? null;
+  return readMeta(env, SNAPSHOT_DIRTY_KEY);
 }
 
 /** 生成成功后清除；期间有新变更（value 已变）则保留，由下一周期再合并。 */
 export async function clearSnapshotDirty(env: Cloudflare.Env, value: string): Promise<void> {
-  await env.DB.prepare('DELETE FROM meta WHERE key = ?1 AND value = ?2')
-    .bind(SNAPSHOT_DIRTY_KEY, value)
-    .run();
+  await getDb(env)
+    .delete(meta)
+    .where(and(eq(meta.key, SNAPSHOT_DIRTY_KEY), eq(meta.value, value)));
 }

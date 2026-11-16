@@ -46,15 +46,10 @@ export interface PersonalConfigContext {
 }
 
 export type PersonalConfigParseError =
-  | 'file_too_large'
-  | 'invalid_json'
-  | 'invalid_format'
-  | 'unsupported_version'
-  | 'invalid_payload';
+  'file_too_large' | 'invalid_json' | 'invalid_format' | 'unsupported_version' | 'invalid_payload';
 
 export type PersonalConfigParseResult =
-  | { ok: true; document: PersonalConfigDocument }
-  | { ok: false; error: PersonalConfigParseError };
+  { ok: true; document: PersonalConfigDocument } | { ok: false; error: PersonalConfigParseError };
 
 export type PersonalConfigImportMode = 'merge' | 'replace';
 
@@ -132,10 +127,7 @@ function isLanguage(value: unknown): value is UiLanguage {
   return value === 'zh' || value === 'en';
 }
 
-function parseStringArray(
-  value: unknown,
-  predicate: (item: string) => boolean,
-): string[] | null {
+function parseStringArray(value: unknown, predicate: (item: string) => boolean): string[] | null {
   if (!Array.isArray(value)) return null;
   const items: string[] = [];
   for (const item of value) {
@@ -176,7 +168,9 @@ export function createPersonalConfigDocument(
     keywordRules: {
       customPhrases: cleanPhrases(context.keywordRules.customRules.map((rule) => rule.phrase)),
       knownCategoryIds: categoryIds,
-      subscribedCategoryIds: categoryIds.filter((id) => categoryIdSet.has(id) && subscribed.has(id)),
+      subscribedCategoryIds: categoryIds.filter(
+        (id) => categoryIdSet.has(id) && subscribed.has(id),
+      ),
       disabledOfficialRuleIds: ruleIds.filter((id) => ruleIdSet.has(id) && disabled.has(id)),
     },
     preferences: {
@@ -207,7 +201,11 @@ export function parsePersonalConfigDocument(text: string): PersonalConfigParseRe
   if (raw.schemaVersion !== PERSONAL_CONFIG_SCHEMA_VERSION) {
     return { ok: false, error: 'unsupported_version' };
   }
-  if (typeof raw.exportedAt !== 'string' || !isRecord(raw.keywordRules) || !isRecord(raw.preferences)) {
+  if (
+    typeof raw.exportedAt !== 'string' ||
+    !isRecord(raw.keywordRules) ||
+    !isRecord(raw.preferences)
+  ) {
     return { ok: false, error: 'invalid_payload' };
   }
 
@@ -218,9 +216,8 @@ export function parsePersonalConfigDocument(text: string): PersonalConfigParseRe
   const subscribedCategoryIds = parseStringArray(raw.keywordRules.subscribedCategoryIds, (id) =>
     OFFICIAL_ID_RE.test(id),
   );
-  const disabledOfficialRuleIds = parseStringArray(
-    raw.keywordRules.disabledOfficialRuleIds,
-    (id) => OFFICIAL_ID_RE.test(id),
+  const disabledOfficialRuleIds = parseStringArray(raw.keywordRules.disabledOfficialRuleIds, (id) =>
+    OFFICIAL_ID_RE.test(id),
   );
   const uiLanguage = raw.preferences.uiLanguage;
   const communityEnabled = raw.preferences.communityEnabled;
@@ -290,7 +287,9 @@ export function preparePersonalConfigImport(
   const currentByPhrase = new Map(
     currentRules.map((rule) => [normalizeKeywordPhrase(rule.phrase), rule]),
   );
-  const importedPhraseKeys = new Set(importedPhrases.map((phrase) => normalizeKeywordPhrase(phrase)));
+  const importedPhraseKeys = new Set(
+    importedPhrases.map((phrase) => normalizeKeywordPhrase(phrase)),
+  );
   const alreadyPresentCount = importedPhrases.filter((phrase) =>
     currentByPhrase.has(normalizeKeywordPhrase(phrase)),
   ).length;

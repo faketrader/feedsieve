@@ -8,8 +8,12 @@ import { ERROR_TEXT, errorText } from './KeywordsPanel';
  */
 export default function ApplyPage() {
   const [phase, setPhase] = useState<'form' | 'verify'>('form');
-  const [kind, setKind] = useState<'whitelist' | 'appeal'>('whitelist');
-  const [handle, setHandle] = useState('');
+  // 从 AI 味结果页「我要申诉」跳过来：?kind=appeal&handle=xxx 预填
+  const params = typeof window === 'undefined' ? null : new URLSearchParams(window.location.search);
+  const [kind, setKind] = useState<'whitelist' | 'appeal'>(
+    params?.get('kind') === 'appeal' ? 'appeal' : 'whitelist',
+  );
+  const [handle, setHandle] = useState(() => params?.get('handle')?.replace(/[^A-Za-z0-9_]/g, '').slice(0, 15) ?? '');
   const [email, setEmail] = useState('');
   const [statement, setStatement] = useState('');
   const [code, setCode] = useState('');

@@ -49,7 +49,7 @@ describe('个人配置备份与迁移', () => {
         keywordRules: {
           subscriptionDefaultsVersion: 3,
           subscribedCategoryIds: ['adult_gray_traffic'],
-          disabledOfficialRuleIds: ['adult-fu-not-black'],
+          disabledOfficialRuleIds: ['adult-profile-collect-benefits'],
           customRules: [
             { id: 'one', phrase: '  我的词  ', createdAt: 100 },
             { id: 'two', phrase: '我的词', createdAt: 200 },
@@ -69,7 +69,7 @@ describe('个人配置备份与迁移', () => {
         customPhrases: ['我的词'],
         knownCategoryIds: BUNDLED_KEYWORD_PACK_CATALOG.packs.map((pack) => pack.id),
         subscribedCategoryIds: ['adult_gray_traffic'],
-        disabledOfficialRuleIds: ['adult-fu-not-black'],
+        disabledOfficialRuleIds: ['adult-profile-collect-benefits'],
       },
       preferences: { uiLanguage: 'en', communityEnabled: false, markStrength: 'deep_clean' },
     });
@@ -79,14 +79,14 @@ describe('个人配置备份与迁移', () => {
 
   it('拒绝损坏、未知版本、非法字段和超大文件', () => {
     expect(parsePersonalConfigDocument('{')).toEqual({ ok: false, error: 'invalid_json' });
-    expect(parsePersonalConfigDocument(JSON.stringify({ format: 'other', schemaVersion: 1 }))).toEqual({
+    expect(
+      parsePersonalConfigDocument(JSON.stringify({ format: 'other', schemaVersion: 1 })),
+    ).toEqual({
       ok: false,
       error: 'invalid_format',
     });
     expect(
-      parsePersonalConfigDocument(
-        JSON.stringify({ ...document(), schemaVersion: 9 }),
-      ),
+      parsePersonalConfigDocument(JSON.stringify({ ...document(), schemaVersion: 9 })),
     ).toEqual({ ok: false, error: 'unsupported_version' });
     expect(
       parsePersonalConfigDocument(
@@ -156,7 +156,7 @@ describe('个人配置备份与迁移', () => {
         customPhrases: ['ＡＢＣ', 'abc', '新词'],
         knownCategoryIds: ['adult_gray_traffic', 'removed-category'],
         subscribedCategoryIds: [],
-        disabledOfficialRuleIds: ['adult-fu-not-black', 'removed_rule'],
+        disabledOfficialRuleIds: ['adult-profile-collect-benefits', 'removed_rule'],
       },
       preferences: { uiLanguage: 'en', communityEnabled: false, markStrength: 'deep_clean' },
     });
@@ -190,7 +190,7 @@ describe('个人配置备份与迁移', () => {
     // 备份不知晓的新默认包（crypto_giveaway_scams）保留本机默认订阅状态；
     // adult 是备份显式取消过的分类，备份偏好为准 -> 从订阅列表移除
     expect(prepared.next?.keywordRules.subscribedCategoryIds).toEqual(['crypto_giveaway_scams']);
-    expect(prepared.next?.keywordRules.disabledOfficialRuleIds).toEqual(['adult-fu-not-black']);
+    expect(prepared.next?.keywordRules.disabledOfficialRuleIds).toEqual(['adult-profile-collect-benefits']);
     expect(prepared.next?.preferences).toEqual(source.preferences);
 
     let replacementId = 0;
@@ -205,7 +205,7 @@ describe('个人配置备份与迁移', () => {
     expect(replaced.next?.keywordRules.subscribedCategoryIds).not.toContain('adult_gray_traffic');
     // 替换语义：备份不知晓的新默认包保留本机状态，被移除的旧分类不会带回来
     expect(replaced.next?.keywordRules.subscribedCategoryIds).toEqual(['crypto_giveaway_scams']);
-    expect(replaced.next?.keywordRules.disabledOfficialRuleIds).toEqual(['adult-fu-not-black']);
+    expect(replaced.next?.keywordRules.disabledOfficialRuleIds).toEqual(['adult-profile-collect-benefits']);
     expect(replaced.next?.preferences).toEqual(source.preferences);
   });
 

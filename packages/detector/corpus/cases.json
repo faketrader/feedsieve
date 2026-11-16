@@ -660,6 +660,71 @@
         "text": "明天✈️东京，期待馒头店"
       },
       "expected": null
+    },
+    {
+      "id": "fresh-account-bait",
+      "note": "昨天注册、默认头像、0 粉、狂关注，正文一个擦边词（handle 正常，weak-signal-combo 锚不住）",
+      "input": {
+        "handle": "lily_chen",
+        "displayName": "Lily",
+        "text": "今晚好涩，在吗",
+        "author": {
+          "followers": 0,
+          "following": 180,
+          "createdAt": 1793318400000,
+          "defaultAvatar": true
+        },
+        "observedAt": 1793404800000
+      },
+      "expected": "fresh-account-combo"
+    },
+    {
+      "id": "fresh-account-salad",
+      "note": "新号狂关注 + 经典单词沙拉",
+      "input": {
+        "handle": "amy_wong",
+        "text": "hard fire 💙 lift road make",
+        "author": {
+          "followers": 2,
+          "following": 600,
+          "createdAt": 1793145600000
+        },
+        "observedAt": 1793404800000
+      },
+      "expected": "fresh-account-combo"
+    },
+    {
+      "id": "fresh-account-legit",
+      "note": "刚注册的真人：默认头像、0 粉、发「哈哈哈哈」不算佐证",
+      "input": {
+        "handle": "zhang_san",
+        "displayName": "张三",
+        "text": "哈哈哈哈第一次发推",
+        "author": {
+          "followers": 0,
+          "following": 12,
+          "createdAt": 1793318400000,
+          "defaultAvatar": true
+        },
+        "observedAt": 1793404800000
+      },
+      "expected": null
+    },
+    {
+      "id": "old-account-emoji",
+      "note": "老号发纯 emoji：没有新号锚点",
+      "input": {
+        "handle": "old_friend",
+        "text": "🍑🍑🍑",
+        "author": {
+          "followers": 20,
+          "following": 400,
+          "createdAt": 1758844800000,
+          "defaultAvatar": true
+        },
+        "observedAt": 1793404800000
+      },
+      "expected": null
     }
   ]
 }

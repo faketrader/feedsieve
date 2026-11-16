@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
 import { hashInstallationId } from '../src/lib/hash';
 import { POLICY, effectiveDailyLimit } from '../src/reports';
+import { sql } from 'drizzle-orm';
+import { getDb } from '../src/db/client';
 
 const ORIGIN = 'https://api.example.com';
 
@@ -22,9 +24,9 @@ async function postReports(installationId: string, handles: string[]): Promise<R
 
 async function installTrust(raw: string): Promise<number | undefined> {
   const hash = await hashInstallationId(env.INSTALLATION_SALT, raw);
-  const row = await env.DB.prepare('SELECT trust FROM installations WHERE id = ?1')
-    .bind(hash)
-    .first<{ trust: number }>();
+  const [row] = await getDb(env).execute<{ trust: number }>(
+    sql`SELECT trust FROM installations WHERE id = ${hash}`,
+  );
   return row?.trust;
 }
 
@@ -33,15 +35,20 @@ describe('reporter trust', () => {
     expect(effectiveDailyLimit(POLICY.dailyReportLimit, 1)).toBe(100);
     expect(effectiveDailyLimit(POLICY.dailyReportLimit, 0.5)).toBe(50);
     // 低信任夹在下限
-    expect(effectiveDailyLimit(POLICY.dailyReportLimit, 0.05)).toBe(
-      POLICY.minDailyLimit,
-    );
+    expect(effectiveDailyLimit(POLICY.dailyReportLimit, 0.05)).toBe(POLICY.minDailyLimit);
   });
 
   it('trust decays once when a day crosses the burst threshold', async () => {
     const raw = 'trust-burst-installation-0001';
     // 29 票（500 上限内分两批）→ 未越线
-    expect((await postReports(raw, Array.from({ length: 29 }, (_, i) => `b_${i}`))).status).toBe(200);
+    expect(
+      (
+        await postReports(
+          raw,
+          Array.from({ length: 29 }, (_, i) => `b_${i}`),
+        )
+      ).status,
+    ).toBe(200);
     expect(await installTrust(raw)).toBe(1);
 
     // 第 30 票越线 → 衰减一档
@@ -58,11 +65,10 @@ describe('reporter trust', () => {
     const hash = await hashInstallationId(env.INSTALLATION_SALT, raw);
     const today = new Date().toISOString().slice(0, 10);
     // trust 0.5 → 限额 50；先注满 50
-    await env.DB.prepare(
-      'INSERT INTO installations (id, first_seen_at, last_seen_at, reports_day, reports_today, trust) VALUES (?1, ?2, ?2, ?3, 50, 0.5)',
-    )
-      .bind(hash, Math.floor(Date.now() / 1000), today)
-      .run();
+    const nowSec = Math.floor(Date.now() / 1000);
+    await getDb(env).execute(sql`
+      INSERT INTO installations (id, first_seen_at, last_seen_at, reports_day, reports_today, trust)
+      VALUES (${hash}, ${nowSec}, ${nowSec}, ${today}, 50, 0.5)`);
 
     const res = await postReports(raw, ['capped_handle']);
     expect(res.status).toBe(429);

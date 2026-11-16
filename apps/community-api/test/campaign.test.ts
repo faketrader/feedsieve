@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
 import { generateSnapshot } from '../src/snapshot';
+import { spreadLatestReport } from './vote-days';
 
 const ORIGIN = 'https://api.example.com';
 
@@ -27,6 +28,7 @@ async function report(
     env,
   );
   expect(res.status).toBe(200);
+  await spreadLatestReport();
   const body = (await res.json()) as {
     results: { status: string; error?: string }[];
   };
@@ -34,10 +36,7 @@ async function report(
 }
 
 /** 3 个独立安装上报同一 handle → 自动升 candidate，进快照 */
-async function promoteToCandidate(
-  handle: string,
-  extra: Record<string, unknown> = {},
-) {
+async function promoteToCandidate(handle: string, extra: Record<string, unknown> = {}) {
   for (let i = 1; i <= 3; i++) {
     await report(`ev${i}-${handle}-install-0001-ffffff`, handle, extra);
   }
@@ -58,9 +57,7 @@ async function publishAndGetEntry(handle: string): Promise<Entry | undefined> {
   ).json()) as { snapshot_version: string; files: { path: string }[] };
   const body = (await (
     await worker.fetch(
-      new Request(
-        `${ORIGIN}/v1/snapshots/${latest.snapshot_version}/${latest.files[0]!.path}`,
-      ),
+      new Request(`${ORIGIN}/v1/snapshots/${latest.snapshot_version}/${latest.files[0]!.path}`),
       env,
     )
   ).json()) as { entries: Entry[] };

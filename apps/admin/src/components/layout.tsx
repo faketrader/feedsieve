@@ -55,7 +55,9 @@ export function Layout() {
           </div>
           <div className="flex flex-col">
             <div className="flex items-center gap-1.5">
-              <span className="text-base font-extrabold tracking-tight text-foreground">FeedSieve</span>
+              <span className="text-base font-extrabold tracking-tight text-foreground">
+                FeedSieve
+              </span>
               <span className="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[9.5px] font-bold text-amber-700 dark:text-amber-400 uppercase tracking-wider">
                 Admin
               </span>
@@ -93,10 +95,15 @@ export function PageHeader({ title, children }: { title: string; children?: Reac
 export function Hint({ text }: { text: string }) {
   return (
     <Tooltip>
-      <TooltipTrigger className="text-muted-foreground/60 transition-colors hover:text-amber-600" aria-label={text}>
+      <TooltipTrigger
+        className="text-muted-foreground/60 transition-colors hover:text-amber-600"
+        aria-label={text}
+      >
         <CircleAlert className="size-3.5" />
       </TooltipTrigger>
-      <TooltipContent className="bg-zinc-900 text-zinc-100 border-zinc-800 shadow-lg text-xs py-1.5 px-2.5 max-w-xs">{text}</TooltipContent>
+      <TooltipContent className="bg-zinc-900 text-zinc-100 border-zinc-800 shadow-lg text-xs py-1.5 px-2.5 max-w-xs">
+        {text}
+      </TooltipContent>
     </Tooltip>
   );
 }
@@ -119,11 +126,21 @@ export function LoadError({ error, onRetry }: { error: unknown; onRetry: () => v
     <div className="mt-6 flex flex-col items-start gap-3 rounded-xl border border-dashed border-destructive/40 bg-destructive/5 p-6 text-sm text-foreground">
       <span className="font-medium text-destructive">{message}</span>
       {needsRelogin ? (
-        <Button variant="outline" size="sm" onClick={() => window.location.reload()} className="border-destructive/30 hover:bg-destructive/10">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => window.location.reload()}
+          className="border-destructive/30 hover:bg-destructive/10"
+        >
           重新登录
         </Button>
       ) : (
-        <Button variant="outline" size="sm" onClick={onRetry} className="border-destructive/30 hover:bg-destructive/10">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onRetry}
+          className="border-destructive/30 hover:bg-destructive/10"
+        >
           重试
         </Button>
       )}

@@ -33,12 +33,7 @@ const FIELD_TOGGLES = encodeURIComponent('{"withAuxiliaryUserLabels":false}');
  *                   绝不能伪装成「查无此人」
  */
 export type ResolveUserIdFailureCode =
-  | 'no_user'
-  | 'rate_limited'
-  | 'http_error'
-  | 'network_error'
-  | 'no_csrf'
-  | 'parse';
+  'no_user' | 'rate_limited' | 'http_error' | 'network_error' | 'no_csrf' | 'parse';
 
 export type ResolveUserIdOutcome =
   | { ok: true; xUserId: string }
@@ -71,6 +66,8 @@ export async function resolveUserIdByHandle(
     const response = await fetchImpl(url, {
       method: 'GET',
       credentials: 'include',
+      // 与拉黑请求同样的超时保护：弱网下不能把队列卡死在 resolve 阶段。
+      signal: AbortSignal.timeout(15_000),
       headers: {
         Authorization: X_WEB_BEARER,
         'X-Twitter-Auth-Type': 'OAuth2Session',

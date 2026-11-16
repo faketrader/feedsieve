@@ -45,26 +45,11 @@ jobs:
       - name: Install (frozen lockfile)
         run: pnpm install --frozen-lockfile
 
-      - name: Lint
-        run: pnpm lint
-
-      - name: Keyword pack artifacts (strip-signature compare + built-in key verify)
-        run: pnpm keyword-packs:check
-
       - name: Build community API and generate route types
         run: pnpm --filter @feedsieve/community-api build
 
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Unit tests (vitest)
-        run: pnpm test
-
-      - name: Community API tests (workerd)
-        run: pnpm --filter @feedsieve/community-api test
-
-      - name: Build extension (wxt)
-        run: pnpm build:extension
+      - name: Verify source and browser builds
+        run: pnpm verify
 
       - name: Install Chromium for MV3 acceptance
         run: pnpm exec playwright install --with-deps chromium
@@ -76,9 +61,6 @@ jobs:
         run: |
           pnpm --filter @feedsieve/admin build
           node scripts/smoke-sample-admin.mjs
-
-      - name: Build Firefox extension (WXT MV3)
-        run: pnpm --filter @feedsieve/extension build:firefox
 
       - name: Lint Firefox package
         run: pnpm dlx web-ext@10.6.0 lint --source-dir apps/extension/.output/firefox-mv3 --output text

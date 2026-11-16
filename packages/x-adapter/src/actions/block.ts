@@ -9,7 +9,7 @@
  * 必须在 x.com 页面上下文执行（content script ISOLATED world 即可）：
  * 需要 document.cookie 的 ct0 与页面会话凭证。
  *
- * 参考：docs/research/PURETWITTER_MECHANISM.md、third_party/tbwl/index.user.js
+ * 参考：third_party/tbwl/index.user.js（MIT）与 X 网页端公开实现。
  */
 
 import { noteActionResult } from '../status';
@@ -19,6 +19,7 @@ export const X_WEB_BEARER =
 
 export type NativeActionFailureCode =
   | 'auth_required'
+  | 'challenge'
   | 'rate_limited'
   | 'http_error'
   | 'network_error'
@@ -54,6 +55,28 @@ export function readCsrfToken(): string | null {
 }
 
 /**
+ * 人机验证 / 登录墙的响应特征。
+ *
+ * X 对撞上风控的账号可能回 401/403 并在响应里带 arkose / challenge 线索，
+ * 也可能把请求导到 /i/flow/login。只认这几种明确特征，认不出来仍按
+ * auth_required 处理——宁可少判一类，也不把普通 403 误标成人机验证
+ * （误判会把用户引去点一个根本不存在的验证码）。
+ */
+const CHALLENGE_MARKER = /arkose|challenge_id|verification_required|\/i\/flow\/login/i;
+
+async function looksLikeChallenge(response: Response): Promise<boolean> {
+  const clone = (response as { clone?: () => Response }).clone;
+  if (typeof clone !== 'function') return false;
+  try {
+    const body = await response.clone().text();
+    return CHALLENGE_MARKER.test(body.slice(0, 2_048));
+  } catch {
+    // 响应体读不出来（流被消费 / 环境不支持）：当作没有特征
+    return false;
+  }
+}
+
+/**
  * 拉黑 / 取消拉黑一个账号（按 x_user_id）。
  *
  * 结果必须如实：网络失败、认证过期、限流都返回结构化错误，绝不假装成功。
@@ -79,6 +102,8 @@ export async function runNativeAction(
     const response = await fetchImpl(ENDPOINTS[type], {
       method: 'POST',
       credentials: 'include',
+      // X 偶尔会挂住请求；没有超时会让整个拉黑队列卡在 running。
+      signal: AbortSignal.timeout(15_000),
       headers: {
         'content-type': 'application/x-www-form-urlencoded',
         Authorization: X_WEB_BEARER,
@@ -93,7 +118,14 @@ export async function runNativeAction(
     if (response.ok) {
       result = { ok: true };
     } else if (response.status === 401 || response.status === 403) {
-      result = { ok: false, code: 'auth_required', message: `HTTP ${response.status}`, statusCode: response.status };
+      // 401/403 先分「会话失效」和「人机验证」：两者都该停队列，但提示话术不同
+      const challenge = await looksLikeChallenge(response);
+      result = {
+        ok: false,
+        code: challenge ? 'challenge' : 'auth_required',
+        message: `HTTP ${response.status}${challenge ? '（人机验证）' : ''}`,
+        statusCode: response.status,
+      };
     } else if (response.status === 429) {
       const retryAfterSec = Number(response.headers?.get?.('retry-after'));
       result = {
@@ -106,7 +138,12 @@ export async function runNativeAction(
           : {}),
       };
     } else {
-      result = { ok: false, code: 'http_error', message: `HTTP ${response.status}`, statusCode: response.status };
+      result = {
+        ok: false,
+        code: 'http_error',
+        message: `HTTP ${response.status}`,
+        statusCode: response.status,
+      };
     }
     noteActionResult(type, {
       ok: result.ok,

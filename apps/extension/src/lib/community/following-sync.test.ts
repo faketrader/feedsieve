@@ -13,6 +13,7 @@ function page(
     tweets: [],
     promoted: [],
     listMembers: [],
+    users: [],
     following: [],
     ...overrides,
   } as ParsedApiData;
@@ -163,7 +164,11 @@ describe('onPage（分页循环）', () => {
         page({ followingCursor: 'same', sourceUrl: 'https://x.com/i/api/graphql/x/Following' }),
     });
     await sync.onPage(
-      page({ following: [account('a')], followingCursor: 'same', sourceUrl: 'https://x.com/i/api/graphql/x/Following' }),
+      page({
+        following: [account('a')],
+        followingCursor: 'same',
+        sourceUrl: 'https://x.com/i/api/graphql/x/Following',
+      }),
     );
     expect(storage['followingAllowlistSyncStateV1']).toMatchObject({
       status: 'error',
@@ -189,10 +194,18 @@ describe('onPage（分页循环）', () => {
       now: () => ++clock,
       maxPages: 3,
       fetchPage: async () =>
-        page({ following: [account(`u${clock}`)], followingCursor: `c${clock}`, sourceUrl: 'https://x.com/i/api/graphql/x/Following' }),
+        page({
+          following: [account(`u${clock}`)],
+          followingCursor: `c${clock}`,
+          sourceUrl: 'https://x.com/i/api/graphql/x/Following',
+        }),
     });
     await sync.onPage(
-      page({ following: [account('u0')], followingCursor: 'c0', sourceUrl: 'https://x.com/i/api/graphql/x/Following' }),
+      page({
+        following: [account('u0')],
+        followingCursor: 'c0',
+        sourceUrl: 'https://x.com/i/api/graphql/x/Following',
+      }),
     );
     expect(storage['followingAllowlistSyncStateV1']).toMatchObject({
       status: 'error',

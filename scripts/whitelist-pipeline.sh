@@ -12,7 +12,7 @@
 # 行为要点：
 #   - promote 幂等：抢救条目全部已入册时自动跳过 enrich，直接校验
 #   - enrich 断点续跑：X guest 限流中断后，重跑本脚本即接着拉
-#   - publish 同步整份文件进 D1 并触发快照发布（当日一版节流）
+#   - publish 同步整份文件进数据库 并触发快照发布（当日一版节流）
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -41,7 +41,7 @@ if [ "$MODE" = "skip" ]; then
   exit 0
 fi
 if [ "$MODE" = "prompt" ]; then
-  printf "以上校验通过，确认发布进 D1（不 bypass 快照日闸）？[y/N] "
+  printf "以上校验通过，确认发布进数据库（不 bypass 快照日闸）？[y/N] "
   read -r answer
   case "$answer" in
     y | Y | yes) ;;

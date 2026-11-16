@@ -2,6 +2,8 @@ import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
 import { hashInstallationId, hashIp } from '../src/lib/hash';
+import { sql, type SQL } from 'drizzle-orm';
+import { getDb } from '../src/db/client';
 
 const ORIGIN = 'https://api.example.com';
 
@@ -31,10 +33,15 @@ async function postOne(installationId: string, handle: string) {
   return body.results[0];
 }
 
+async function first<T extends Record<string, unknown>>(query: SQL): Promise<T | null> {
+  const [row] = await getDb(env).execute<T>(query);
+  return (row ?? null) as T | null;
+}
+
 async function accountRow(handle: string) {
-  return env.DB.prepare('SELECT status, report_count, category FROM accounts WHERE handle = ?1')
-    .bind(handle)
-    .first<{ status: string; report_count: number; category: string }>();
+  return first<{ status: string; report_count: number; category: string }>(
+    sql`SELECT status, report_count, category FROM accounts WHERE handle = ${handle}`,
+  );
 }
 
 describe('POST /v1/reports', () => {
@@ -49,9 +56,9 @@ describe('POST /v1/reports', () => {
     expect(account?.status).toBe('new');
     expect(account?.category).toBe('bot_spam');
 
-    const stored = await env.DB.prepare('SELECT installation_id FROM reports WHERE handle = ?1')
-      .bind('spam_user')
-      .first<{ installation_id: string }>();
+    const stored = await first<{ installation_id: string }>(
+      sql`SELECT installation_id FROM reports WHERE handle = ${'spam_user'}`,
+    );
     const expectedHash = await hashInstallationId(env.INSTALLATION_SALT, raw);
     expect(stored?.installation_id).toBe(expectedHash);
     expect(stored?.installation_id).not.toContain(raw);
@@ -116,13 +123,11 @@ describe('POST /v1/reports', () => {
     expect(body.results[2]!.status).toBe('rejected');
     expect(body.results[2]!.error).toBe('invalid_detection_source');
 
-    const stored = await env.DB.prepare('SELECT detection_source FROM reports WHERE handle = ?1')
-      .bind('src_manual')
-      .first<{ detection_source: string }>();
+    const stored = await first<{ detection_source: string }>(
+      sql`SELECT detection_source FROM reports WHERE handle = ${'src_manual'}`,
+    );
     expect(stored?.detection_source).toBe('manual');
-    const absent = await env.DB.prepare('SELECT 1 AS present FROM reports WHERE handle = ?1')
-      .bind('src_bad')
-      .first();
+    const absent = await first(sql`SELECT 1 AS present FROM reports WHERE handle = ${'src_bad'}`);
     expect(absent).toBeNull();
   });
 
@@ -147,9 +152,9 @@ describe('POST /v1/reports', () => {
       ['rejected', 'invalid_signal_ids'],
     ]);
 
-    const stored = await env.DB.prepare('SELECT rule_id, signal_ids FROM reports WHERE handle = ?1')
-      .bind('rule_ok')
-      .first<{ rule_id: string; signal_ids: string }>();
+    const stored = await first<{ rule_id: string; signal_ids: string }>(
+      sql`SELECT rule_id, signal_ids FROM reports WHERE handle = ${'rule_ok'}`,
+    );
     expect(stored?.rule_id).toBe('keyword:official:adult-local-door-hookup');
     expect(JSON.parse(stored?.signal_ids ?? '[]')).toEqual([
       'keyword:official:adult-local-door-hookup',
@@ -169,6 +174,7 @@ describe('POST /v1/reports', () => {
         ...Array.from({ length: 10 }, (_, i) =>
           report(`facts_long_${i}`, { tweet_text: '长'.repeat(501) }),
         ),
+        report('facts_none'),
       ],
     });
     expect(res.status).toBe(200);
@@ -178,20 +184,52 @@ describe('POST /v1/reports', () => {
       expect(body.results[i]!.status).toBe('rejected');
       expect(body.results[i]!.error).toBe('invalid_tweet_text');
     }
+    expect(body.results[11]!.status).toBe('recorded');
 
-    const stored = await env.DB.prepare(
-      'SELECT tweet_text, display_name, bio FROM reports WHERE handle = ?1',
-    )
-      .bind('facts_ok')
-      .first<{ tweet_text: string; display_name: string; bio: string }>();
+    const stored = await first<{ tweet_text: string; display_name: string; bio: string }>(
+      sql`SELECT tweet_text, display_name, bio FROM reports WHERE handle = ${'facts_ok'}`,
+    );
     expect(stored?.tweet_text).toBe('领福利加微 xxx');
     expect(stored?.display_name).toBe('福利姐');
     expect(stored?.bio).toBe('punt');
 
-    const empty = await env.DB.prepare('SELECT tweet_text FROM reports WHERE handle = ?1')
-      .bind('src_manual')
-      .first<{ tweet_text: string | null }>();
+    const empty = await first<{ tweet_text: string | null }>(
+      sql`SELECT tweet_text FROM reports WHERE handle = ${'facts_none'}`,
+    );
     expect(empty?.tweet_text).toBeNull();
+  });
+
+  it('strips U+0000 from free text before storing (PostgreSQL text rejects NUL)', async () => {
+    const res = await post({
+      installation_id: 'abababab-6666-4666-8666-abababababab',
+      client_version: '0.2\u0000.0',
+      reports: [
+        report('nul_ok', {
+          tweet_text: '领福利\u0000加微\u0000 xxx',
+          display_name: '福\u0000利姐',
+          bio: 'a\u0000b',
+        }),
+        report('nul_only', { tweet_text: '\u0000\u0000' }),
+      ],
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { results: { status: string; error?: string }[] };
+    expect(body.results[0]!.status).toBe('recorded');
+    // 去掉 NUL 后为空的文本与纯空白一样按非法拒收
+    expect(body.results[1]).toMatchObject({ status: 'rejected', error: 'invalid_tweet_text' });
+
+    const stored = await first<{
+      tweet_text: string;
+      display_name: string;
+      bio: string;
+      client_version: string;
+    }>(
+      sql`SELECT tweet_text, display_name, bio, client_version FROM reports WHERE handle = ${'nul_ok'}`,
+    );
+    expect(stored?.tweet_text).toBe('领福利加微 xxx');
+    expect(stored?.display_name).toBe('福利姐');
+    expect(stored?.bio).toBe('ab');
+    expect(stored?.client_version).toBe('0.2.0');
   });
 
   it('envelopes: bad body / empty array / oversized batch', async () => {
@@ -210,11 +248,10 @@ describe('POST /v1/reports', () => {
     const raw = 'hhhhhhhh-8888-4888-8888-hhhhhhhhhhhh';
     const installHash = await hashInstallationId(env.INSTALLATION_SALT, raw);
     const today = new Date().toISOString().slice(0, 10);
-    await env.DB.prepare(
-      'INSERT INTO installations (id, first_seen_at, last_seen_at, reports_day, reports_today) VALUES (?1, ?2, ?2, ?3, ?4)',
-    )
-      .bind(installHash, Math.floor(Date.now() / 1000), today, 100)
-      .run();
+    const nowSec = Math.floor(Date.now() / 1000);
+    await getDb(env).execute(sql`
+      INSERT INTO installations (id, first_seen_at, last_seen_at, reports_day, reports_today)
+      VALUES (${installHash}, ${nowSec}, ${nowSec}, ${today}, 100)`);
 
     const res = await post({
       installation_id: raw,
@@ -227,9 +264,9 @@ describe('POST /v1/reports', () => {
     const ip = '203.0.113.77';
     const today = new Date().toISOString().slice(0, 10);
     const ipHash = await hashIp(env.INSTALLATION_SALT, ip);
-    await env.DB.prepare('INSERT INTO ip_usage (ip_hash, day, reports_today) VALUES (?1, ?2, ?3)')
-      .bind(ipHash, today, 200)
-      .run();
+    await getDb(env).execute(
+      sql`INSERT INTO ip_usage (ip_hash, day, reports_today) VALUES (${ipHash}, ${today}, 200)`,
+    );
 
     const res = await worker.fetch(
       new Request(`${ORIGIN}/v1/reports`, {
@@ -256,9 +293,9 @@ describe('POST /v1/reports', () => {
     expect((await postOne('batchmix-aaa1-4000-8000-aaaaaaaaaaa1', 'batch_mix_canon'))!.status).toBe(
       'recorded',
     );
-    await env.DB.prepare('UPDATE accounts SET x_user_id = ?2 WHERE handle = ?1')
-      .bind('batch_mix_canon', '555')
-      .run();
+    await getDb(env).execute(
+      sql`UPDATE accounts SET x_user_id = '555' WHERE handle = 'batch_mix_canon'`,
+    );
 
     const res = await post({
       installation_id: 'batchmix-aaa2-4000-8000-aaaaaaaaaaa2',
@@ -283,9 +320,9 @@ describe('POST /v1/reports', () => {
     expect((await accountRow('batch_mix_new'))?.report_count).toBe(1);
     expect((await accountRow('batch_mix_canon'))?.report_count).toBe(2);
     expect(await accountRow('batch_mix_ren')).toBeNull();
-    const aliases = await env.DB.prepare('SELECT aliases FROM accounts WHERE handle = ?1')
-      .bind('batch_mix_canon')
-      .first<{ aliases: string }>();
+    const aliases = await first<{ aliases: string }>(
+      sql`SELECT aliases FROM accounts WHERE handle = ${'batch_mix_canon'}`,
+    );
     expect(JSON.parse(aliases?.aliases ?? '[]')).toContain('batch_mix_ren');
   });
 
@@ -294,9 +331,9 @@ describe('POST /v1/reports', () => {
     expect((await postOne('alias-cap-aaa-4000-8000-aaaaaaaaaaa1', 'alias_cap_old'))!.status).toBe(
       'recorded',
     );
-    await env.DB.prepare('UPDATE accounts SET x_user_id = ?2 WHERE handle = ?1')
-      .bind('alias_cap_old', '777')
-      .run();
+    await getDb(env).execute(
+      sql`UPDATE accounts SET x_user_id = '777' WHERE handle = 'alias_cap_old'`,
+    );
 
     // 新安装的别名配额已用满
     const installerHash = await hashInstallationId(
@@ -304,11 +341,10 @@ describe('POST /v1/reports', () => {
       'alias-cap-aaa-4000-8000-aaaaaaaaaaa2',
     );
     const today = new Date().toISOString().slice(0, 10);
-    await env.DB.prepare(
-      'INSERT INTO installations (id, first_seen_at, last_seen_at, aliases_day, aliases_today) VALUES (?1, ?2, ?2, ?3, ?4)',
-    )
-      .bind(installerHash, Math.floor(Date.now() / 1000), today, 10)
-      .run();
+    const nowSec = Math.floor(Date.now() / 1000);
+    await getDb(env).execute(sql`
+      INSERT INTO installations (id, first_seen_at, last_seen_at, aliases_day, aliases_today)
+      VALUES (${installerHash}, ${nowSec}, ${nowSec}, ${today}, 10)`);
 
     const res = await post({
       installation_id: 'alias-cap-aaa-4000-8000-aaaaaaaaaaa2',
@@ -320,9 +356,9 @@ describe('POST /v1/reports', () => {
     const account = await accountRow('alias_cap_old');
     expect(account?.report_count).toBe(2);
     expect(await accountRow('alias_cap_new')).toBeNull();
-    const aliases = await env.DB.prepare('SELECT aliases FROM accounts WHERE handle = ?1')
-      .bind('alias_cap_old')
-      .first<{ aliases: string }>();
+    const aliases = await first<{ aliases: string }>(
+      sql`SELECT aliases FROM accounts WHERE handle = ${'alias_cap_old'}`,
+    );
     expect(JSON.parse(aliases?.aliases ?? '[]')).not.toContain('alias_cap_new');
 
     // 配额内的别名仍正常写入（另一个新安装，未预置配额行）
@@ -333,9 +369,9 @@ describe('POST /v1/reports', () => {
       installation_id: 'alias-cap-aaa-4000-8000-aaaaaaaaaaa3',
       reports: [report('alias_cap_extra', { x_user_id: '777' })],
     });
-    const later = await env.DB.prepare('SELECT aliases FROM accounts WHERE handle = ?1')
-      .bind('alias_cap_old')
-      .first<{ aliases: string }>();
+    const later = await first<{ aliases: string }>(
+      sql`SELECT aliases FROM accounts WHERE handle = ${'alias_cap_old'}`,
+    );
     expect(JSON.parse(later?.aliases ?? '[]')).toContain('alias_cap_extra');
   });
 });

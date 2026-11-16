@@ -19,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - uses: pnpm/action-setup@v6
 
@@ -37,12 +39,8 @@ jobs:
 
       - name: Verify source and dependencies
         run: |
-          pnpm lint
-          pnpm keyword-packs:check
           pnpm --filter @feedsieve/community-api build
-          pnpm typecheck
-          pnpm test
-          pnpm --filter @feedsieve/community-api test
+          pnpm verify
           pnpm audit --audit-level high
 
       - name: Package Firefox extension and review sources

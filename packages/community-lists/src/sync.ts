@@ -1,4 +1,5 @@
 import { sha256Hex } from './hash';
+import { applySnapshotDelta } from './delta';
 import { parseManifest, parseSnapshotBody } from './validate';
 import {
   buildSigningMessage,
@@ -9,10 +10,14 @@ import {
 import { TRUSTED_KEYS } from './trusted-keys';
 import type { StoredSnapshot } from './types';
 
-export const SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/**
+ * 两次检查 manifest 的最短间隔。服务端每 30 分钟可能发一版，版本变了优先走增量
+ * （/v1/snapshots/delta），只有增量不可用或校验不过才下载全量文件。
+ */
+export const SYNC_INTERVAL_MS = 30 * 60 * 1000;
 
 export type SyncOutcome =
-  | { status: 'updated'; version: string }
+  | { status: 'updated'; version: string; via?: 'delta' }
   | { status: 'unchanged' }
   | { status: 'skipped' }
   | { status: 'error'; error: string };
@@ -23,6 +28,8 @@ export type FetchLike = (url: string) => Promise<Response>;
 export interface SyncSource {
   manifestUrl: string;
   fileUrl: (version: string, path: string) => string;
+  /** 两版之间的增量地址；缺省时总是下载全量 */
+  deltaUrl?: (from: string, to: string) => string;
 }
 
 /** 社区 API（Worker）来源 */
@@ -30,6 +37,7 @@ export function workerSource(apiBase: string): SyncSource {
   return {
     manifestUrl: `${apiBase}/v1/snapshots/latest`,
     fileUrl: (version, path) => `${apiBase}/v1/snapshots/${version}/${path}`,
+    deltaUrl: (from, to) => `${apiBase}/v1/snapshots/delta/${from}/${to}`,
   };
 }
 
@@ -135,6 +143,36 @@ async function syncFromSource(source: SyncSource, options: SyncOptions): Promise
     const file = manifest.value.files.find((candidate) => candidate.path === 'official.json');
     if (!file) {
       return { status: 'error', error: 'machine_snapshot_missing' };
+    }
+    const accept = async (body: string): Promise<boolean> => {
+      if ((await sha256Hex(body)) !== file.sha256) return false;
+      const parsed = parseSnapshotBody(body);
+      return (
+        parsed.ok &&
+        parsed.value.snapshot_version === manifest.value.snapshot_version &&
+        parsed.value.entries.length === file.entries
+      );
+    };
+    // 增量：套在本地已验签的旧版上，重建出的全文必须和签名 manifest 的哈希一致，否则退回全量
+    if (current && source.deltaUrl) {
+      try {
+        const deltaRes = await options.fetchImpl(
+          source.deltaUrl(current.snapshot_version, manifest.value.snapshot_version),
+        );
+        if (deltaRes.ok) {
+          const rebuilt = applySnapshotDelta(current.body, await deltaRes.json());
+          if (rebuilt !== null && (await accept(rebuilt))) {
+            await options.store.set({
+              snapshot_version: manifest.value.snapshot_version,
+              body: rebuilt,
+              synced_at: now(),
+            });
+            return { status: 'updated', version: manifest.value.snapshot_version, via: 'delta' };
+          }
+        }
+      } catch {
+        // 增量不可用：走全量
+      }
     }
     const snapshotRes = await options.fetchImpl(
       source.fileUrl(manifest.value.snapshot_version, file.path),

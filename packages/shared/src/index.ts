@@ -20,3 +20,11 @@ export {
   type SampleReview,
   type SampleVerdict,
 } from './training-sample';
+export {
+  flavorOf,
+  type AiVerdict,
+  type Flavor,
+  type FlavorTone,
+  type Lang,
+  type Rhythm,
+} from './ai-flavor';

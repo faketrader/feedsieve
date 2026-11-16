@@ -9,6 +9,10 @@
  * - 审计：所有写操作记 `admin_audit_log`，actor 为 `agent:<id>`，与人工操作同表可查。
  */
 
+import { asc, desc } from 'drizzle-orm';
+import { collateC } from './lib/sql';
+import { getDb } from './db/client';
+import { accounts, adminAuditLog } from './db/schema';
 import { listMaintainerEntries } from './maintainer-blocklist';
 import { publicErrorCode } from './lib/public-error';
 import {
@@ -152,12 +156,13 @@ export async function recomputeAllAccountCategories(
   let offset = 0;
   let total = 0;
   for (;;) {
-    const rows = await env.DB.prepare(
-      'SELECT handle FROM accounts ORDER BY handle ASC LIMIT ?1 OFFSET ?2',
-    )
-      .bind(CHUNK, offset)
-      .all<{ handle: string }>();
-    const handles = rows.results.map((row) => row.handle);
+    const rows = await getDb(env)
+      .select({ handle: accounts.handle })
+      .from(accounts)
+      .orderBy(asc(collateC(accounts.handle)))
+      .limit(CHUNK)
+      .offset(offset);
+    const handles = rows.map((row) => row.handle);
     if (handles.length === 0) break;
     await refreshAccountsFromLabels(env, handles);
     total += handles.length;
@@ -178,9 +183,7 @@ export async function listAgentKeywords(env: Cloudflare.Env) {
   return listAdminKeywords(env, { limit: null });
 }
 
-export type AgentKeywordResult =
-  | { ok: true; id: string }
-  | { ok: false; error: string };
+export type AgentKeywordResult = { ok: true; id: string } | { ok: false; error: string };
 
 /** 新增/更新词库分类（pack）；保存即发布由路由层随后调用。 */
 export async function upsertAgentKeywordPack(
@@ -205,8 +208,7 @@ export async function upsertAgentKeywordRule(
 }
 
 export type AgentKeywordRemoveResult =
-  | { ok: true; changed: boolean }
-  | { ok: false; error: string };
+  { ok: true; changed: boolean } | { ok: false; error: string };
 
 /** 停用词库分类/规则（幂等）。 */
 export async function removeAgentKeyword(
@@ -233,8 +235,7 @@ export async function readAgentKeywordDetectorConfig(
 }
 
 export type AgentDetectorConfigWriteResult =
-  | { ok: true; saved: boolean }
-  | { ok: false; error: string };
+  { ok: true; saved: boolean } | { ok: false; error: string };
 
 /** 写入天级判定参数（null = 清除）；非法值 fail closed，不落库。 */
 export async function writeAgentKeywordDetectorConfig(
@@ -247,7 +248,14 @@ export async function writeAgentKeywordDetectorConfig(
   }
   const accepted = await setKeywordDetectorConfig(env, raw);
   if (!accepted) return { ok: false, error: 'invalid_detector_config' };
-  await recordAdminAudit(env, actor, 'update', 'keyword_detector_config', 'keyword-detector-config', {});
+  await recordAdminAudit(
+    env,
+    actor,
+    'update',
+    'keyword_detector_config',
+    'keyword-detector-config',
+    {},
+  );
   return { ok: true, saved: raw !== null };
 }
 
@@ -291,15 +299,18 @@ export async function rollbackAgentRelease(
 /** 审计流水（倒序，limit ≤500）。 */
 export async function listAgentAudit(env: Cloudflare.Env, limit = 50): Promise<unknown[]> {
   const bounded = Math.min(Math.max(Math.trunc(limit), 1), 500);
-  const rows = await env.DB.prepare(
-    `SELECT actor_email, action, target_type, target_id, detail, created_at
-     FROM admin_audit_log
-     ORDER BY id DESC
-     LIMIT ?1`,
-  )
-    .bind(bounded)
-    .all();
-  return rows.results;
+  return getDb(env)
+    .select({
+      actor_email: adminAuditLog.actorEmail,
+      action: adminAuditLog.action,
+      target_type: adminAuditLog.targetType,
+      target_id: adminAuditLog.targetId,
+      detail: adminAuditLog.detail,
+      created_at: adminAuditLog.createdAt,
+    })
+    .from(adminAuditLog)
+    .orderBy(desc(adminAuditLog.id))
+    .limit(bounded);
 }
 
 /** 汇总状态：快照 / 官方暂停 / 词库 / 名单 / 候选池指标，供 Agent 巡检一次拿全。 */

@@ -6,12 +6,7 @@ import {
   fingerprintText,
   fingerprintTextV1,
 } from './fingerprint';
-import {
-  SIMHASH_HAMMING_THRESHOLD,
-  hammingDistance,
-  isSimhashV1,
-  simhashFromHex,
-} from './simhash';
+import { SIMHASH_HAMMING_THRESHOLD, hammingDistance, isSimhashV1, simhashFromHex } from './simhash';
 
 export function normalizeHandle(handle: string): string {
   return handle.trim().replace(/^@+/, '').toLowerCase();
@@ -34,6 +29,23 @@ export interface DetectInput {
    * 现在只作为评测层输入：corpus 用例用手工注入表达「词库先命中」的场景。
    */
   keywordCorroborated?: boolean;
+  /**
+   * 作者的公开账号数据（XHR 桥从 X 已返回的接口数据里取，缺字段即缺）：
+   * 只给 fresh-account-combo（新注册小号 + 内容佐证）用，单独永不成立。
+   */
+  author?: DetectAuthor;
+  /** 观测时刻（毫秒）；缺省取当前时间。算账号注册了几天用。 */
+  observedAt?: number;
+}
+
+export interface DetectAuthor {
+  followers?: number;
+  following?: number;
+  tweets?: number;
+  /** 注册时间（毫秒） */
+  createdAt?: number;
+  /** 还在用 X 的默认头像 */
+  defaultAvatar?: boolean;
 }
 
 /** 名单条目的最小形状：协议里只有 handle 是必需的。 */
@@ -86,10 +98,7 @@ export interface DetectorOptions {
  * 返回的每个 Detection 都带 source / reason / ruleId，满足「标注必须可解释」。
  * 干净账号返回 null（不产出任何 UI）。
  */
-export function detect(
-  input: DetectInput,
-  options: DetectorOptions = {},
-): Detection | null {
+export function detect(input: DetectInput, options: DetectorOptions = {}): Detection | null {
   const handle = normalizeHandle(input.handle);
   if (!handle) {
     return null;
@@ -203,9 +212,14 @@ export function detect(
  * 下每条 miss 推文都会整集遍历，每次重新 parse hex 是纯浪费。
  * WeakMap 挂在集合对象上——快照更新产生新 Set 时自然失效。
  */
-const SIMHASH_BITS_CACHE = new WeakMap<ReadonlySet<string>, Map<string, ReturnType<typeof simhashFromHex>>>();
+const SIMHASH_BITS_CACHE = new WeakMap<
+  ReadonlySet<string>,
+  Map<string, ReturnType<typeof simhashFromHex>>
+>();
 
-function knownSimhashBits(simhashes: ReadonlySet<string>): Map<string, ReturnType<typeof simhashFromHex>> {
+function knownSimhashBits(
+  simhashes: ReadonlySet<string>,
+): Map<string, ReturnType<typeof simhashFromHex>> {
   let parsed = SIMHASH_BITS_CACHE.get(simhashes);
   if (!parsed) {
     parsed = new Map();

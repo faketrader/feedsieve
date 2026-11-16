@@ -1,6 +1,8 @@
 import { env } from 'cloudflare:workers';
 import { describe, expect, it } from 'vitest';
 import worker from '../src/index';
+import { sql, type SQL } from 'drizzle-orm';
+import { getDb } from '../src/db/client';
 
 const ORIGIN = 'https://api.example.com';
 
@@ -22,18 +24,25 @@ async function postReport(
   );
 }
 
+async function first<T extends Record<string, unknown>>(query: SQL): Promise<T | null> {
+  const [row] = await getDb(env).execute<T>(query);
+  return (row ?? null) as T | null;
+}
+
 async function accountRow(handle: string) {
-  return env.DB.prepare(
-    'SELECT handle, aliases, report_count FROM accounts WHERE handle = ?1',
-  )
-    .bind(handle)
-    .first<{ handle: string; aliases: string; report_count: number }>();
+  return first<{ handle: string; aliases: string; report_count: number }>(
+    sql`SELECT handle, aliases, report_count FROM accounts WHERE handle = ${handle}`,
+  );
 }
 
 describe('aliases (rename tracking)', () => {
   it('a renamed handle folds into the known account instead of starting fresh', async () => {
     // 老账号 spam_old 拿到 3 票（都带 rest_id 888）
-    for (const id of ['aaaaaaa1-0000-4000-8000-aaaaaaaaaaa1', 'aaaaaaa1-0000-4000-8000-aaaaaaaaaaa2', 'aaaaaaa1-0000-4000-8000-aaaaaaaaaaa3']) {
+    for (const id of [
+      'aaaaaaa1-0000-4000-8000-aaaaaaaaaaa1',
+      'aaaaaaa1-0000-4000-8000-aaaaaaaaaaa2',
+      'aaaaaaa1-0000-4000-8000-aaaaaaaaaaa3',
+    ]) {
       expect((await postReport(id, 'spam_old', '888')).status).toBe(200);
     }
     const before = await accountRow('spam_old');

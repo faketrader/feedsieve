@@ -1,6 +1,12 @@
 import { parseTrainingSample, parseSampleReview } from '@feedsieve/shared';
+import { alias } from 'drizzle-orm/pg-core';
+import { eq, gt, lte, and, sql } from 'drizzle-orm';
+import { getDb } from './db/client';
+import { trainingSampleReviews, trainingSamples } from './db/schema';
 import { hashInstallationId, hashIp, sha256Hex } from './lib/hash';
 import { nowSeconds, utcToday } from './lib/time';
+import { chargeUsageInOrder } from './lib/usage';
+import { compareText, stripNul } from './lib/sql';
 
 export async function ingestTrainingSamples(env: Cloudflare.Env, raw: unknown, ip?: string) {
   const b = raw as Record<string, unknown> | null;
@@ -34,42 +40,36 @@ export async function ingestTrainingSamples(env: Cloudflare.Env, raw: unknown, i
     return { status: 200 as const, body: { accepted: [] as string[], rejected } };
   const identity = await hashInstallationId(env.INSTALLATION_SALT, b.installation_id);
   // Charge requests including retries: bounded immutable history even for already-voting accounts.
-  for (const [key, limit] of [
-    ...(ip ? [[`ip:${await hashIp(env.INSTALLATION_SALT, ip)}`, 1000]] : []),
+  // 先 IP 后安装，串成一条语句：IP 超限则安装计数不动，IP 通过而安装超限时 IP 已扣（与逐项依次执行一致）。
+  const db = getDb(env);
+  const limits: Array<[string, number]> = [
+    ...(ip ? [[`ip:${await hashIp(env.INSTALLATION_SALT, ip)}`, 1000] as [string, number]] : []),
     [`install:${identity}`, 300],
-  ] as [string, number][]) {
-    const used = await env.DB.prepare(
-      `INSERT INTO training_sample_usage(identity, day, count) VALUES (?1, ?2, ?3)
-      ON CONFLICT(identity, day) DO UPDATE SET count = count + excluded.count WHERE count + excluded.count <= ?4`,
+  ];
+  if (!(await chargeUsageInOrder(db, utcToday(), samples.length, limits))) {
+    return { status: 429 as const, body: { error: 'rate_limited' } };
+  }
+  // 按唯一键排序：同一安装并发重试同一批样本时以相同顺序锁行，避免死锁
+  const rows = (
+    await Promise.all(
+      samples.map(async (s) => ({
+        installationId: identity,
+        eventId: s.eventId,
+        handle: s.handle,
+        action: s.action,
+        observedAt: s.observedAt,
+        receivedAt: now,
+        contentHash: await sha256Hex(
+          JSON.stringify([s.text ?? '', s.displayName ?? '', s.bio ?? '']),
+        ),
+        payload: JSON.stringify(s),
+      })),
     )
-      .bind(key, utcToday(), samples.length, limit)
-      .run();
-    if (!used.meta.changes) return { status: 429 as const, body: { error: 'rate_limited' } };
-  }
-  const statements: D1PreparedStatement[] = [];
-  for (const s of samples) {
-    if (!s) continue;
-    const contentHash = await sha256Hex(
-      JSON.stringify([s.text ?? '', s.displayName ?? '', s.bio ?? '']),
-    );
-    statements.push(
-      env.DB.prepare(
-        `INSERT INTO training_samples
-      (installation_id,event_id,handle,action,observed_at,received_at,content_hash,payload)
-      VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(installation_id,event_id) DO NOTHING`,
-      ).bind(
-        identity,
-        s.eventId,
-        s.handle,
-        s.action,
-        s.observedAt,
-        now,
-        contentHash,
-        JSON.stringify(s),
-      ),
-    );
-  }
-  await env.DB.batch(statements);
+  ).sort((a, b) => compareText(a.eventId, b.eventId));
+  await db
+    .insert(trainingSamples)
+    .values(rows)
+    .onConflictDoNothing({ target: [trainingSamples.installationId, trainingSamples.eventId] });
   return { status: 200 as const, body: { accepted: samples.map((s) => s.eventId), rejected } };
 }
 
@@ -80,32 +80,49 @@ export async function listTrainingSamples(
   until?: number,
   reviewUntil?: number,
 ) {
-  const bounds = await env.DB.prepare(
-    'SELECT (SELECT COALESCE(MAX(id),0) FROM training_samples) AS samples, (SELECT COALESCE(MAX(id),0) FROM training_sample_reviews) AS reviews',
-  ).first<{ samples: number; reviews: number }>();
-  const maxId = until ?? bounds!.samples;
-  const maxReviewId = reviewUntil ?? bounds!.reviews;
-  const rows = await env.DB.prepare(
-    `SELECT s.id, s.received_at, s.content_hash, s.payload,
-      r.id AS review_id, r.verdict, r.family, r.tags, r.note, r.created_at AS reviewed_at
-    FROM training_samples s LEFT JOIN training_sample_reviews r ON r.id =
-      (SELECT MAX(id) FROM training_sample_reviews WHERE sample_id = s.id AND id <= ?4)
-    WHERE s.id > ?1 AND s.id <= ?3 ORDER BY s.id LIMIT ?2`,
-  )
-    .bind(after, Math.min(200, Math.max(1, limit)), maxId, maxReviewId)
-    .all<{
-      id: number;
-      received_at: number;
-      content_hash: string;
-      payload: string;
-      review_id: number | null;
-      verdict: string | null;
-      family: string | null;
-      tags: string | null;
-      note: string | null;
-      reviewed_at: number | null;
-    }>();
-  const entries = rows.results.map(({ payload, tags, ...r }) => ({
+  const db = getDb(env);
+  let maxId = until;
+  let maxReviewId = reviewUntil;
+  if (maxId === undefined || maxReviewId === undefined) {
+    // 水位要在所有已分配的 id 都提交之后再读：自增 id 不按提交顺序可见，直接读 MAX(id) 可能跳过
+    // 一条 id 更小、稍晚提交的样本，之后按游标翻页就永远漏掉它。SHARE 锁会等正在进行的插入提交，
+    // 读完立刻随事务释放（只有后台导出走这里，不影响上报热路径）。
+    const bounds = await db.transaction(async (tx) => {
+      await tx.execute(sql`LOCK TABLE ${trainingSamples}, ${trainingSampleReviews} IN SHARE MODE`);
+      const [row] = await tx.execute<{ samples: number; reviews: number }>(
+        sql`SELECT (SELECT COALESCE(MAX(id),0) FROM ${trainingSamples}) AS samples, (SELECT COALESCE(MAX(id),0) FROM ${trainingSampleReviews}) AS reviews`,
+      );
+      return row!;
+    });
+    maxId ??= bounds.samples;
+    maxReviewId ??= bounds.reviews;
+  }
+  const r = alias(trainingSampleReviews, 'r');
+  const rows = await db
+    .select({
+      id: trainingSamples.id,
+      received_at: trainingSamples.receivedAt,
+      content_hash: trainingSamples.contentHash,
+      payload: trainingSamples.payload,
+      review_id: r.id,
+      verdict: r.verdict,
+      family: r.family,
+      tags: r.tags,
+      note: r.note,
+      reviewed_at: r.createdAt,
+    })
+    .from(trainingSamples)
+    .leftJoin(
+      r,
+      eq(
+        r.id,
+        sql`(SELECT MAX(id) FROM ${trainingSampleReviews} WHERE ${trainingSampleReviews.sampleId} = ${trainingSamples.id} AND id <= ${maxReviewId})`,
+      ),
+    )
+    .where(and(gt(trainingSamples.id, after), lte(trainingSamples.id, maxId)))
+    .orderBy(trainingSamples.id)
+    .limit(Math.min(200, Math.max(1, limit)));
+  const entries = rows.map(({ payload, tags, ...r }) => ({
     ...r,
     tags: tags ? JSON.parse(tags) : [],
     sample: JSON.parse(payload),
@@ -127,19 +144,11 @@ export async function reviewTrainingSample(
 ) {
   const review = parseSampleReview(raw);
   if (!Number.isSafeInteger(id) || id <= 0 || !review) return false;
-  const result = await env.DB.prepare(
-    `INSERT INTO training_sample_reviews(sample_id,verdict,family,tags,note,reviewer,created_at)
-    SELECT id,?2,?3,?4,?5,?6,?7 FROM training_samples WHERE id=?1`,
-  )
-    .bind(
-      id,
-      review.verdict,
-      review.family,
-      JSON.stringify(review.tags),
-      review.note,
-      actor,
-      nowSeconds(),
-    )
-    .run();
-  return !!result.meta.changes;
+  const inserted = await getDb(env).execute(sql`
+    INSERT INTO training_sample_reviews (sample_id, verdict, family, tags, note, reviewer, created_at)
+    SELECT id, ${review.verdict}::text, ${review.family}::text, ${JSON.stringify(review.tags)}::text,
+           ${stripNul(review.note)}::text, ${actor}::text, ${nowSeconds()}::bigint
+    FROM ${trainingSamples} WHERE id = ${id}
+    RETURNING id`);
+  return inserted.length > 0;
 }

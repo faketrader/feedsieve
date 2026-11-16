@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { getWhitelistData } from '@/site/data.functions';
 import { pageHead } from '@/site/seo';
-import { ListsTabs, ListPageHeader, HelpIcon } from '@/site/pages/lists/lists-common';
+import { ListPageHeader, HelpIcon } from '@/site/pages/lists/lists-common';
 import type { RosterWhitelistEntry } from '@/roster';
 import { RescuePanel } from '@/site/pages/lists/RescuePanel';
 
@@ -26,9 +26,8 @@ function RescueRoute() {
   return (
     <main className="mx-auto max-w-5xl px-[clamp(18px,2.2vw,34px)] pb-16 pt-8">
       <ListPageHeader
-        title="抢救"
+        title="社区抢救名单"
         meta={roster ? `快照 ${roster.snapshot_version}` : undefined}
-        tabs={<ListsTabs />}
         aside={
           <HelpIcon ariaLabel="抢救名单说明">
             社区抢救记录被验证为「误标正常」的账号：误标票翻案后入册，扩展不会再把该账号标出或拉黑。

@@ -79,6 +79,7 @@ jobs:
           integrated=false
           if ! git merge-base --is-ancestor "$release_commit" HEAD; then
             if ! git merge --no-edit "$release_commit"; then
+              git merge --abort
               echo "::error::Could not merge upstream ${release_tag} into firefox. See the Git output above."
               exit 1
             fi
@@ -114,12 +115,14 @@ jobs:
 
           {
             echo "release_needed=true"
+            echo "dispatch_needed=true"
             echo "integrated=${integrated}"
             echo "release_tag=${release_tag}"
             echo "firefox_tag=${firefox_tag}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Verify integrated Firefox source
+        id: verify
         if: steps.prepare.outputs.release_needed == 'true'
         run: |
           set -euo pipefail
@@ -127,13 +130,10 @@ jobs:
           pnpm --filter @feedsieve/community-api build
           pnpm verify
           pnpm dlx web-ext@10.6.0 lint --source-dir apps/extension/.output/firefox-mv3 --output text
-
-      - name: Audit Firefox release dependencies
-        if: steps.prepare.outputs.release_needed == 'true'
-        run: pnpm audit --audit-level high
+          pnpm audit --audit-level high
 
       - name: Push Firefox integration and dispatch release
-        if: steps.prepare.outputs.release_needed == 'true'
+        if: steps.prepare.outputs.release_needed == 'true' && steps.verify.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}

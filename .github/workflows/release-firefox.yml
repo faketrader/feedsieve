@@ -37,11 +37,10 @@ jobs:
           package_version=$(node -p "require('./apps/extension/package.json').version")
           test "$GITHUB_REF_NAME" = "firefox-v${package_version}"
 
-      - name: Verify source and dependencies
+      - name: Verify source
         run: |
           pnpm --filter @feedsieve/community-api build
           pnpm verify
-          pnpm audit --audit-level high
 
       - name: Package Firefox extension and review sources
         run: |

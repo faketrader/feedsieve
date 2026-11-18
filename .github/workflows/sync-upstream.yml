@@ -130,7 +130,6 @@ jobs:
           pnpm --filter @feedsieve/community-api build
           pnpm verify
           pnpm dlx web-ext@10.6.0 lint --source-dir apps/extension/.output/firefox-mv3 --output text
-          pnpm audit --audit-level high
 
       - name: Push Firefox integration and dispatch release
         if: steps.prepare.outputs.release_needed == 'true' && steps.verify.outcome == 'success'

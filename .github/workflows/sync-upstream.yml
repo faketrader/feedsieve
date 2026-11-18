@@ -2,8 +2,8 @@ name: sync-upstream
 
 on:
   schedule:
-    # 每天 12:34 UTC（新加坡/北京时间 20:34）检查最新正式 Release。
-    - cron: '34 12 * * *'
+    # 每周日 12:34 UTC（新加坡/北京时间 20:34）检查最新正式 Release。
+    - cron: '34 12 * * 0'
   workflow_dispatch:
 
 permissions:

@@ -14,6 +14,7 @@ import { toHandleSet, type DetectAuthor } from '@feedsieve/detector';
 import {
   contextFromPath,
   extractFeedItem,
+  findTweetAvatarImg,
   tweetSelectors,
 } from '@feedsieve/x-adapter';
 import { runDetectionPipeline } from '../detection/detection-pipeline';
@@ -24,7 +25,11 @@ import {
   type PendingBadge,
 } from '../detection/page-scan-controller';
 import { getBundledEntries } from '../community/community-store';
-import { HIDDEN_TWEET_CELL_ATTRIBUTE, hiddenForOtherPost, hideCellsSoon } from '../platform/remove-tweets';
+import {
+  HIDDEN_TWEET_CELL_ATTRIBUTE,
+  hiddenForOtherPost,
+  hideCellsSoon,
+} from '../platform/remove-tweets';
 import { MARK_ATTRIBUTE, type ContentState } from './page-state';
 import { markedForOtherPost, type Badges } from './badges';
 import type { BlockedFold } from './blocked-fold';
@@ -55,7 +60,6 @@ export function createScan(deps: {
   onRuleHit?: (hit: RuleHitItem) => void;
   /** 过滤模块总开关：关掉后不检测、不挂手动拉黑入口；流速装饰仍由 hot 模块控制。 */
   isFilterEnabled?: () => boolean;
-
 }) {
   const { state, controller, fold, badges, manual, insight } = deps;
   const { markCell } = badges;
@@ -160,8 +164,8 @@ export function createScan(deps: {
     const bio = state.bioCache.get(handle);
     const facts = deps.authorFacts?.(handle);
     // X 的默认头像不在 pbs.twimg.com，接口数据里会被消毒掉，只能从页面上看
-    const defaultAvatar = !!element.querySelector(
-      '[data-testid="Tweet-User-Avatar"] img[src*="default_profile_images"]',
+    const defaultAvatar = (findTweetAvatarImg(element)?.getAttribute('src') ?? '').includes(
+      'default_profile_images',
     );
     // revision 快照：虚拟列表复用同一 article 时跳过已标注过的输入；
     // 作者数据晚到（第一次扫描时还没有）也要重扫一次，新注册小号规则才有机会看到

@@ -76,7 +76,7 @@ export const UI_COPY = {
       '只有你点「补全这个博主」时才会向下滚动，也不会额外请求 X：你看到的帖子才会收进来。点「在 X 搜高赞帖」可以一次收进他点赞最高的一批。',
     profileFill: '补全这个博主',
     profileFillHint:
-      '一路滚到底，X 加载出下一批就继续；加载快时几乎不停，随时再点停止。同一博主 3 分钟内只补一次。',
+      '一路滚到底，X 加载出下一批就继续；加载快时几乎不停。跑起来后页面右下角有「停止补全」，关掉面板也能停。同一博主 3 分钟内只补一次。',
     profileFillStop: '停止补全',
     profileFillRunning: '正在慢慢向下滚动补全…',
     profileFillDone: (n: number) => `补全了 ${n} 条`,
@@ -368,7 +368,7 @@ export const UI_COPY = {
       '评论区里的 AI 标签、折叠条，以及回复旁的检测按钮。关闭后 X 页面上不再出现；弹窗「伪人」页仍可手动检测。',
     moduleClean: '界面净化',
     moduleCleanHint:
-      '隐藏「为你推荐」、趋势、推荐关注、付费推广和 Grok，并把字体换成中文更清楚的系统字体。默认关闭，打开后下面的净化项才生效；只改外观，不动内容。',
+      '隐藏「为你推荐」、趋势、推荐关注、付费推广、帖子上的「推广」按钮和 Grok，并把字体换成中文更清楚的系统字体。总开关和下面的细项默认全部关闭，打开总开关后还要按需勾选；只改外观，不动内容。',
     cleanForYou: '隐藏「为你推荐」',
     cleanForYouHint: '隐藏首页的「为你推荐」标签页，并停在「正在关注」。',
     cleanTrends: '隐藏趋势',
@@ -377,8 +377,10 @@ export const UI_COPY = {
     cleanWhoToFollowHint: '隐藏右侧栏的「推荐关注」模块。',
     cleanPromoted: '隐藏付费推广',
     cleanPromotedHint: '隐藏时间线里标着「推广」的帖子。',
+    cleanPromoteButton: '隐藏「推广」按钮',
+    cleanPromoteButtonHint: '隐藏帖子右上角给作者本人看的「推广」按钮。',
     cleanGrok: '隐藏 Grok',
-    cleanGrokHint: '隐藏左侧导航里的 Grok 入口。',
+    cleanGrokHint: '隐藏左侧导航和帖子上的 Grok 入口。',
     cleanPremiumReplies: '淡化纯回复位蓝标',
     cleanPremiumRepliesHint:
       '评论区里蓝标作者、正文很短的回复降低不透明度，减少「只为回复位买蓝 V」的干扰。',
@@ -515,7 +517,7 @@ export const UI_COPY = {
       'It only scrolls when you hit “Complete this profile”, and makes no extra requests to X: only posts you see are collected. “Search top posts on X” collects their most-liked posts in one go.',
     profileFill: 'Complete this profile',
     profileFillHint:
-      'Scrolls all the way to the bottom, continuing as soon as X loads more; click again to stop. Once per creator every 3 minutes.',
+      'Scrolls all the way to the bottom, continuing as soon as X loads more. While it runs, a “Stop completing” button sits in the page corner, so you can stop with the panel closed. Once per creator every 3 minutes.',
     profileFillStop: 'Stop completing',
     profileFillRunning: 'Scrolling down slowly…',
     profileFillDone: (n: number) => `Completed with ${n} more posts`,
@@ -644,7 +646,7 @@ export const UI_COPY = {
       'Shows a popularity line under the profile card on X: tier, followers, follow ratio, median views, outlier rate and posts collected. Click the line to open profile insight.',
     searchAssist: 'Advanced search under the search box',
     searchAssistHint:
-      'On by default. Adds an entry to the right of X\'s search box that opens a full advanced-search dialog: keywords, people, dates, engagement, filters and location each have their own field, and X operators can be typed directly. The same dialog can hand the filters to Google to search this author\'s posts. Turn it off here and it disappears from the page.',
+      "On by default. Adds an entry to the right of X's search box that opens a full advanced-search dialog: keywords, people, dates, engagement, filters and location each have their own field, and X operators can be typed directly. The same dialog can hand the filters to Google to search this author's posts. Turn it off here and it disappears from the page.",
     insight: 'Insight',
     briefTitle: 'Recently seen',
     briefEmpty: 'Scroll x.com for a while and posts that are taking off will show up here',
@@ -811,7 +813,7 @@ export const UI_COPY = {
       'AI pills, fold bars, and the check button next to replies on X. Turning this off removes them from the page; the AI tab in the popup still runs manual checks.',
     moduleClean: 'Cleaner UI',
     moduleCleanHint:
-      'Hides For You, trends, who to follow, promoted posts and Grok, and switches to a system font that renders Chinese properly. Off by default; the options below only take effect when this is on. Appearance only.',
+      'Hides For You, trends, who to follow, promoted posts, the Promote button on your own posts and Grok, and switches to a system font that renders Chinese properly. Everything is off by default; turn this on, then pick the items you want below. Appearance only.',
     cleanForYou: 'Hide “For You”',
     cleanForYouHint: 'Hides the For You tab on home and stays on Following.',
     cleanTrends: 'Hide trends',
@@ -820,8 +822,10 @@ export const UI_COPY = {
     cleanWhoToFollowHint: 'Hides the “Who to follow” module in the right column.',
     cleanPromoted: 'Hide promoted posts',
     cleanPromotedHint: 'Hides posts marked as promoted in the timeline.',
+    cleanPromoteButton: 'Hide the Promote button',
+    cleanPromoteButtonHint: 'Hides the Promote button X shows on your own posts.',
     cleanGrok: 'Hide Grok',
-    cleanGrokHint: 'Hides the Grok entry in the left navigation.',
+    cleanGrokHint: 'Hides Grok entries in the left navigation and on posts.',
     cleanPremiumReplies: 'Dim thin verified replies',
     cleanPremiumRepliesHint:
       'Reduces opacity of short replies by verified accounts, so “bought a blue check for the reply slot” accounts stand out less.',

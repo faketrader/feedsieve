@@ -1,10 +1,12 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { REDESIGN_TWEET_HTML } from '../../../../../fixtures/x/timeline/redesign';
 import { DEFAULT_UI_SETTINGS, type UiSettings } from '../settings/ui-settings';
 import {
   createCleanUi,
   isFollowingTab,
   isForYouTab,
+  isPromoteButton,
   isPromotedArticle,
   isThinPremiumReply,
   isWhoToFollowHeading,
@@ -20,7 +22,24 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-/** 模拟设置已读完：界面净化打开，其余用默认值（含隐藏付费推广），并返回 storage 变更监听器。 */
+/**
+ * 界面净化全部打开：扫描类用例的基线。
+ * 线上默认值是全部关闭（用户不勾选就不该有东西消失），这里显式打开来测各净化逻辑。
+ */
+const UI_ALL_ON: UiSettings = {
+  ...DEFAULT_UI_SETTINGS,
+  cleanUi: true,
+  hideForYou: true,
+  hideTrends: true,
+  hideWhoToFollow: true,
+  hidePromoted: true,
+  hidePromoteButton: true,
+  hideGrok: true,
+  dimPremiumReplies: true,
+  systemFont: true,
+};
+
+/** 模拟设置已读完：界面净化全部打开（真实用户逐项勾选后的状态），并返回 storage 变更监听器。 */
 function stubBrowser(
   overrides: Partial<UiSettings> = {},
 ): Array<(changes: Record<string, unknown>, area: string) => void> {
@@ -29,7 +48,7 @@ function stubBrowser(
     storage: {
       local: {
         get: vi.fn(async () => ({
-          uiSettingsV1: { ...DEFAULT_UI_SETTINGS, cleanUi: true, ...overrides },
+          uiSettingsV1: { ...UI_ALL_ON, v: 2, ...overrides },
         })),
         set: vi.fn(async () => undefined),
       },
@@ -48,7 +67,7 @@ function pushSettings(
   settings: Partial<UiSettings>,
 ): void {
   for (const listener of listeners) {
-    listener({ uiSettingsV1: { newValue: { ...DEFAULT_UI_SETTINGS, ...settings } } }, 'local');
+    listener({ uiSettingsV1: { newValue: { ...UI_ALL_ON, v: 2, ...settings } } }, 'local');
   }
 }
 
@@ -112,6 +131,14 @@ function tweet(options: {
     );
   }
   return el;
+}
+
+/** X 给作者本人看的「推广」按钮：没有 data-testid / aria-label，只有 button 里的一行文案。 */
+function promoteButton(label = '推广'): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.setAttribute('role', 'button');
+  button.innerHTML = `<div><span><span>${label}</span></span></div>`;
+  return button;
 }
 
 describe('clean-ui 选择器', () => {
@@ -242,6 +269,66 @@ describe('clean-ui 选择器', () => {
     expect(isPromotedArticle(document.createElement('article'))).toBe(false);
   });
 
+  it('认出帖子右上角的「推广」按钮，正文、菜单里的同名文字不算', () => {
+    expect(isPromoteButton(promoteButton('推广'))).toBe(true);
+    expect(isPromoteButton(promoteButton('Promote'))).toBe(true);
+    // 正文里的「推广」是用户写的内容
+    const article = tweet({ text: '推广' });
+    expect(isPromoteButton(article.querySelector('[data-testid="tweetText"]')!)).toBe(false);
+    // 下拉菜单里的同名按钮是 X 的操作项，不是帖子上的推广入口
+    const menu = document.createElement('div');
+    menu.setAttribute('role', 'menu');
+    menu.append(promoteButton('推广'));
+    expect(isPromoteButton(menu.querySelector('button')!)).toBe(false);
+    // 不是按钮的同名文字（比如推广帖的标签）
+    const label = document.createElement('span');
+    label.textContent = '推广';
+    expect(isPromoteButton(label)).toBe(false);
+  });
+
+  it('隐藏「推广」按钮只标记按钮本身，菜单里的同名项不动', async () => {
+    vi.useFakeTimers();
+    stubBrowser();
+    window.history.pushState({}, '', '/someone/status/2119635077470777768');
+    const article = tweet({ text: '一条正常的帖子', statusId: '2119635077470777768' });
+    const promote = promoteButton();
+    article.querySelector('[data-testid="User-Name"]')!.after(promote);
+    article.insertAdjacentHTML('beforeend', '<div role="menu"></div>');
+    article.querySelector('[role="menu"]')!.append(promoteButton());
+    document.body.append(article);
+    const clean = createCleanUi();
+    clean.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(promote.getAttribute('data-fs-clean')).toBe('promote-btn');
+      const menuButton = article.querySelector('[role="menu"] button')!;
+      expect(menuButton.hasAttribute('data-fs-clean')).toBe(false);
+      expect(document.documentElement.hasAttribute('data-fs-clean-promote-btn')).toBe(true);
+      const css = document.getElementById('feedsieve-clean-ui-styles')?.textContent ?? '';
+      expect(css).toContain('[data-fs-clean="promote-btn"]');
+    } finally {
+      clean.stop();
+    }
+  });
+
+  it('关掉隐藏「推广」按钮后不再标记，页面属性也不留', async () => {
+    vi.useFakeTimers();
+    stubBrowser({ hidePromoteButton: false });
+    const article = tweet({ text: '一条正常的帖子' });
+    const promote = promoteButton();
+    article.querySelector('[data-testid="User-Name"]')!.after(promote);
+    document.body.append(article);
+    const clean = createCleanUi();
+    clean.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(promote.hasAttribute('data-fs-clean')).toBe(false);
+      expect(document.documentElement.hasAttribute('data-fs-clean-promote-btn')).toBe(false);
+    } finally {
+      clean.stop();
+    }
+  });
+
   it('隐藏付费推广只藏整条推广帖，不碰视频/GIF 的容器标记', async () => {
     vi.useFakeTimers();
     stubBrowser();
@@ -278,7 +365,9 @@ describe('clean-ui 选择器', () => {
       await vi.advanceTimersByTimeAsync(2_000);
       expect(document.querySelector('#side')!.getAttribute('data-fs-clean')).toBe('trends');
       expect(
-        document.querySelector('[data-testid="primaryColumn"] section')!.hasAttribute('data-fs-clean'),
+        document
+          .querySelector('[data-testid="primaryColumn"] section')!
+          .hasAttribute('data-fs-clean'),
       ).toBe(false);
     } finally {
       clean.stop();
@@ -373,6 +462,36 @@ describe('clean-ui 选择器', () => {
     }
   });
 
+  it('隐藏 Grok 也藏帖子头部的 Grok 操作按钮，正文和菜单里的同名内容不动', async () => {
+    vi.useFakeTimers();
+    stubBrowser();
+    const article = tweet({ text: '一条正常的帖子' });
+    article
+      .querySelector('[data-testid="User-Name"]')!
+      .insertAdjacentHTML(
+        'afterend',
+        '<button id="grok-btn" aria-label="Grok 操作"><svg></svg></button>' +
+          '<button id="grok-btn-en" aria-label="Grok actions"><svg></svg></button>',
+      );
+    article.insertAdjacentHTML(
+      'beforeend',
+      '<div role="menu"><button id="menu-grok-btn" aria-label="Grok 操作"></button></div>',
+    );
+    document.body.append(article);
+    const clean = createCleanUi();
+    clean.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      // 帖子头部的 Grok 按钮按 aria-label 认（中英文界面都覆盖），和导航入口同一个标记
+      expect(document.querySelector('#grok-btn')!.getAttribute('data-fs-clean')).toBe('grok');
+      expect(document.querySelector('#grok-btn-en')!.getAttribute('data-fs-clean')).toBe('grok');
+      // 下拉菜单里的同名按钮是操作菜单，不跟着藏
+      expect(document.querySelector('#menu-grok-btn')!.hasAttribute('data-fs-clean')).toBe(false);
+    } finally {
+      clean.stop();
+    }
+  });
+
   it('界面净化关着时不观察 DOM；打开才 observe，关掉和 stop 后 disconnect', async () => {
     vi.useFakeTimers();
     const FakeObserver = fakeObserverClass();
@@ -456,7 +575,7 @@ describe('clean-ui 选择器', () => {
       storage: {
         local: {
           get: vi.fn(async () => ({
-            uiSettingsV1: { ...DEFAULT_UI_SETTINGS, cleanUi: true },
+            uiSettingsV1: { ...UI_ALL_ON, v: 2 },
           })),
           set: vi.fn(async () => undefined),
         },
@@ -481,10 +600,250 @@ describe('clean-ui 选择器', () => {
 
     // stop 之后才送达的 storage 变化（比如读设置有延迟）不能再把页面改回去
     for (const listener of listeners) {
-      listener({ uiSettingsV1: { newValue: { ...DEFAULT_UI_SETTINGS, cleanUi: true } } }, 'local');
+      listener({ uiSettingsV1: { newValue: { ...UI_ALL_ON, v: 2 } } }, 'local');
     }
     await vi.advanceTimersByTimeAsync(2_000);
     expect(document.getElementById('feedsieve-clean-ui-styles')).toBeNull();
     expect(document.querySelector('a')?.hasAttribute('data-fs-clean')).toBe(false);
+  });
+
+  it('无 data-testid 的新版 X：蓝标短回复淡化、Grok「解释这个帖子」按钮隐藏、自己的推广按钮不误当推广帖', async () => {
+    vi.useFakeTimers();
+    stubBrowser({ hidePromoteButton: false });
+    window.history.pushState({}, '', '/focal_op/status/1800000000000000000');
+    const focalHtml = REDESIGN_TWEET_HTML.replaceAll('sample_user', 'focal_op').replaceAll(
+      '1800000000000000001',
+      '1800000000000000000',
+    );
+    const shortReplyHtml = REDESIGN_TWEET_HTML.replace('Sample post body.', '同意');
+    const promotedAdHtml = REDESIGN_TWEET_HTML.replaceAll('sample_user', 'ad_user').replace(
+      '<span><a class="x-link" href="/ad_user/status/1800000000000000001">1小时</a></span>',
+      '<span>推广</span>',
+    );
+    document.body.innerHTML = `
+      <div id="main">${focalHtml}${shortReplyHtml}${promotedAdHtml}</div>
+      <aside role="complementary" id="wtf"><h2 role="heading">推荐关注</h2></aside>
+      <aside><section role="region" id="trends-sec"><h2 role="heading">有什么新鲜事</h2></section></aside>`;
+    const articles = [...document.querySelectorAll('article')];
+    // 作者自己的帖子里带一个「推广」按钮，hidePromoted 不能把整条帖子当广告藏掉
+    articles[0]!.querySelector('.flex.shrink-0.items-center.gap-1')!.append(promoteButton('推广'));
+
+    const clean = createCleanUi();
+    clean.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(articles[0]!.hasAttribute('data-fs-clean')).toBe(false);
+      expect(articles[1]!.getAttribute('data-fs-clean')).toBe('premium');
+      expect(articles[2]!.getAttribute('data-fs-clean')).toBe('promoted');
+      // 新版右上角 Grok 按钮（aria-label="解释这个帖子"）被识别并标记
+      expect(
+        articles[1]!
+          .querySelector('button[aria-label="解释这个帖子"]')!
+          .getAttribute('data-fs-clean'),
+      ).toBe('grok');
+      // 无 sidebarColumn 时侧栏推荐关注与趋势仍能按语义容器隐藏
+      expect(document.getElementById('wtf')!.getAttribute('data-fs-clean')).toBe('follow');
+      expect(document.getElementById('trends-sec')!.getAttribute('data-fs-clean')).toBe('trends');
+    } finally {
+      clean.stop();
+    }
+  });
+
+  it('无 sidebarColumn 且右侧栏共用单个 aside 时：隐藏趋势/推荐关注只标各自卡片，不连坐搜索框与其它模块', async () => {
+    vi.useFakeTimers();
+    const listeners = stubBrowser({ hideTrends: true, hideWhoToFollow: false });
+    document.body.innerHTML = `
+      <aside role="complementary" id="shared-sidebar">
+        <form role="search" id="search-form"><input type="search" aria-label="搜索" /></form>
+        <div id="live-card"><h2 role="heading">X 上的直播</h2><div>某直播间</div></div>
+        <div id="trends-card">
+          <h1 role="heading">当前趋势</h1>
+          <div><h2 role="heading">有什么新鲜事</h2><div>趋势条目</div></div>
+        </div>
+        <div id="wtf-card"><h2 role="heading">推荐关注</h2><div>@alice</div></div>
+        <nav aria-label="页脚" id="sidebar-footer"><a href="/tos">服务条款</a></nav>
+      </aside>`;
+
+    const clean = createCleanUi();
+    clean.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      // 只开启 hideTrends：仅趋势卡片被标记，外层共用 aside、搜索框、直播卡片、推荐关注、页脚均保留
+      expect(document.getElementById('trends-card')!.getAttribute('data-fs-clean')).toBe('trends');
+      expect(document.getElementById('shared-sidebar')!.hasAttribute('data-fs-clean')).toBe(false);
+      expect(document.getElementById('search-form')!.hasAttribute('data-fs-clean')).toBe(false);
+      expect(document.getElementById('live-card')!.hasAttribute('data-fs-clean')).toBe(false);
+      expect(document.getElementById('wtf-card')!.hasAttribute('data-fs-clean')).toBe(false);
+      expect(document.getElementById('sidebar-footer')!.hasAttribute('data-fs-clean')).toBe(false);
+
+      // 切换为只开启 hideWhoToFollow：仅推荐关注卡片被标记
+      pushSettings(listeners, { hideTrends: false, hideWhoToFollow: true });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(document.getElementById('wtf-card')!.getAttribute('data-fs-clean')).toBe('follow');
+      expect(document.getElementById('trends-card')!.hasAttribute('data-fs-clean')).toBe(false);
+      expect(document.getElementById('shared-sidebar')!.hasAttribute('data-fs-clean')).toBe(false);
+      expect(document.getElementById('search-form')!.hasAttribute('data-fs-clean')).toBe(false);
+    } finally {
+      clean.stop();
+    }
+  });
+
+  it('无 sidebarColumn 且共用 aside 仅含搜索框与单一模块时：仍只藏模块卡片，不吞掉搜索框', async () => {
+    vi.useFakeTimers();
+    stubBrowser({ hideTrends: false, hideWhoToFollow: true });
+    document.body.innerHTML = `
+      <aside role="complementary" id="shared-only-wtf">
+        <form role="search" id="search-only"><input type="search" placeholder="搜索" /></form>
+        <div id="wtf-only-card"><h2 role="heading">推荐关注</h2><div>@bob</div></div>
+      </aside>`;
+
+    const clean = createCleanUi();
+    clean.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(document.getElementById('wtf-only-card')!.getAttribute('data-fs-clean')).toBe(
+        'follow',
+      );
+      expect(document.getElementById('shared-only-wtf')!.hasAttribute('data-fs-clean')).toBe(false);
+      expect(document.getElementById('search-only')!.hasAttribute('data-fs-clean')).toBe(false);
+    } finally {
+      clean.stop();
+    }
+  });
+
+  it('详情页主帖不排在首条 article 时：hidePromoted 按 isFocalTweet 豁免真主帖，前置广告与引用/正文提及主帖的推广回复照常隐藏', async () => {
+    vi.useFakeTimers();
+    stubBrowser();
+    window.history.pushState({}, '', '/focal_op/status/1800000000000000222');
+
+    const parentPost = tweet({ statusId: '1800000000000000111', text: '父帖正文' });
+    // 新版推广主帖：去掉全部 /status/ 链接（含时间戳、配图、查看次数），仅底部动作栏回复链接带 in_reply_to=主帖id
+    const promotedFocalHtml = REDESIGN_TWEET_HTML.replaceAll('sample_user', 'focal_op')
+      .replace(
+        '<span><a class="x-link" href="/focal_op/status/1800000000000000001">1小时</a></span>',
+        '<span>推广</span>',
+      )
+      .replaceAll('/focal_op/status/1800000000000000001/photo/1', '#')
+      .replaceAll('/focal_op/status/1800000000000000001/analytics', '#')
+      .replaceAll('1800000000000000001', '1800000000000000222');
+    // 引用了主帖状态链接的推广回复：不能因引用卡内含主帖链接而被误判为主帖豁免
+    const quotingPromotedReply = tweet({
+      meta: '推广',
+      statusId: '1800000000000000333',
+      text: '推广回复',
+    });
+    // 去掉自身时间戳，换上推广标签 + 引用主帖的卡片
+    quotingPromotedReply.querySelector('a[href*="/status/"]')!.replaceWith(
+      Object.assign(document.createElement('span'), { textContent: '推广' }),
+    );
+    quotingPromotedReply.insertAdjacentHTML(
+      'beforeend',
+      '<div role="link"><a href="/focal_op/status/1800000000000000222">引用主帖</a></div>',
+    );
+    // 正文里直接贴了主帖 /status/ 链接的推广回复：同样不是主帖本身，必须照常隐藏
+    const mentioningPromotedReply = tweet({
+      meta: '推广',
+      text: '正文贴主帖链接',
+    });
+    mentioningPromotedReply.querySelector('[data-testid="tweetText"]')!.innerHTML =
+      '快看 <a href="/focal_op/status/1800000000000000222">原帖</a> 领福利';
+
+    const container = document.createElement('div');
+    container.innerHTML = promotedFocalHtml;
+    const promotedFocal = container.firstElementChild as HTMLElement;
+    expect(promotedFocal.querySelector('a[href*="/status/"]')).toBeNull();
+    const leadingAd = tweet({ meta: '推广', text: '插在前面的推广广告' });
+
+    document.body.append(
+      leadingAd,
+      parentPost,
+      promotedFocal,
+      quotingPromotedReply,
+      mentioningPromotedReply,
+    );
+
+    const clean = createCleanUi();
+    clean.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(promotedFocal.hasAttribute('data-fs-clean')).toBe(false);
+      expect(parentPost.hasAttribute('data-fs-clean')).toBe(false);
+      expect(leadingAd.getAttribute('data-fs-clean')).toBe('promoted');
+      expect(quotingPromotedReply.getAttribute('data-fs-clean')).toBe('promoted');
+      expect(mentioningPromotedReply.getAttribute('data-fs-clean')).toBe('promoted');
+    } finally {
+      clean.stop();
+    }
+  });
+
+  it('详情页旧版无任何状态 id 的推广主帖排在父帖与前置广告之后时：按已知 id 排除与 URL 作者匹配准确豁免真主帖', async () => {
+    vi.useFakeTimers();
+    stubBrowser();
+    window.history.pushState({}, '', '/focal_op/status/1800000000000000222');
+
+    const leadingAd = tweet({ meta: '推广', text: '前置广告' });
+    leadingAd.querySelector('[data-testid="User-Name"] a')!.setAttribute('href', '/ad_vendor');
+    const parentPost = tweet({ statusId: '1800000000000000111', text: '带已知父帖 id 的推文' });
+    const legacyFocal = tweet({ meta: '推广', text: '完全无 status 链接与 in_reply_to 的主帖' });
+    legacyFocal.querySelector('[data-testid="User-Name"] a')!.setAttribute('href', '/focal_op');
+    const promotedReply = tweet({ meta: '推广', text: '评论区推广广告' });
+    promotedReply.querySelector('[data-testid="User-Name"] a')!.setAttribute('href', '/spam_ad');
+
+    document.body.append(leadingAd, parentPost, legacyFocal, promotedReply);
+
+    const clean = createCleanUi();
+    clean.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(legacyFocal.hasAttribute('data-fs-clean')).toBe(false);
+      expect(parentPost.hasAttribute('data-fs-clean')).toBe(false);
+      expect(leadingAd.getAttribute('data-fs-clean')).toBe('promoted');
+      expect(promotedReply.getAttribute('data-fs-clean')).toBe('promoted');
+    } finally {
+      clean.stop();
+    }
+  });
+
+  it('无 sidebarColumn 搜索页侧栏：不误吞前置筛选框、无标题页脚与 combobox 搜索框，且正常隐藏右侧栏趋势', async () => {
+    vi.useFakeTimers();
+    stubBrowser({ hideTrends: true, hideWhoToFollow: true });
+    window.history.pushState({}, '', '/search?q=feedsieve');
+
+    document.body.innerHTML = `
+      <main id="search-results"><article data-testid="tweet"><div data-testid="User-Name"><a href="/u">u</a></div><div data-testid="tweetText">结果</div></article></main>
+      <aside role="complementary" id="flat-filter-aside">
+        <div id="filter-group" role="radiogroup"><div>来自任何人</div><div>你关注的人</div></div>
+        <h2 role="heading">推荐关注</h2>
+        <div>@flat_user</div>
+      </aside>
+      <aside role="complementary" id="stack-aside">
+        <div id="combobox-wrap"><input type="text" role="combobox" placeholder="搜索" /></div>
+        <div id="cards-stack">
+          <section role="region" id="search-trends"><h1 role="heading">当前趋势</h1><h2 role="heading">有什么新鲜事</h2><div>趋势 A</div></section>
+          <div id="search-wtf"><h2 role="heading">推荐关注</h2><div>@card_user</div></div>
+          <div id="plain-footer"><a href="/tos">服务条款</a><a href="/privacy">隐私政策</a></div>
+        </div>
+      </aside>`;
+
+    const clean = createCleanUi();
+    clean.start();
+    try {
+      await vi.advanceTimersByTimeAsync(2_000);
+      // 平铺在 radiogroup 之后的标题宁可退化不藏，也绝不把共用 aside 和搜索筛选一起藏掉
+      expect(document.getElementById('flat-filter-aside')!.hasAttribute('data-fs-clean')).toBe(
+        false,
+      );
+      expect(document.getElementById('filter-group')!.hasAttribute('data-fs-clean')).toBe(false);
+      // 卡片包裹层下有普通 div 页脚链接时：只标各自模块卡片，不爬到 #cards-stack 或吞掉页脚与 combobox
+      expect(document.getElementById('search-trends')!.getAttribute('data-fs-clean')).toBe(
+        'trends',
+      );
+      expect(document.getElementById('search-wtf')!.getAttribute('data-fs-clean')).toBe('follow');
+      expect(document.getElementById('cards-stack')!.hasAttribute('data-fs-clean')).toBe(false);
+      expect(document.getElementById('plain-footer')!.hasAttribute('data-fs-clean')).toBe(false);
+      expect(document.getElementById('combobox-wrap')!.hasAttribute('data-fs-clean')).toBe(false);
+    } finally {
+      clean.stop();
+    }
   });
 });

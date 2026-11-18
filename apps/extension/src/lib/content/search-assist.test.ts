@@ -219,8 +219,7 @@ describe('搜索框高级搜索弹窗', () => {
     create({ opened, tabs, path: '/' });
     open();
 
-    const button = (selector: string) =>
-      dialog().querySelector<HTMLButtonElement>(selector)!;
+    const button = (selector: string) => dialog().querySelector<HTMLButtonElement>(selector)!;
     expect(button('.fs-adv-go').disabled).toBe(true);
     expect(button('.fs-adv-google').disabled).toBe(true);
 
@@ -249,9 +248,7 @@ describe('搜索框高级搜索弹窗', () => {
     expect(document.activeElement).toBe(first);
 
     first.focus();
-    root.dispatchEvent(
-      new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }),
-    );
+    root.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }));
     expect(document.activeElement).toBe(last);
   });
 
@@ -361,5 +358,21 @@ describe('搜索框高级搜索弹窗', () => {
     expect(trigger().parentElement?.getAttribute('data-testid')).toBe(
       'SearchBox_Search_Input_label',
     );
+  });
+
+  it('无 sidebarColumn 与 SearchBox testid 的新版搜索栏仍能挂载高级搜索入口', () => {
+    document.body.innerHTML = `
+      <aside>
+        <form role="search">
+          <label class="search-capsule">
+            <input type="search" aria-label="搜索" />
+          </label>
+        </form>
+      </aside>`;
+    const opened: string[] = [];
+    const tabs: string[] = [];
+    create({ opened, tabs });
+    expect(assist!.mounted()).toBe(true);
+    expect(trigger().parentElement?.classList.contains('search-capsule')).toBe(true);
   });
 });

@@ -23,8 +23,10 @@ import { articleToMarkdown } from './article-export';
 import { insertLocalImages, readImageSlots } from './article-images';
 import { saveBackup } from './schedule-store';
 
-const EDITOR_SELECTOR = '[data-testid="composer"]';
-const TITLE_SELECTOR = 'textarea[name="文章标题"], [data-testid="twitter-article-title"] textarea';
+const EDITOR_SELECTOR =
+  ':is([data-testid="composer"], .DraftEditor-editorContainer [contenteditable="true"], [role="textbox"][contenteditable="true"])';
+const TITLE_SELECTOR =
+  'textarea[name="文章标题"], textarea[name="Article title"], [data-testid="twitter-article-title"] textarea';
 const PANEL_ID = 'feedsieve-article-panel';
 const STYLE_ID = 'feedsieve-article-styles';
 const TOAST_ID = 'feedsieve-article-toast';
@@ -70,8 +72,7 @@ const COPY = {
     insertImages: (n: number) => `Insert images (${n})`,
     imageInserting: 'Inserting images…',
     imageInserted: (n: number) => `Inserted ${n} image${n > 1 ? 's' : ''}`,
-    imageInsertedLeft: (n: number, left: number) =>
-      `Inserted ${n}; ${left} still to insert`,
+    imageInsertedLeft: (n: number, left: number) => `Inserted ${n}; ${left} still to insert`,
     imageInsertFailed: 'Image insert failed; insert manually or undo',
   },
 } as const;
@@ -349,7 +350,8 @@ export function createArticleHelper(deps: ArticleHelperDeps) {
     toast(copy().imageInserting);
     const result = await insertLocalImages({ host: editorEl, files, slots }).catch(() => null);
     if (!result || result.inserted === 0) toast(copy().imageInsertFailed);
-    else if (result.remaining > 0) toast(copy().imageInsertedLeft(result.inserted, result.remaining));
+    else if (result.remaining > 0)
+      toast(copy().imageInsertedLeft(result.inserted, result.remaining));
     else toast(copy().imageInserted(result.inserted));
     scheduleRender();
   }
@@ -457,9 +459,11 @@ export function createArticleHelper(deps: ArticleHelperDeps) {
       button.title = c.insertImages(imageSlots.length);
       button.setAttribute('aria-label', c.insertImages(imageSlots.length));
       button.innerHTML = ICONS.image;
-      button.append(Object.assign(document.createElement('span'), {
-        textContent: c.insertImages(imageSlots.length),
-      }));
+      button.append(
+        Object.assign(document.createElement('span'), {
+          textContent: c.insertImages(imageSlots.length),
+        }),
+      );
       button.addEventListener('click', insertImagesFromPicker);
       row.append(button);
       panel.replaceChildren(head, row, list);

@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { REDESIGN_TWEET_HTML } from '../../../../../fixtures/x/timeline/redesign';
 import { createAiCheck } from './ai-check';
 
 function tweet(handle: string, postId: string): string {
@@ -357,11 +358,9 @@ it('打开「标记已关注账号」后，已关注账号也打标；个人白�
 
 it('模块总开关关掉后撤掉标签和检测入口，重新打开就恢复', async () => {
   history.replaceState(null, '', '/op/status/900');
-  document.body.innerHTML = [
-    tweet('op', '900'),
-    tweet('farm', '901'),
-    tweet('other', '902'),
-  ].join('');
+  document.body.innerHTML = [tweet('op', '900'), tweet('farm', '901'), tweet('other', '902')].join(
+    '',
+  );
   let enabled = false;
   (globalThis as unknown as { browser: unknown }).browser = {
     runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() } },
@@ -456,4 +455,246 @@ describe('通知页的 AI 图标', () => {
     expect(articles[3]!.querySelector('[data-fs-action="ai"]')).toBeNull();
     ai.stop();
   });
+});
+
+describe('从帖子点开的卡片：填入回复框', () => {
+  it('有结论时带「填入回复框」；从 Tab 打开的没有', async () => {
+    const remote = {
+      handle: 'known',
+      verdict: 'ai',
+      score: 0.8,
+      reply_count: 10,
+      rhythm: null,
+      judged_at: 1,
+      expires_at: 9e12,
+      expired: false,
+      public: true,
+      votes: { ai_count: 1, human_count: 0, listed: false },
+    };
+    const { ai, tick } = setup(
+      '/op/status/520',
+      [tweet('op', '520'), tweet('known', '521')].join(''),
+      { remote, myVote: null, mine: null },
+    );
+    tick();
+    const button = document
+      .querySelectorAll('article')[1]!
+      .querySelector('[data-fs-action="ai"]') as HTMLButtonElement;
+    button.click();
+    await vi.waitFor(() =>
+      expect(document.querySelector('#fs-ai-panel .fs-ai-level')).not.toBeNull(),
+    );
+    const fill = [...document.querySelectorAll('#fs-ai-panel button')].find(
+      (b) => b.textContent === '填入回复框',
+    );
+    expect(fill).not.toBeUndefined();
+    // 面板上必须明确写着发送仍由用户点，不能让人以为扩展会替发
+    expect((fill as HTMLButtonElement).title).toContain('你点「回复」');
+    ai.stop();
+  });
+
+  it('主页 Tab 打开的卡片不出现「填入回复框」（没有具体帖子可回）', async () => {
+    const { ai, tick } = setup(
+      '/Alice',
+      `<div data-testid="primaryColumn"><nav><div role="tablist">
+      <div role="presentation"><a role="tab" aria-selected="true" href="/Alice"><div><span>帖子</span></div></a></div>
+      <div role="presentation"><a role="tab" aria-selected="false" href="/Alice/with_replies"><div><span>回复</span></div></a></div>
+    </div></nav></div>`,
+      {
+        remote: {
+          handle: 'alice',
+          verdict: 'ai',
+          score: 0.93,
+          reply_count: 12,
+          rhythm: null,
+          judged_at: 1,
+          expires_at: 9e12,
+          expired: false,
+          public: true,
+          votes: { ai_count: 2, human_count: 0, listed: false },
+        },
+        myVote: null,
+        mine: null,
+      },
+    );
+    tick();
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-fs-ai-tab]')?.textContent).toBe('AI 味95%'),
+    );
+    (document.querySelector('[data-fs-ai-tab] a') as HTMLAnchorElement).click();
+    expect(document.querySelector('#fs-ai-panel .fs-ai-level')).not.toBeNull();
+    const fill = [...document.querySelectorAll('#fs-ai-panel button')].find(
+      (b) => b.textContent === '填入回复框',
+    );
+    expect(fill).toBeUndefined();
+    ai.stop();
+  });
+});
+
+describe('检测跳转到新标签页时保留原帖上下文', () => {
+  it('点未测过的账号：新标签 URL 带上那条帖子的 ID，测完才能挂「填入回复框」', async () => {
+    const { ai, tick, send } = setup(
+      '/op/status/530',
+      [tweet('op', '530'), tweet('stranger', '531')].join(''),
+      { remote: null, myVote: null, mine: null },
+    );
+    tick();
+    await new Promise((r) => setTimeout(r, 0));
+    const button = document
+      .querySelectorAll('article')[1]!
+      .querySelector('[data-fs-action="ai"]') as HTMLButtonElement;
+    button.click();
+    await vi.waitFor(() => {
+      const call = send.mock.calls.find(
+        ([m]) => (m as { type?: string }).type === 'feedsieve:open-tab',
+      );
+      expect(call).toBeTruthy();
+      const url = new URL((call![0] as { url: string }).url);
+      expect(url.searchParams.get('fs_ai')).toBe('stranger');
+      // 关键：帖子 ID 要一起带过去，否则检测在新标签页做完后卡片上没有回帖入口
+      expect(url.searchParams.get('fs_post')).toBe('531');
+    });
+    ai.stop();
+  });
+
+  it('回复页带 fs_post 自动开测后，结论卡上出现「填入回复框」', async () => {
+    const send = vi.fn(async (msg: unknown) => {
+      const type = (msg as { type?: string }).type;
+      if (type === 'feedsieve:ai-lookup') return { remote: null, myVote: null, mine: null };
+      return null;
+    });
+    history.replaceState(null, '', '/stranger/with_replies?fs_ai=stranger&fs_post=531');
+    document.body.innerHTML = tweet('stranger', '531');
+    (globalThis as unknown as { browser: unknown }).browser = {
+      runtime: {
+        onMessage: { addListener: vi.fn(), removeListener: vi.fn() },
+        sendMessage: vi.fn(),
+      },
+      storage: {
+        onChanged: { addListener: vi.fn(), removeListener: vi.fn() },
+        local: { get: vi.fn(async () => ({})) },
+      },
+    };
+    const ai = createAiCheck({
+      getLanguage: () => 'zh',
+      getSelfHandle: () => 'me',
+      send,
+    });
+    ai.start();
+    // 自动开测会先读页面；这里只验证地址参数被消费掉，不再残留 fs_post
+    await vi.waitFor(() => expect(location.search).not.toContain('fs_post'));
+    ai.stop();
+  });
+});
+
+it('无 data-testid 新版 X 结构在 scope=blue 时也能识别认证标记并挂出 AI 味标签', async () => {
+  const { ai, tick } = setup(
+    '/op/status/1800000000000000000',
+    `<div role="link">${REDESIGN_TWEET_HTML}</div>`,
+    undefined,
+    {
+      aiListV1: { at: Date.now(), entries: [['sample_user', 0.92, 1]] },
+      aiCheckSettingsV1: { mode: 'mark', scope: 'blue', markFollowing: false },
+    },
+  );
+  tick();
+  await new Promise((r) => setTimeout(r, 0));
+  tick();
+  const mark = document.querySelector('.x-middot-group .fs-ai-mark');
+  expect(mark?.textContent ?? '').toContain('AI 味');
+  ai.stop();
+});
+
+it('无 cellInnerDiv 的新版 X 在 mode=fold 下仍能折叠 AI 回复、点开且不冒泡触发外层跳转', async () => {
+  const cardClicked = vi.fn();
+  const { ai, tick } = setup(
+    '/op/status/1800000000000000000',
+    `<div role="link" id="outer-card">${REDESIGN_TWEET_HTML}</div>`,
+    undefined,
+    {
+      aiListV1: { at: Date.now(), entries: [['sample_user', 0.92, 1]] },
+      aiCheckSettingsV1: { mode: 'fold', scope: 'all', markFollowing: false },
+    },
+  );
+  document.getElementById('outer-card')!.addEventListener('click', cardClicked);
+  tick();
+  await new Promise((r) => setTimeout(r, 0));
+  tick();
+  const article = document.querySelector('article')!;
+  expect(article.getAttribute('data-fs-ai-fold')).toBe('1');
+  const foldbar = article.querySelector<HTMLElement>('.fs-ai-foldbar')!;
+  expect(foldbar).not.toBeNull();
+  foldbar.click();
+  expect(cardClicked).not.toHaveBeenCalled();
+  foldbar.querySelector<HTMLButtonElement>('button')!.click();
+  expect(article.hasAttribute('data-fs-ai-fold')).toBe(false);
+  expect(cardClicked).not.toHaveBeenCalled();
+  ai.stop();
+});
+
+it('无 primaryColumn 的新版主页仍能挂载「AI 味」Tab 且不把自己克隆的 Tab 当回复页链接', async () => {
+  const { ai, tick } = setup(
+    '/Alice',
+    `<main><nav><div role="tablist">
+      <div role="presentation"><a role="tab" aria-selected="true" href="/Alice"><span>帖子</span></a></div>
+      <div role="presentation"><a role="tab" aria-selected="false" href="/Alice/with_replies"><span>回复</span></a></div>
+    </div></nav></main>`,
+    {
+      remote: {
+        handle: 'alice',
+        verdict: 'ai',
+        score: 0.93,
+        reply_count: 12,
+        rhythm: null,
+        judged_at: 1,
+        expires_at: 9e12,
+        expired: false,
+        public: true,
+        votes: { ai_count: 2, human_count: 0, listed: false },
+      },
+      myVote: null,
+      mine: null,
+    },
+  );
+  tick();
+  await vi.waitFor(() =>
+    expect(document.querySelector('[data-fs-ai-tab]')?.textContent).toBe('AI 味95%'),
+  );
+  expect(document.querySelectorAll('[data-fs-ai-tab]')).toHaveLength(1);
+  ai.stop();
+});
+
+it('新版 X 评论区的机器人检测入口插在作者首行 @handle 前面，不塞进时间戳 span', () => {
+  const focalHtml = `
+    <article class="flex flex-col gap-3">
+      <div class="flex items-center gap-2">
+        <a href="/emoji_op"><div class="x-avatar"><img src="https://pbs.twimg.com/profile_images/1/op.jpg" /></div></a>
+        <div class="flex flex-col">
+          <div><a href="/emoji_op"><div class="font-bold">主帖<img alt="🌸" src="https://abs-0.twimg.com/emoji/v2/svg/1f338.svg" /></div></a></div>
+          <div><a href="/emoji_op"><span>@emoji_op</span></a></div>
+        </div>
+      </div>
+      <div class="whitespace-pre-wrap wrap-anywhere"><span>主帖正文</span></div>
+      <div><a href="/emoji_op/status/1800000000000000000">上午10:00</a></div>
+      <div role="group"><div data-engagement-action="like"><button aria-label="点赞"></button></div></div>
+    </article>`;
+  const opSelfReply = REDESIGN_TWEET_HTML.replaceAll('sample_user', 'emoji_op').replaceAll(
+    '1800000000000000001',
+    '1800000000000000002',
+  );
+  const { ai, tick } = setup(
+    '/emoji_op/status/1800000000000000000',
+    `${focalHtml}${opSelfReply}${REDESIGN_TWEET_HTML}`,
+  );
+  tick();
+  const articles = [...document.querySelectorAll('article')];
+  // 带 Twemoji 昵称的主帖被正确认出，主帖与主帖作者自评都不加机器人入口，第三方回复照常加
+  expect(articles.map((a) => !!a.querySelector('.fs-ai-entry'))).toEqual([false, false, true]);
+  const entry = articles[2]!.querySelector<HTMLElement>('.fs-ai-entry')!;
+  const timeSpan = articles[2]!.querySelector(
+    'a[href$="/status/1800000000000000001"]',
+  )!.parentElement!;
+  expect(timeSpan.contains(entry)).toBe(false);
+  expect(entry.nextElementSibling?.textContent?.trim()).toBe('@sample_user');
+  ai.stop();
 });

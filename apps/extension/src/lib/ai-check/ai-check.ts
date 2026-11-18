@@ -14,6 +14,8 @@
 import {
   contextFromPath,
   extractFeedItem,
+  findTweetAuthorArea,
+  findTweetAvatarImg,
   profileFromPath,
   tweetSelectors,
 } from '@feedsieve/x-adapter';
@@ -32,6 +34,7 @@ import {
 import { flavorOf, type Lang } from '@feedsieve/shared';
 import { canvasToBlob, loadAvatar } from '../share/canvas-kit';
 import { drawShareCard, formatGap, spreadLabel } from './share-card';
+import { fillReplyComposer } from '../compose/reply-composer';
 import {
   AI_JUDGE_MESSAGE,
   AI_LIST_KEY,
@@ -94,6 +97,17 @@ const TEXT = {
     download: '下载',
     copied: '已复制，去发帖粘贴',
     downloaded: '已下载',
+    fillReply: '填入回复框',
+    fillReplyTip: '打开这条帖子的回复框并放上报告图；发不发出仍由你点「回复」',
+    filling: '正在填入…',
+    filled: '已填入回复框，图片传完再点「回复」',
+    fillFailed: {
+      no_article: '这条帖子已不在页面上，滚回去再试',
+      no_reply_button: '没找到回复按钮',
+      no_editor: '回复框没打开',
+      draft_not_empty: '回复框里已经有内容了，没动它',
+      upload_timeout: '图片没传上去，先点「复制报告图」手动粘贴',
+    },
     retry: '重试',
     close: '关闭',
     cached: '近期已有人测过',
@@ -143,6 +157,17 @@ const TEXT = {
     download: 'Download',
     copied: 'Copied. Paste it into a post',
     downloaded: 'Downloaded',
+    fillReply: 'Fill reply box',
+    fillReplyTip: 'Opens this post’s reply box with the image attached. You still press Reply',
+    filling: 'Filling…',
+    filled: 'Image attached. Press Reply when it finishes uploading',
+    fillFailed: {
+      no_article: 'This post scrolled away. Find it again and retry',
+      no_reply_button: 'Reply button not found',
+      no_editor: 'The reply box did not open',
+      draft_not_empty: 'The reply box already has text. Left it untouched',
+      upload_timeout: 'Upload failed. Use Copy image and paste it yourself',
+    },
     retry: 'Retry',
     close: 'Close',
     cached: 'Checked recently by someone',
@@ -335,6 +360,8 @@ export function createAiCheck(deps: {
 }) {
   let running: { handle: string; token: number } | null = null;
   let panelHandle: string | null = null;
+  /** 卡片是从哪条帖子点开的：报告卡上的「填入回复框」要回到这条帖子的回复框 */
+  let panelPost: { handle: string; postId: string } | null = null;
   /** 卡片打开时的页面地址：离开这个页面才收起（详情页、主页都能开卡片） */
   let panelPath: string | null = null;
   let token = 0;
@@ -505,9 +532,8 @@ export function createAiCheck(deps: {
   }
 
   function isBlue(article: Element): boolean {
-    return !!article.querySelector(
-      `${tweetSelectors.authorNameArea} [data-testid="icon-verified"]`,
-    );
+    const area = findTweetAuthorArea(article);
+    return !!area?.querySelector(tweetSelectors.verifiedBadge);
   }
 
   function inScope(article: Element): boolean {
@@ -524,7 +550,7 @@ export function createAiCheck(deps: {
 
   /** 通知页的回复卡片在 User-Name 后面有一行「回复 @你 / Replying to @you」 */
   function hasReplyContext(article: Element): boolean {
-    const name = article.querySelector(tweetSelectors.authorNameArea);
+    const name = findTweetAuthorArea(article);
     if (!name) return false;
     const text = (article.textContent ?? '').replace(/\s+/g, ' ');
     const nameText = (name.textContent ?? '').replace(/\s+/g, ' ');
@@ -539,10 +565,46 @@ export function createAiCheck(deps: {
    * 直接挂会让「AI 味 85%」把「★1.8K」吞进按钮里。
    */
   function nameRowOf(article: Element): Element | null {
-    const area = article.querySelector(tweetSelectors.authorNameArea);
+    const area = findTweetAuthorArea(article);
     if (!area) return null;
-    const rows = [...area.children];
+    const rows = [...area.children].filter(
+      (child) =>
+        !child.classList.contains('fs-tier') &&
+        !child.classList.contains('fs-ai-mark') &&
+        !child.classList.contains('fs-ai-entry'),
+    );
     return rows[rows.length - 1] ?? area;
+  }
+
+  function entrySlotOf(
+    article: Element,
+    handle: string,
+  ): { parent: Element; before: ChildNode | null } | null {
+    const area = findTweetAuthorArea(article);
+    if (!area) return null;
+    const atHandle = `@${handle.toLowerCase()}`;
+    const handleNode = [...area.querySelectorAll('a, span')].find(
+      (node) =>
+        !node.classList.contains('fs-ai-entry') &&
+        (node.textContent ?? '').trim().toLowerCase() === atHandle,
+    );
+    if (handleNode) {
+      let slot: Element = handleNode;
+      while (
+        slot.parentElement &&
+        slot.parentElement !== area &&
+        slot.parentElement.tagName === 'SPAN' &&
+        [...slot.parentElement.children].filter((c) => !c.classList.contains('fs-ai-entry'))
+          .length <= 1
+      ) {
+        slot = slot.parentElement;
+      }
+      if (slot.parentElement) {
+        return { parent: slot.parentElement, before: slot };
+      }
+    }
+    const row = nameRowOf(article);
+    return row ? { parent: row, before: row.firstChild } : null;
   }
 
   /** 把「折叠了 N 条」那一行插到 cell 顶部；X 重渲冲掉后由 sync 逻辑再调一次。 */
@@ -554,6 +616,9 @@ export function createAiCheck(deps: {
   ): void {
     cell.querySelectorAll(':scope > .fs-ai-foldbar').forEach((b) => b.remove());
     const bar = el('div', 'fs-ai-foldbar');
+    bar.addEventListener('click', (event) => {
+      event.stopPropagation();
+    });
     bar.appendChild(
       el(
         'span',
@@ -637,14 +702,14 @@ export function createAiCheck(deps: {
       const mark =
         protectedAccount || settings.mode === 'off' || !inScope(article) ? null : markFor(handle);
       const markKey = mark ? `${handle}:${mark.percent}:${mark.tone}:${settings.mode}` : '-';
-      const cell = article.closest(tweetSelectors.timelineCell);
+      const foldHost = article.closest(tweetSelectors.timelineCell) ?? article;
       if (article.getAttribute(MARK_ATTR) !== markKey) {
         article.setAttribute(MARK_ATTR, markKey);
         article.querySelectorAll('.fs-ai-mark').forEach((m) => m.remove());
         if (mark) article.setAttribute(TONE_ATTR, mark.tone);
         else article.removeAttribute(TONE_ATTR);
-        cell?.removeAttribute(FOLD_ATTR);
-        cell?.querySelectorAll(':scope > .fs-ai-foldbar').forEach((b) => b.remove());
+        foldHost.removeAttribute(FOLD_ATTR);
+        foldHost.querySelectorAll(':scope > .fs-ai-foldbar').forEach((b) => b.remove());
         if (mark) {
           const nameRow = nameRowOf(article);
           const label = mark.percent < 0 ? t().markListed : t().mark(mark.percent);
@@ -657,7 +722,7 @@ export function createAiCheck(deps: {
           pill.addEventListener('click', (event) => {
             event.preventDefault();
             event.stopPropagation();
-            void openFor(handle);
+            void openFor(handle, item.postId ?? undefined);
           });
           nameRow?.appendChild(pill);
         }
@@ -667,23 +732,28 @@ export function createAiCheck(deps: {
       // 用户只能刷新。每轮都校验一次：该折的补回折叠条，不该折的连同属性一起清掉。
       const shouldFold =
         !!mark && settings.mode === 'fold' && !isFocal && !unfolded.has(item.postId);
-      if (cell) {
-        if (shouldFold) {
-          if (!cell.hasAttribute(FOLD_ATTR) || !cell.querySelector(':scope > .fs-ai-foldbar')) {
-            mountFoldBar(cell, item.postId, item.author.displayName || `@${handle}`, mark);
-          }
-        } else if (cell.hasAttribute(FOLD_ATTR)) {
-          cell.removeAttribute(FOLD_ATTR);
-          cell.querySelectorAll(':scope > .fs-ai-foldbar').forEach((b) => b.remove());
+      if (shouldFold) {
+        if (
+          !foldHost.hasAttribute(FOLD_ATTR) ||
+          !foldHost.querySelector(':scope > .fs-ai-foldbar')
+        ) {
+          mountFoldBar(foldHost, item.postId, item.author.displayName || `@${handle}`, mark);
         }
+      } else if (foldHost.hasAttribute(FOLD_ATTR)) {
+        foldHost.removeAttribute(FOLD_ATTR);
+        foldHost.querySelectorAll(':scope > .fs-ai-foldbar').forEach((b) => b.remove());
       }
 
-      // 入口：没有结论时在作者名后面挂一个灰色机器人；有结论就让位给 AI 味标签。
-      // 和标签同一个位置，用户不用记两个地方；拉黑留在动作栏最右。
-      const entryRow = mark ? null : nameRowOf(article);
+      // 入口：没有结论时在 @handle 前面挂一个灰色机器人；有结论就让位给 AI 味标签。
+      // 新版 X 的 @handle 在首行 flex 容器内而非时间戳 span 里，按 @handle 锚点定位不挤进时间戳。
+      const entrySlot = mark ? null : entrySlotOf(article, handle);
       const entry = article.querySelector<HTMLElement>('[data-fs-action="ai"]');
-      if (eligible && entryRow && !mark) {
-        if (!entry || entry.parentElement !== entryRow) {
+      if (eligible && entrySlot && !mark) {
+        if (
+          !entry ||
+          entry.parentElement !== entrySlot.parent ||
+          entry.nextSibling !== entrySlot.before
+        ) {
           entry?.remove();
           const btn = el('button', 'fs-ai-entry');
           btn.type = 'button';
@@ -694,10 +764,9 @@ export function createAiCheck(deps: {
           btn.addEventListener('click', (event) => {
             event.preventDefault();
             event.stopPropagation();
-            void openFor(handle);
+            void openFor(handle, item.postId ?? undefined);
           });
-          // 插到 @handle 前面：紧挨作者名，不放到行末被时间和徽标挤开
-          entryRow.insertBefore(btn, entryRow.firstChild);
+          entrySlot.parent.insertBefore(btn, entrySlot.before);
         }
       } else {
         entry?.remove();
@@ -705,28 +774,51 @@ export function createAiCheck(deps: {
     }
   }
 
-  /** 点机器人图标 / 标签：有结论直接出报告，没有就去这个人的回复页测 */
-  /** 在他的回复页开测：新标签打开，不动当前页（用户可能正在看评论或详情）。 */
-  function openInNewTab(handle: string, force: boolean): void {
-    const url = `https://x.com/${handle}/with_replies?fs_ai=${handle}${force ? '&force=1' : ''}`;
-    void deps.send({ type: 'feedsieve:open-tab', url }).catch(() => undefined);
+  /**
+   * 在他的回复页开测：新标签打开，不动当前页（用户可能正在看评论或详情）。
+   *
+   * postId 一起带过去：检测是跳到另一个标签页做完的，不带着它就丢了「这条卡片是从哪条
+   * 帖子点开的」这个上下文，测完的新卡片上就不会出现「填入回复框」（用户第一次实测
+   * 正是卡在这里）。
+   */
+  function openInNewTab(handle: string, force: boolean, postId?: string): void {
+    const params = new URLSearchParams({ fs_ai: handle });
+    if (force) params.set('force', '1');
+    if (postId) params.set('fs_post', postId);
+    void deps
+      .send({ type: 'feedsieve:open-tab', url: `https://x.com/${handle}/with_replies?${params}` })
+      .catch(() => undefined);
   }
 
-  async function openFor(handle: string): Promise<void> {
+  /**
+   * 点机器人图标 / 标签：有结论直接出报告，没有就去这个人的回复页测。
+   * postId 是点开卡片的那条帖子，报告卡上的「填入回复框」要用它回到原帖；
+   * 从 Tab / 弹窗打开的没有这条上下文，那一行按钮就不出现。
+   */
+  async function openFor(handle: string, postId?: string): Promise<void> {
     const k = known.has(handle) ? known.get(handle) : await lookup(handle);
     if (judged(k) && !k.expired) {
-      showKnown(handle, k);
+      showKnown(handle, k, postId);
       return;
     }
-    openInNewTab(handle, false);
+    openInNewTab(handle, false, postId);
   }
 
   // ---- 入口一：主页 Tab 栏的「AI 味」Tab ----
   function repliesTab(handle: string): HTMLAnchorElement | null {
-    for (const a of document.querySelectorAll<HTMLAnchorElement>(
-      '[data-testid="primaryColumn"] a[role="tab"]',
+    const target = `/${handle.toLowerCase()}/with_replies`;
+    const root = document.querySelector('[data-testid="primaryColumn"]') ?? document;
+    for (const a of root.querySelectorAll<HTMLAnchorElement>(
+      '[role="tablist"] a[role="tab"], a[role="tab"]',
     )) {
-      if (a.getAttribute('href')?.toLowerCase() === `/${handle}/with_replies`) return a;
+      if (a.hasAttribute(TAB_ATTR) || a.closest(`[${TAB_ATTR}]`)) continue;
+      let pathname: string;
+      try {
+        pathname = new URL(a.getAttribute('href') ?? '', location.origin).pathname;
+      } catch {
+        continue;
+      }
+      if (pathname.replace(/\/+$/, '').toLowerCase() === target) return a;
     }
     return null;
   }
@@ -818,38 +910,51 @@ export function createAiCheck(deps: {
   /** 页面上这个人的头像地址：主页头部的大头像，或者 TA 某条帖子旁边的头像 */
   function avatarOnPage(handle: string): string | null {
     for (const a of document.querySelectorAll<HTMLAnchorElement>('a[href$="/photo"]')) {
-      if (a.getAttribute('href')?.toLowerCase() === `/${handle}/photo`) {
+      let pathname: string;
+      try {
+        pathname = new URL(a.getAttribute('href') ?? '', location.origin).pathname;
+      } catch {
+        continue;
+      }
+      if (pathname.toLowerCase() === `/${handle.toLowerCase()}/photo`) {
         const src = a.querySelector('img')?.src;
         if (src) return src;
       }
     }
     for (const article of document.querySelectorAll(tweetSelectors.article)) {
       const item = extractFeedItem(article, 'other');
-      if (item?.author.handle.toLowerCase() !== handle) continue;
-      const src = article.querySelector<HTMLImageElement>(
-        '[data-testid="Tweet-User-Avatar"] img',
-      )?.src;
+      if (item?.author.handle.toLowerCase() !== handle.toLowerCase()) continue;
+      const src = findTweetAvatarImg(article)?.src;
       if (src) return src;
     }
     return null;
   }
 
   function displayNameOn(handle: string): string | undefined {
+    const lower = handle.toLowerCase();
     const profile = profileFromPath(location.pathname);
-    if (profile?.handle === handle) {
+    if (profile?.handle === lower) {
       const name = document.querySelector('[data-testid="UserName"] span')?.textContent?.trim();
       if (name) return name;
     }
     for (const article of document.querySelectorAll(tweetSelectors.article)) {
       const item = extractFeedItem(article, 'other');
-      if (item?.author.handle.toLowerCase() === handle && item.author.displayName) {
+      if (item?.author.handle.toLowerCase() === lower && item.author.displayName) {
         return item.author.displayName;
+      }
+    }
+    if (profile?.handle === lower) {
+      const titleMatch = /^(?:\(\d+\)\s*)?(.+?)\s*\(@([a-z0-9_]{1,15})\)/i.exec(
+        document.title.trim(),
+      );
+      if (titleMatch?.[2]?.toLowerCase() === lower && titleMatch[1]?.trim()) {
+        return titleMatch[1].trim();
       }
     }
     return undefined;
   }
 
-  function showKnown(handle: string, k: Judged): void {
+  function showKnown(handle: string, k: Judged, postId?: string): void {
     showResult({
       handle,
       displayName: displayNameOn(handle),
@@ -867,6 +972,7 @@ export function createAiCheck(deps: {
       mineOnly: k.mineOnly,
       underReview: k.underReview,
       comment: k.comment,
+      postId,
     });
   }
 
@@ -879,6 +985,7 @@ export function createAiCheck(deps: {
     token += 1;
     running = null;
     panelHandle = null;
+    panelPost = null;
     panelPath = null;
     activeCollector = null;
     panel()?.remove();
@@ -985,6 +1092,8 @@ export function createAiCheck(deps: {
     underReview?: boolean;
     /** 模型锐评；没有就用本地档位评语 */
     comment?: string | null;
+    /** 从时间线某条帖子点开的：给它一个「填入回复框」，从 Tab / 弹窗打开的没有 */
+    postId?: string;
   }): void {
     const lang = deps.getLanguage();
     const text = t();
@@ -992,6 +1101,10 @@ export function createAiCheck(deps: {
     const color = TONE_COLOR[flavor.tone];
     const cv = input.rhythm?.cv ?? 0;
     const body = shell(input.handle);
+    // 进度态重画面板时不会再带 postId：同一个人沿用上一次记下的原帖，
+    // 换了账号就作废（否则 Tab 开的卡片会继承另一个人的帖子）
+    const postId = input.postId ?? (panelPost?.handle === input.handle ? panelPost.postId : null);
+    if (input.postId) panelPost = { handle: input.handle, postId: input.postId };
 
     // 结论行：与分享卡同语法——数字 + 档位徽章并排，不再给「AI 味」小标签和徽章各占一行
     const verdict = el('div', 'fs-ai-verdict');
@@ -1128,6 +1241,37 @@ export function createAiCheck(deps: {
     });
     share.append(copy, dl, link);
     body.appendChild(share);
+
+    // 从某条帖子点开的卡片：多一个「填入回复框」。只把图放进 X 的回复框，
+    // 发不发出仍由用户点「回复」——扩展不替用户公开发言（见 reply-composer.ts）。
+    if (postId) {
+      const fill = el('button', 'fs-ai-primary', text.fillReply);
+      fill.type = 'button';
+      // 只给 title：aria-label 会盖掉可见文字，读屏念出来的和看到的对不上
+      fill.title = text.fillReplyTip;
+      fill.style.marginTop = '10px';
+      fill.addEventListener('click', async () => {
+        if (fill.disabled) return;
+        fill.disabled = true;
+        fill.textContent = text.filling;
+        try {
+          const blob = await canvasToBlob(await card());
+          const outcome = await fillReplyComposer({
+            postId,
+            blob,
+            filename: `ai-flavor-${input.handle}.png`,
+          });
+          toast(body, outcome.ok ? text.filled : text.fillFailed[outcome.reason]);
+        } catch {
+          // 出图或填框抛错也必须把按钮还回去，否则会一直停在「正在填入…」
+          toast(body, text.fillFailed.upload_timeout);
+        } finally {
+          fill.disabled = false;
+          fill.textContent = text.fillReply;
+        }
+      });
+      body.appendChild(fill);
+    }
     if (input.expired) {
       const again = el('button', 'fs-ai-ghost', text.retest);
       again.type = 'button';
@@ -1141,11 +1285,14 @@ export function createAiCheck(deps: {
     void deps.send({ type: AI_OUTCOME_MESSAGE, outcome }).catch(() => undefined);
   }
 
-  async function run(handle: string, force = false): Promise<void> {
+  async function run(handle: string, force = false, postId?: string): Promise<void> {
     if (running?.handle === handle) return;
     const my = ++token;
     running = { handle, token: my };
     stopRequested = false;
+    // 这次检测是被哪条帖子点开的（跨标签页由 fs_post 带过来）。先记下来，
+    // 后面 showResult 才能给新卡片挂上「填入回复框」。
+    if (postId) panelPost = { handle, postId };
     const alive = () =>
       !stopped && token === my && profileFromPath(location.pathname)?.handle === handle;
 
@@ -1424,11 +1571,13 @@ export function createAiCheck(deps: {
     const autoFromUrl = params.get('fs_ai')?.toLowerCase();
     if (autoFromUrl && autoFromUrl === profile.handle) {
       const force = params.get('force') === '1';
+      const postId = params.get('fs_post') ?? undefined;
       params.delete('fs_ai');
       params.delete('force');
+      params.delete('fs_post');
       const qs = params.toString();
       history.replaceState(null, '', location.pathname + (qs ? `?${qs}` : ''));
-      void run(profile.handle, force);
+      void run(profile.handle, force, postId);
       return;
     }
     const auto = sessionStorage.getItem(AUTOSTART_KEY);

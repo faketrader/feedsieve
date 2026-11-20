@@ -23,6 +23,7 @@ import {
   followRatio,
   OUTLIER_MULTIPLE,
   outlierMultiple,
+  resolveConfig,
   shouldShowBreakout,
   type ProfileBaseline,
   type AccountTier,
@@ -37,6 +38,7 @@ import {
   tweetSelectors,
 } from '@feedsieve/x-adapter';
 import type { UiLanguage } from '../platform/i18n';
+import { findAuthorMetaRow } from '../content/author-header';
 import { INSIGHT_COPY, tierTitle } from './copy';
 import {
   compact,
@@ -181,7 +183,9 @@ export function tierHover(
   if (flags.mutualFollowFarm) notes.push(`⚠️ ${t.flagMutual}`);
   if (flags.newAccount) notes.push(`⚠️ ${t.flagNew}`);
   if (flags.abnormalFollowRatio) notes.push(`⚠️ ${t.flagRatio}`);
-  if (tier <= 3) notes.push(`🌱 ${t.coldStartTier}`);
+  if (author.followers <= resolveConfig().coldStartFollowerCap) {
+    notes.push(`🌱 ${t.coldStartTier}`);
+  }
   return { title: `${tierCode(tier)} · ${tierTitle(tier, language)}`, rows, notes };
 }
 
@@ -193,38 +197,48 @@ interface VelocitySlot {
   place: VelocityPlace;
 }
 
+function visibleSlotChildren(node: Element): Element[] {
+  return [...node.children].filter((child) => {
+    if (child.classList.contains(VELOCITY_CLASS) || child.classList.contains(MULTIPLE_CLASS)) {
+      return false;
+    }
+    if (child.hasAttribute('data-plasmo-shadow-container')) return false;
+    if (child.matches('button, a, [role="button"]')) return true;
+    if (child.querySelector('button, a, svg, [role="button"]')) return true;
+    return (child.textContent ?? '').trim().length > 0;
+  });
+}
+
 /**
  * 流速的位置：时间线和详情页都在推文右上角，按钮组（推广 / Grok / ...）的最前面，
- * 用户在哪个页面都在同一个地方找。从 ... 按钮往上找第一个有多个子元素的祖先。
+ * 用户在哪个页面都在同一个地方找。从 ... 按钮往上找第一个有多个可见子元素的祖先；
+ * 跳过第三方扩展注入的空占位节点，且不越过作者信息区把流速放进左侧昵称前。
  * 找不到 ... 按钮时退回动作栏末尾。
  */
 function velocitySlot(article: Element): VelocitySlot | null {
   const caret = findTweetMenuButton(article);
+  const nameArea = findTweetAuthorArea(article);
+  let rowFallback: Element | null = caret?.parentElement ?? null;
   let node: Element | null = caret?.parentElement ?? null;
   while (node && node !== article) {
-    const kids = [...node.children].filter(
-      (child) =>
-        !child.classList.contains(VELOCITY_CLASS) && !child.classList.contains(MULTIPLE_CLASS),
-    );
-    if (kids.length >= 2) return { parent: node, before: kids[0] ?? null, place: 'top' };
+    const kids = visibleSlotChildren(node);
+    if (kids.length >= 2) {
+      if (nameArea && kids.some((k) => k === nameArea || k.contains(nameArea))) {
+        const target = rowFallback ?? caret?.parentElement;
+        if (!target) return null;
+        const firstVisible = visibleSlotChildren(target)[0] ?? target.firstElementChild;
+        return { parent: target, before: firstVisible, place: 'top' };
+      }
+      return { parent: node, before: kids[0] ?? null, place: 'top' };
+    }
+    const style = typeof getComputedStyle === 'function' ? getComputedStyle(node) : null;
+    if (!style || style.display !== 'flex' || !style.flexDirection.startsWith('column')) {
+      rowFallback = node;
+    }
     node = node.parentElement;
   }
   const actionGroup = findTweetActionGroup(article);
   return actionGroup ? { parent: actionGroup, before: null, place: 'bar' } : null;
-}
-
-/**
- * 量级标签的位置：@handle 所在的那一行末尾。
- * 首页这一行是「@handle · 4小时」，详情页是「@handle」（作者名区域在详情页竖排）。
- */
-function handleRow(nameArea: Element): Element | null {
-  const rows = [...nameArea.children].filter(
-    (child) =>
-      !child.classList.contains(TIER_CLASS) &&
-      !child.classList.contains('fs-ai-mark') &&
-      !child.classList.contains('fs-ai-entry'),
-  );
-  return rows[rows.length - 1] ?? null;
 }
 
 function setText(element: Element, text: string): void {
@@ -266,6 +280,16 @@ export function createInsightDecorations(deps: {
   let enabled = true;
   let refreshTimer: number | undefined;
 
+  function statMultiple(stat: TweetInsight | null | undefined, baseline: ProfileBaseline) {
+    if (!stat || stat.kind === 'reply') return null;
+    const at = now();
+    return outlierMultiple(
+      { ...stat, ...(stat.observedAt !== undefined ? { updatedAt: stat.observedAt } : {}) },
+      baseline,
+      at,
+    );
+  }
+
   /**
    * 流速卡片里的相对表现：倍数低于 MULTIPLE_MIN 时页面上不显示，数值仍有地方看。
    * 只算主页主人自己的原创/引用——转帖的作者是别人，不能拿主人的基线去比。
@@ -276,8 +300,7 @@ export function createInsightDecorations(deps: {
     const article = anchor.closest(tweetSelectors.article);
     const item = article ? extractTweetIdentity(article) : null;
     if (!item || item.author.handle.toLowerCase() !== profile.handle) return null;
-    const stat = store.insight(postId, now());
-    return stat && stat.kind !== 'reply' ? outlierMultiple(stat, profile.baseline, now()) : null;
+    return statMultiple(store.insight(postId, now()), profile.baseline);
   }
 
   const hovercard = createHovercard({
@@ -296,7 +319,7 @@ export function createInsightDecorations(deps: {
       if (badge) {
         const profile = deps.profileBaseline?.();
         const stat = store.insight(badge.getAttribute(MULTIPLE_ATTR) ?? '', now());
-        const result = profile && stat ? outlierMultiple(stat, profile.baseline, now()) : null;
+        const result = profile ? statMultiple(stat, profile.baseline) : null;
         if (!profile || !stat || !result) return null;
         return {
           anchor: badge,
@@ -385,8 +408,7 @@ export function createInsightDecorations(deps: {
     const profile = enabled ? deps.profileBaseline?.() : null;
     const found =
       profile && postId && profile.handle === handle ? store.insight(postId, now()) : null;
-    const stat = found && found.kind !== 'reply' ? found : null;
-    const result = profile && stat ? outlierMultiple(stat, profile.baseline, now()) : null;
+    const result = profile ? statMultiple(found, profile.baseline) : null;
     const slot = result && result.value >= MULTIPLE_MIN ? velocitySlot(article) : null;
     if (!result || !slot) {
       existing?.remove();
@@ -412,13 +434,14 @@ export function createInsightDecorations(deps: {
     const existing = nameArea?.querySelector<HTMLElement>(`[${TIER_ATTR}]`);
     const author = enabled ? store.author(handle) : undefined;
     const tier = accountTier(author?.followers);
-    const row = nameArea ? handleRow(nameArea) : null;
+    const row = nameArea ? findAuthorMetaRow(nameArea) : null;
     // 主页资料卡已经写着粉丝数，帖子行上再重复一遍只会挤占 X 的元数据行。
     const onOwnerProfile = profileFromPath(location.pathname)?.handle === handle;
     if (!author || tier === null || author.followers === undefined || !row || onOwnerProfile) {
       existing?.remove();
       return;
     }
+    const aiMark = row.querySelector(':scope > .fs-ai-mark');
     let element = existing;
     if (!element || element.parentElement !== row) {
       element?.remove();
@@ -427,7 +450,13 @@ export function createInsightDecorations(deps: {
       const count = document.createElement('span');
       count.className = 'fs-tier-count';
       element.append(count);
-      row.appendChild(element);
+      if (aiMark) row.insertBefore(element, aiMark);
+      else row.appendChild(element);
+    } else if (
+      aiMark &&
+      aiMark.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING
+    ) {
+      row.insertBefore(element, aiMark);
     }
     setAttr(element, TIER_ATTR, handle);
     setAttr(element, TIER_LEVEL_ATTR, String(tier));
